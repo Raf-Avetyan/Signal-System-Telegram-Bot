@@ -60,90 +60,100 @@ def calculate_channels(df):
 def check_channel_signals(df):
     """
     Check for trade signals based on channel crossings on the latest candle.
+    Guarantees strictly one signal per candle — strongest wins.
 
-    Returns list of signal events:
-    [{"side": "LONG", "signal": "L2", "points": 3, "strength": ..., "price": ...}, ...]
+    Returns list of one signal event max:
+    [{"side": "LONG", "signal": "L+++", "points": 3, "strength": ..., "price": ...}]
     """
     if len(df) < 2:
         return []
 
-    signals = []
     curr = df.iloc[-1]
     prev = df.iloc[-2]
 
-    close = curr["Close"]
+    close      = curr["Close"]
     prev_close = prev["Close"]
 
     # ─── LONG signals (price crossing DOWN through bands) ────
-    # Priority: Outer > Mid > Inner (Strict < means hit from above)
-    if close < curr["OuterDn"]:
-        if prev_close >= prev["OuterDn"]:
-            signals.append({
-                "side":      "LONG",
-                "signal":    "L+++",
-                "points":    SIGNAL_POINTS["L+++"],
-                "strength":  "Strong",
-                "price":     close,
-                "indicator": "Ponch_Trader",
-                "note":      "L+++ confirmation",
-            })
-    elif close < curr["MidDn"]:
-        if prev_close >= prev["MidDn"]:
-            signals.append({
-                "side":      "LONG",
-                "signal":    "L++",
-                "points":    SIGNAL_POINTS["L++"],
-                "strength":  "Strong",
-                "price":     close,
-                "indicator": "Ponch_Trader",
-                "note":      "L++ confirmation",
-            })
-    elif close < curr["InnerDn"]:
-        if prev_close >= prev["InnerDn"]:
-            signals.append({
-                "side":      "LONG",
-                "signal":    "L+",
-                "points":    SIGNAL_POINTS["L+"],
-                "strength":  "Medium",
-                "price":     close,
-                "indicator": "Ponch_Trader",
-                "note":      "L+ confirmation",
-            })
+    # Outer checked first — if triggered, mid/inner are skipped
+    long_sig = None
+
+    if close < curr["OuterDn"] and prev_close >= prev["OuterDn"]:
+        long_sig = {
+            "side":      "LONG",
+            "signal":    "L+++",
+            "points":    SIGNAL_POINTS["L+++"],
+            "strength":  "Strong",
+            "price":     close,
+            "indicator": "Ponch_Trader",
+            "note":      "L+++ confirmation",
+        }
+    elif close < curr["MidDn"] and prev_close >= prev["MidDn"]:
+        long_sig = {
+            "side":      "LONG",
+            "signal":    "L++",
+            "points":    SIGNAL_POINTS["L++"],
+            "strength":  "Strong",
+            "price":     close,
+            "indicator": "Ponch_Trader",
+            "note":      "L++ confirmation",
+        }
+    elif close < curr["InnerDn"] and prev_close >= prev["InnerDn"]:
+        long_sig = {
+            "side":      "LONG",
+            "signal":    "L+",
+            "points":    SIGNAL_POINTS["L+"],
+            "strength":  "Medium",
+            "price":     close,
+            "indicator": "Ponch_Trader",
+            "note":      "L+ confirmation",
+        }
 
     # ─── SHORT signals (price crossing UP through bands) ─────
-    # Priority: Outer > Mid > Inner (Strict > means hit from below)
-    if close > curr["OuterUp"]:
-        if prev_close <= prev["OuterUp"]:
-            signals.append({
-                "side":      "SHORT",
-                "signal":    "S+++",
-                "points":    SIGNAL_POINTS["S+++"],
-                "strength":  "Strong",
-                "price":     close,
-                "indicator": "Ponch_Trader",
-                "note":      "S+++ confirmation",
-            })
-    elif close > curr["MidUp"]:
-        if prev_close <= prev["MidUp"]:
-            signals.append({
-                "side":      "SHORT",
-                "signal":    "S++",
-                "points":    SIGNAL_POINTS["S++"],
-                "strength":  "Strong",
-                "price":     close,
-                "indicator": "Ponch_Trader",
-                "note":      "S++ confirmation",
-            })
-    elif close > curr["InnerUp"]:
-        if prev_close <= prev["InnerUp"]:
-            signals.append({
-                "side":      "SHORT",
-                "signal":    "S+",
-                "points":    SIGNAL_POINTS["S+"],
-                "strength":  "Medium",
-                "price":     close,
-                "indicator": "Ponch_Trader",
-                "note":      "S+ confirmation",
-            })
+    # Outer checked first — if triggered, mid/inner are skipped
+    short_sig = None
 
-    return signals
+    if close > curr["OuterUp"] and prev_close <= prev["OuterUp"]:
+        short_sig = {
+            "side":      "SHORT",
+            "signal":    "S+++",
+            "points":    SIGNAL_POINTS["S+++"],
+            "strength":  "Strong",
+            "price":     close,
+            "indicator": "Ponch_Trader",
+            "note":      "S+++ confirmation",
+        }
+    elif close > curr["MidUp"] and prev_close <= prev["MidUp"]:
+        short_sig = {
+            "side":      "SHORT",
+            "signal":    "S++",
+            "points":    SIGNAL_POINTS["S++"],
+            "strength":  "Strong",
+            "price":     close,
+            "indicator": "Ponch_Trader",
+            "note":      "S++ confirmation",
+        }
+    elif close > curr["InnerUp"] and prev_close <= prev["InnerUp"]:
+        short_sig = {
+            "side":      "SHORT",
+            "signal":    "S+",
+            "points":    SIGNAL_POINTS["S+"],
+            "strength":  "Medium",
+            "price":     close,
+            "indicator": "Ponch_Trader",
+            "note":      "S+ confirmation",
+        }
+
+    # ─── MERGE: one signal per candle, strongest wins ────────
+    # If both long and short fired (wide candle crossing both bands),
+    # keep only the one with higher points value
+    if long_sig and short_sig:
+        return [long_sig if long_sig["points"] >= short_sig["points"] else short_sig]
+
+    if long_sig:
+        return [long_sig]
+
+    if short_sig:
+        return [short_sig]
+
+    return []
