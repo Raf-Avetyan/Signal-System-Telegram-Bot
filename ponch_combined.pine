@@ -78,9 +78,13 @@ c_low  = d_open - max_dump
 // ══════════════════════════════════════════════════════════════════════
 
 f_draw_lvl(val, txt, col, style, width) =>
+    var line l = na
+    var label lbl = na
     if barstate.islast and not na(val)
-        line.new(bar_index - 10, val, bar_index + 5, val, xloc=xloc.bar_index, color=col, style=style, width=width)
-        label.new(bar_index + 6, val, txt, xloc=xloc.bar_index, color=color.new(color.black, 100), textcolor=col, style=label.style_label_left, size=size.small)
+        line.delete(l)
+        label.delete(lbl)
+        l := line.new(bar_index - 10, val, bar_index + 5, val, xloc=xloc.bar_index, color=col, style=style, width=width)
+        lbl := label.new(bar_index + 6, val, txt, xloc=xloc.bar_index, color=color.new(color.black, 100), textcolor=col, style=label.style_label_left, size=size.small)
 
 // Draw Levels matching screenshots
 f_draw_lvl(pdh, "PDH", color.gray, line.style_dotted, 1)
@@ -197,8 +201,6 @@ else if scalp_state == -1
 
 plotshape(open_long, "MOM Open Long", shape.circle, location.belowbar, color.new(color.yellow, 0), size=size.tiny)
 plotshape(open_short, "MOM Open Short", shape.circle, location.abovebar, color.new(color.yellow, 0), size=size.tiny)
-plotshape(confirm_long, "MOM Confirm Long", shape.labelup, location.belowbar, color.new(color.green, 0), text="CONFIRM", textcolor=color.white, size=size.normal)
-plotshape(confirm_short, "MOM Confirm Short", shape.labeldown, location.abovebar, color.new(color.red, 0), text="CONFIRM", textcolor=color.white, size=size.normal)
 
 // ══════════════════════════════════════════════════════════════════════
 // LEVELS TABLE
