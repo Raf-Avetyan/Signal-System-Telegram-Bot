@@ -1,0 +1,231 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Raf_Ave
+
+//@version=6
+indicator("Ponch Combined", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ══════════════════════════════════════════════════════════════════════
+// SETTINGS
+// ══════════════════════════════════════════════════════════════════════
+
+grp_ema = "EMA Channels"
+ema1_len = input.int(9, "Inner EMA", group=grp_ema)
+ema2_len = input.int(21, "Mid EMA", group=grp_ema)
+ema3_len = input.int(55, "Outer EMA", group=grp_ema)
+atr_len  = input.int(14, "ATR Length", group=grp_ema)
+mult_inner = input.float(1.0, "Inner Multiplier", group=grp_ema)
+mult_mid   = input.float(2.5, "Mid Multiplier", group=grp_ema)
+mult_outer = input.float(5.0, "Outer Multiplier", group=grp_ema)
+
+grp_vol = "Volatility Levels"
+adr_len = input.int(14, "ADR Lookback", group=grp_vol)
+
+grp_mom = "Momentum Scalper"
+mom_rsi_len = input.int(14, "Momentum RSI", group=grp_mom)
+mom_smooth  = input.int(5, "Momentum Smooth", group=grp_mom)
+mom_ob      = input.int(70, "Momentum OB", group=grp_mom)
+mom_os      = input.int(30, "Momentum OS", group=grp_mom)
+
+// ══════════════════════════════════════════════════════════════════════
+// HELPER FUNCTIONS
+// ══════════════════════════════════════════════════════════════════════
+
+// Non-repainting historical daily checks
+f_sec(res, expr) => request.security(syminfo.tickerid, res, expr, barmerge.gaps_off, barmerge.lookahead_on)
+
+f_sma_pump() => ta.sma(high - open, adr_len)[1]
+f_sma_dump() => ta.sma(open - low, adr_len)[1]
+f_max_pump() => ta.highest(high - open, adr_len)[1]
+f_max_dump() => ta.highest(open - low, adr_len)[1]
+
+check_cross(curr_h, curr_l, prev_h, prev_l, lvl, is_long) =>
+    bool sig = false
+    if is_long
+        sig := curr_l <= lvl and curr_h >= lvl and prev_l > lvl
+    else
+        sig := curr_h >= lvl and curr_l <= lvl and prev_h < lvl
+    sig
+
+// ══════════════════════════════════════════════════════════════════════
+// DAILY / WEEKLY / MONTHLY LEVELS
+// ══════════════════════════════════════════════════════════════════════
+
+// Lookahead=off for the DO prevents repainting today
+d_open = request.security(syminfo.tickerid, "D", open)
+
+pdh = f_sec("D", high[1])
+pdl = f_sec("D", low[1])
+
+pwh = f_sec("W", high[1])
+pwl = f_sec("W", low[1])
+
+pmh = f_sec("M", high[1])
+pml = f_sec("M", low[1])
+
+avg_pump = f_sec("D", f_sma_pump())
+avg_dump = f_sec("D", f_sma_dump())
+max_pump = f_sec("D", f_max_pump())
+max_dump = f_sec("D", f_max_dump())
+
+d_res  = d_open + avg_pump
+d_sup  = d_open - avg_dump
+c_high = d_open + max_pump
+c_low  = d_open - max_dump
+
+// Plot Levels 
+plot(pdh, "PDH", color=color.new(color.gray, 50), style=plot.style_linebr)
+plot(pdl, "PDL", color=color.new(color.gray, 50), style=plot.style_linebr)
+plot(d_open, "DO", color=color.new(color.white, 50), style=plot.style_cross, linewidth=1)
+plot(d_res, "Resistance", color=color.new(color.red, 50), style=plot.style_linebr)
+plot(d_sup, "Support", color=color.new(color.green, 50), style=plot.style_linebr)
+
+// ══════════════════════════════════════════════════════════════════════
+// EMA CHANNELS
+// ══════════════════════════════════════════════════════════════════════
+
+atr_val = ta.atr(atr_len)
+
+ema1 = ta.ema(close, ema1_len)
+inner_up = ema1 + atr_val * mult_inner
+inner_dn = ema1 - atr_val * mult_inner
+
+ema2 = ta.ema(close, ema2_len)
+mid_up = ema2 + atr_val * mult_mid
+mid_dn = ema2 - atr_val * mult_mid
+
+ema3 = ta.ema(close, ema3_len)
+outer_up = ema3 + atr_val * mult_outer
+outer_dn = ema3 - atr_val * mult_outer
+
+p_up1 = plot(inner_up, "Inner Up", color=color.new(color.teal, 70))
+p_dn1 = plot(inner_dn, "Inner Dn", color=color.new(color.teal, 70))
+fill(p_up1, p_dn1, color.new(color.teal, 90), "Inner Band")
+
+plot(mid_up, "Mid Up", color=color.new(color.yellow, 70))
+plot(mid_dn, "Mid Dn", color=color.new(color.yellow, 70))
+plot(outer_up, "Outer Up", color=color.new(color.fuchsia, 70))
+plot(outer_dn, "Outer Dn", color=color.new(color.fuchsia, 70))
+
+// ══════════════════════════════════════════════════════════════════════
+// CHANNEL TRADE SIGNALS (L1-L3, S1-S3)
+// ══════════════════════════════════════════════════════════════════════
+
+cross_over_inner_dn = ta.crossover(close, inner_dn) 
+cross_under_inner_up = ta.crossunder(close, inner_up)
+cross_over_mid_dn = ta.crossover(close, mid_dn)
+cross_under_mid_up = ta.crossunder(close, mid_up)
+cross_over_outer_dn = ta.crossover(close, outer_dn)
+cross_under_outer_up = ta.crossunder(close, outer_up)
+
+plotshape(cross_over_inner_dn, "L1", shape.triangleup, location.belowbar, color.new(color.green,0), text="L1", size=size.tiny)
+plotshape(cross_under_inner_up, "S1", shape.triangledown, location.abovebar, color.new(color.red,0), text="S1", size=size.tiny)
+plotshape(cross_over_mid_dn, "L2", shape.triangleup, location.belowbar, color.new(color.green,0), text="2", size=size.small)
+plotshape(cross_under_mid_up, "S2", shape.triangledown, location.abovebar, color.new(color.red,0), text="2", size=size.small)
+plotshape(cross_over_outer_dn, "L3", shape.triangleup, location.belowbar, color.new(color.green,0), text="3", size=size.normal)
+plotshape(cross_under_outer_up, "S3", shape.triangledown, location.abovebar, color.new(color.red,0), text="3", size=size.normal)
+
+
+// ══════════════════════════════════════════════════════════════════════
+// LIQUIDITY SWEEPS AND VOLATILITY TOUCHES
+// ══════════════════════════════════════════════════════════════════════
+
+sweep_pdh = check_cross(high, low, high[1], low[1], pdh, false)
+sweep_pdl = check_cross(high, low, high[1], low[1], pdl, true)
+sweep_pwh = check_cross(high, low, high[1], low[1], pwh, false)
+sweep_pwl = check_cross(high, low, high[1], low[1], pwl, true)
+sweep_pmh = check_cross(high, low, high[1], low[1], pmh, false)
+sweep_pml = check_cross(high, low, high[1], low[1], pml, true)
+
+plotchar(sweep_pdh, "Sweep PDH", "🧹", location.abovebar, size=size.tiny)
+plotchar(sweep_pdl, "Sweep PDL", "🧹", location.belowbar, size=size.tiny)
+plotchar(sweep_pwh, "Sweep PWH", "🧹", location.abovebar, size=size.tiny)
+plotchar(sweep_pwl, "Sweep PWL", "🧹", location.belowbar, size=size.tiny)
+plotchar(sweep_pmh, "Sweep PMH", "🧹", location.abovebar, size=size.tiny)
+plotchar(sweep_pml, "Sweep PML", "🧹", location.belowbar, size=size.tiny)
+
+touch_pump = check_cross(high, low, high[1], low[1], d_res, false)
+touch_dump = check_cross(high, low, high[1], low[1], d_sup, true)
+touch_pumpmax = check_cross(high, low, high[1], low[1], c_high, false)
+touch_dumpmax = check_cross(high, low, high[1], low[1], c_low, true)
+
+plotchar(touch_pump, "Touch Pump", "📊", location.abovebar, size=size.tiny)
+plotchar(touch_dump, "Touch Dump", "📊", location.belowbar, size=size.tiny)
+plotchar(touch_pumpmax, "Touch PumpMax", "📊", location.abovebar, size=size.tiny)
+plotchar(touch_dumpmax, "Touch DumpMax", "📊", location.belowbar, size=size.tiny)
+
+
+// ══════════════════════════════════════════════════════════════════════
+// MOMENTUM SCALP SYSTEM 
+// ══════════════════════════════════════════════════════════════════════
+
+rsi_val = ta.rsi(close, mom_rsi_len)
+mom_smooth_val = ta.ema(rsi_val, mom_smooth)
+
+float mom_zone = 0 // 0 = NEUTRAL, 1 = OB, -1 = OS
+if mom_smooth_val >= mom_ob
+    mom_zone := 1
+else if mom_smooth_val <= mom_os
+    mom_zone := -1
+
+var int scalp_state = 0 // 0=IDLE, 1=ZONE_ENTRY(LONG), -1=ZONE_ENTRY(SHORT)
+
+bool confirm_long = false
+bool confirm_short = false
+bool open_long = false
+bool open_short = false
+
+// Python Bot Anti-FlipFlop Logic Replica
+if scalp_state == 0
+    if mom_zone == -1
+        scalp_state := 1
+        open_long := true
+    else if mom_zone == 1
+        scalp_state := -1
+        open_short := true
+else if scalp_state == 1
+    if mom_zone == 0
+        confirm_long := true
+        scalp_state := 0
+    else if mom_zone == 1
+        // Crossed directly to opposite zone
+        scalp_state := -1
+        open_short := true
+else if scalp_state == -1
+    if mom_zone == 0
+        confirm_short := true
+        scalp_state := 0
+    else if mom_zone == -1
+        // Crossed directly to opposite zone
+        scalp_state := 1
+        open_long := true
+
+plotshape(open_long, "MOM Open Long", shape.circle, location.belowbar, color.new(color.yellow, 0), size=size.tiny)
+plotshape(open_short, "MOM Open Short", shape.circle, location.abovebar, color.new(color.yellow, 0), size=size.tiny)
+plotshape(confirm_long, "MOM Confirm Long", shape.labelup, location.belowbar, color.new(color.green, 0), text="⚡️", textcolor=color.white, size=size.normal)
+plotshape(confirm_short, "MOM Confirm Short", shape.labeldown, location.abovebar, color.new(color.red, 0), text="⚡️", textcolor=color.white, size=size.normal)
+
+
+// ══════════════════════════════════════════════════════════════════════
+// OPTIONAL DAILY LEVELS TABLE
+// ══════════════════════════════════════════════════════════════════════
+
+var table tbl = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 80), border_width=1, border_color=color.gray)
+
+if barstate.islast
+    table.cell(tbl, 0, 0, "Level", text_color=color.white, text_halign=text.align_left)
+    table.cell(tbl, 1, 0, "Value", text_color=color.white, text_halign=text.align_right)
+    
+    table.cell(tbl, 0, 1, "🟥 Resistance", text_color=color.red, text_halign=text.align_left)
+    table.cell(tbl, 1, 1, str.tostring(d_res, "#.##"), text_color=color.white, text_halign=text.align_right)
+    
+    table.cell(tbl, 0, 2, "🟩 Support", text_color=color.green, text_halign=text.align_left)
+    table.cell(tbl, 1, 2, str.tostring(d_sup, "#.##"), text_color=color.white, text_halign=text.align_right)
+    
+    table.cell(tbl, 0, 3, "🟨 Volatility", text_color=color.yellow, text_halign=text.align_left)
+    table.cell(tbl, 1, 3, str.tostring(avg_pump+avg_dump, "#.##"), text_color=color.white, text_halign=text.align_right)
+    
+    table.cell(tbl, 0, 4, "🚨 Crit High", text_color=color.red, text_halign=text.align_left)
+    table.cell(tbl, 1, 4, str.tostring(c_high, "#.##"), text_color=color.white, text_halign=text.align_right)
+    
+    table.cell(tbl, 0, 5, "🚨 Crit Low", text_color=color.green, text_halign=text.align_left)
+    table.cell(tbl, 1, 5, str.tostring(c_low, "#.##"), text_color=color.white, text_halign=text.align_right)
