@@ -34,8 +34,8 @@ def fetch_klines(symbol=SYMBOL, interval="1h", limit=None):
     if limit is None:
         limit = KLINE_LIMITS.get(interval, 500)
 
-    # OKX symbol format for spot is usually BTC-USDT
-    okx_symbol = symbol.replace("USDT", "-USDT")
+    # Use OKX Perpetual Swap (matches TradingView Perp charts better)
+    okx_symbol = symbol.replace("USDT", "-USDT-SWAP")
     okx_interval = INTERVAL_MAP.get(interval, "1H")
 
     params = {

@@ -149,6 +149,10 @@ class PonchBot:
         atr_val    = float(curr["ATR"]) if "ATR" in curr else 0
         zone       = curr["MomentumZone"] if "MomentumZone" in curr else "NEUTRAL"
 
+        # ─── REAL-TIME MONITOR (Debug) ───────────────────
+        if "InnerUp" in curr:
+            print(f"  [{tf}] Close: {close:,.1f} | Inner: {curr['InnerDn']:,.1f}-{curr['InnerUp']:,.1f} | ATR: {atr_val:.1f}")
+
         prev_high = float(prev["High"])
         prev_low  = float(prev["Low"])
 

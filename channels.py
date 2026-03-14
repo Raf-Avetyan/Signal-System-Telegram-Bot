@@ -76,68 +76,74 @@ def check_channel_signals(df):
 
     # ─── LONG signals (price crossing DOWN through bands) ────
     # Priority: Outer > Mid > Inner (Strict < means hit from above)
-    if close < curr["OuterDn"] and prev_close >= prev["OuterDn"]:
-        signals.append({
-            "side":      "LONG",
-            "signal":    "L+++",
-            "points":    SIGNAL_POINTS["L+++"],
-            "strength":  "Strong",
-            "price":     close,
-            "indicator": "Ponch_Trader",
-            "note":      "L+++ confirmation",
-        })
-    elif close < curr["MidDn"] and prev_close >= prev["MidDn"]:
-        signals.append({
-            "side":      "LONG",
-            "signal":    "L++",
-            "points":    SIGNAL_POINTS["L++"],
-            "strength":  "Strong",
-            "price":     close,
-            "indicator": "Ponch_Trader",
-            "note":      "L++ confirmation",
-        })
-    elif close < curr["InnerDn"] and prev_close >= prev["InnerDn"]:
-        signals.append({
-            "side":      "LONG",
-            "signal":    "L+",
-            "points":    SIGNAL_POINTS["L+"],
-            "strength":  "Medium",
-            "price":     close,
-            "indicator": "Ponch_Trader",
-            "note":      "L+ confirmation",
-        })
+    if close < curr["OuterDn"]:
+        if prev_close >= prev["OuterDn"]:
+            signals.append({
+                "side":      "LONG",
+                "signal":    "L+++",
+                "points":    SIGNAL_POINTS["L+++"],
+                "strength":  "Strong",
+                "price":     close,
+                "indicator": "Ponch_Trader",
+                "note":      "L+++ confirmation",
+            })
+    elif close < curr["MidDn"]:
+        if prev_close >= prev["MidDn"]:
+            signals.append({
+                "side":      "LONG",
+                "signal":    "L++",
+                "points":    SIGNAL_POINTS["L++"],
+                "strength":  "Strong",
+                "price":     close,
+                "indicator": "Ponch_Trader",
+                "note":      "L++ confirmation",
+            })
+    elif close < curr["InnerDn"]:
+        if prev_close >= prev["InnerDn"]:
+            signals.append({
+                "side":      "LONG",
+                "signal":    "L+",
+                "points":    SIGNAL_POINTS["L+"],
+                "strength":  "Medium",
+                "price":     close,
+                "indicator": "Ponch_Trader",
+                "note":      "L+ confirmation",
+            })
 
     # ─── SHORT signals (price crossing UP through bands) ─────
     # Priority: Outer > Mid > Inner (Strict > means hit from below)
-    if close > curr["OuterUp"] and prev_close <= prev["OuterUp"]:
-        signals.append({
-            "side":      "SHORT",
-            "signal":    "S+++",
-            "points":    SIGNAL_POINTS["S+++"],
-            "strength":  "Strong",
-            "price":     close,
-            "indicator": "Ponch_Trader",
-            "note":      "S+++ confirmation",
-        })
-    elif close > curr["MidUp"] and prev_close <= prev["MidUp"]:
-        signals.append({
-            "side":      "SHORT",
-            "signal":    "S++",
-            "points":    SIGNAL_POINTS["S++"],
-            "strength":  "Strong",
-            "price":     close,
-            "indicator": "Ponch_Trader",
-            "note":      "S++ confirmation",
-        })
-    elif close > curr["InnerUp"] and prev_close <= prev["InnerUp"]:
-        signals.append({
-            "side":      "SHORT",
-            "signal":    "S+",
-            "points":    SIGNAL_POINTS["S+"],
-            "strength":  "Medium",
-            "price":     close,
-            "indicator": "Ponch_Trader",
-            "note":      "S+ confirmation",
-        })
+    if close > curr["OuterUp"]:
+        if prev_close <= prev["OuterUp"]:
+            signals.append({
+                "side":      "SHORT",
+                "signal":    "S+++",
+                "points":    SIGNAL_POINTS["S+++"],
+                "strength":  "Strong",
+                "price":     close,
+                "indicator": "Ponch_Trader",
+                "note":      "S+++ confirmation",
+            })
+    elif close > curr["MidUp"]:
+        if prev_close <= prev["MidUp"]:
+            signals.append({
+                "side":      "SHORT",
+                "signal":    "S++",
+                "points":    SIGNAL_POINTS["S++"],
+                "strength":  "Strong",
+                "price":     close,
+                "indicator": "Ponch_Trader",
+                "note":      "S++ confirmation",
+            })
+    elif close > curr["InnerUp"]:
+        if prev_close <= prev["InnerUp"]:
+            signals.append({
+                "side":      "SHORT",
+                "signal":    "S+",
+                "points":    SIGNAL_POINTS["S+"],
+                "strength":  "Medium",
+                "price":     close,
+                "indicator": "Ponch_Trader",
+                "note":      "S+ confirmation",
+            })
 
     return signals
