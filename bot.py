@@ -152,7 +152,7 @@ class PonchBot:
         prev_high = float(prev["High"])
         prev_low  = float(prev["Low"])
 
-        timestamp = curr.name.strftime("%d.%m.%Y %H:%M UTC") if hasattr(curr.name, 'strftime') else ""
+        candle_ts = curr.name.strftime("%d.%m.%Y %H:%M UTC") if hasattr(curr.name, 'strftime') else ""
 
         # ─── Liquidity Sweeps ────────────────────────────
         if self.levels:

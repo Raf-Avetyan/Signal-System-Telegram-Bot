@@ -63,10 +63,10 @@ TIMEFRAME_PROFILES = {
 # ─── SIGNAL POINTS ────────────────────────────
 # Trade signal points by entry level
 SIGNAL_POINTS = {
-    "L":  1, "S":  1,   # Basic
-    "L1": 2, "S1": 2,   # Inner channel
-    "L2": 3, "S2": 3,   # Mid channel
-    "L3": 4, "S3": 4,   # Outer channel
+    "L":   1, "S":   1,   # Basic
+    "L+":  2, "S+":  2,   # Inner channel
+    "L++": 3, "S++": 3,   # Mid channel
+    "L+++": 4, "S+++": 4, # Outer channel
 }
 
 # Liquidity sweep points by level

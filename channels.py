@@ -16,12 +16,13 @@ def ema(series, length):
 
 
 def atr(df, length):
-    """Average True Range."""
+    """Average True Range (Matching TradingView RMA)."""
     high_low   = df["High"] - df["Low"]
     high_close = np.abs(df["High"] - df["Close"].shift(1))
     low_close  = np.abs(df["Low"] - df["Close"].shift(1))
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    return tr.rolling(length).mean()
+    # TradingView ta.atr uses RMA (alpha = 1/length)
+    return tr.ewm(alpha=1/length, min_periods=length, adjust=False).mean()
 
 
 def calculate_channels(df):
@@ -74,8 +75,28 @@ def check_channel_signals(df):
     prev_close = prev["Close"]
 
     # ─── LONG signals (price crossing DOWN through bands) ────
-    # L1: Close crosses below InnerDn
-    if close <= curr["InnerDn"] and prev_close > prev["InnerDn"]:
+    # Priority: Outer > Mid > Inner (Strict < means hit from above)
+    if close < curr["OuterDn"] and prev_close >= prev["OuterDn"]:
+        signals.append({
+            "side":      "LONG",
+            "signal":    "L+++",
+            "points":    SIGNAL_POINTS["L+++"],
+            "strength":  "Strong",
+            "price":     close,
+            "indicator": "Ponch_Trader",
+            "note":      "L+++ confirmation",
+        })
+    elif close < curr["MidDn"] and prev_close >= prev["MidDn"]:
+        signals.append({
+            "side":      "LONG",
+            "signal":    "L++",
+            "points":    SIGNAL_POINTS["L++"],
+            "strength":  "Strong",
+            "price":     close,
+            "indicator": "Ponch_Trader",
+            "note":      "L++ confirmation",
+        })
+    elif close < curr["InnerDn"] and prev_close >= prev["InnerDn"]:
         signals.append({
             "side":      "LONG",
             "signal":    "L+",
@@ -86,45 +107,19 @@ def check_channel_signals(df):
             "note":      "L+ confirmation",
         })
 
-    # L2: Close crosses below MidDn
-    if close <= curr["MidDn"] and prev_close > prev["MidDn"]:
-        signals.append({
-            "side":      "LONG",
-            "signal":    "L++",
-            "points":    SIGNAL_POINTS["L++"],
-            "strength":  "Strong",
-            "price":     close,
-            "indicator": "Ponch_Trader",
-            "note":      "L++ confirmation",
-        })
-
-    # L3: Close crosses below OuterDn
-    if close <= curr["OuterDn"] and prev_close > prev["OuterDn"]:
-        signals.append({
-            "side":      "LONG",
-            "signal":    "L+++",
-            "points":    SIGNAL_POINTS["L+++"],
-            "strength":  "Strong",
-            "price":     close,
-            "indicator": "Ponch_Trader",
-            "note":      "L+++",
-        })
-
     # ─── SHORT signals (price crossing UP through bands) ─────
-    # S1: Close crosses above InnerUp
-    if close >= curr["InnerUp"] and prev_close < prev["InnerUp"]:
+    # Priority: Outer > Mid > Inner (Strict > means hit from below)
+    if close > curr["OuterUp"] and prev_close <= prev["OuterUp"]:
         signals.append({
             "side":      "SHORT",
-            "signal":    "S+",
-            "points":    SIGNAL_POINTS["S+"],
-            "strength":  "Medium",
+            "signal":    "S+++",
+            "points":    SIGNAL_POINTS["S+++"],
+            "strength":  "Strong",
             "price":     close,
             "indicator": "Ponch_Trader",
-            "note":      "S+ confirmation",
+            "note":      "S+++ confirmation",
         })
-
-    # S2: Close crosses above MidUp
-    if close >= curr["MidUp"] and prev_close < prev["MidUp"]:
+    elif close > curr["MidUp"] and prev_close <= prev["MidUp"]:
         signals.append({
             "side":      "SHORT",
             "signal":    "S++",
@@ -134,17 +129,15 @@ def check_channel_signals(df):
             "indicator": "Ponch_Trader",
             "note":      "S++ confirmation",
         })
-
-    # S3: Close crosses above OuterUp
-    if close >= curr["OuterUp"] and prev_close < prev["OuterUp"]:
+    elif close > curr["InnerUp"] and prev_close <= prev["InnerUp"]:
         signals.append({
             "side":      "SHORT",
-            "signal":    "S+++",
-            "points":    SIGNAL_POINTS["S+++"],
-            "strength":  "Strong",
+            "signal":    "S+",
+            "points":    SIGNAL_POINTS["S+"],
+            "strength":  "Medium",
             "price":     close,
             "indicator": "Ponch_Trader",
-            "note":      "S+++",
+            "note":      "S+ confirmation",
         })
 
     return signals
