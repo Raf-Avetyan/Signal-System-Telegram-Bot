@@ -1,4 +1,4 @@
-# ─── CTLT Levels & Volatility Zones ──────────────────────────
+# ─── Ponch Levels & Volatility Zones ──────────────────────────
 
 import pandas as pd
 import numpy as np

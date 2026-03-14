@@ -1,4 +1,4 @@
-# ─── CTLT Data Fetcher (OKX V5 REST API) ────────────────────
+# ─── PONCH DATA FETCHER (OKX V5 REST API) ────────────────────
 
 import pandas as pd
 import requests
@@ -36,7 +36,6 @@ def fetch_klines(symbol=SYMBOL, interval="1h", limit=None):
 
     # OKX symbol format for spot is usually BTC-USDT
     okx_symbol = symbol.replace("USDT", "-USDT")
-
     okx_interval = INTERVAL_MAP.get(interval, "1H")
 
     params = {

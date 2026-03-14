@@ -1,4 +1,4 @@
-# ─── CTLT Confirmation Aggregation ───────────────────────────
+# ─── Ponch Confirmation Aggregation ───────────────────────────
 
 """
 Aggregates signals from multiple indicators within a time window.
@@ -29,7 +29,7 @@ class ConfirmationTracker:
 
         signal_dict: {
             "side": "LONG"|"SHORT",
-            "indicator": "CTLT_Trader",
+            "indicator": "Ponch_Trader",
             "signal": "ENTRY L3",
             "points": 4,
             "timestamp": time.time()

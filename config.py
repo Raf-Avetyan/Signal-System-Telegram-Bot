@@ -1,4 +1,4 @@
-# ─── CTLT Signal System Configuration ────────────────────────
+# ─── Ponch Signal System — Config ───────────────────────────────
 import os
 from dotenv import load_dotenv
 

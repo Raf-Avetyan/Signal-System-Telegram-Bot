@@ -1,11 +1,11 @@
-# ─── CTLT Trade Signal Detection ─────────────────────────────
+# ─── Ponch Trade Signal Detection ─────────────────────────────
 
 """
 Detects individual trade signals from multiple "virtual" indicators:
-  - CTLT_Trader: Channel crossings (L1-L3, S1-S3) — from channels.py
-  - CTLT_Momentum_Confirm: Momentum RSI confirmation (1pt)
-  - CTLT_RangeTrader_Confirm: Level-based range confirmation (3pts)
-  - CTLT_Flow_Confirm: Volume-flow alignment (1pt)
+  - Ponch_Trader: Channel crossings (L1-L3, S1-S3) — from channels.py
+  - Ponch_Momentum_Confirm: Momentum RSI confirmation (1pt)
+  - Ponch_RangeTrader_Confirm: Level-based range confirmation (3pts)
+  - Ponch_Flow_Confirm: Volume-flow alignment (1pt)
 """
 
 import pandas as pd
@@ -15,7 +15,7 @@ from config import SIGNAL_POINTS
 
 def check_momentum_confirm(df):
     """
-    CTLT_Momentum_Confirm — Generates confirmation when RSI crosses
+    Ponch_Momentum_Confirm — Generates confirmation when RSI crosses
     back from extreme zones, confirming the direction.
 
     Returns list of signal dicts.
@@ -35,7 +35,7 @@ def check_momentum_confirm(df):
             "points":    SIGNAL_POINTS["L"],
             "strength":  "Low",
             "price":     float(df["Close"].iloc[-1]),
-            "indicator": "CTLT_Momentum_Confirm",
+            "indicator": "Ponch_Momentum_Confirm",
             "note":      "Confirm",
         })
 
@@ -47,7 +47,7 @@ def check_momentum_confirm(df):
             "points":    SIGNAL_POINTS["S"],
             "strength":  "Low",
             "price":     float(df["Close"].iloc[-1]),
-            "indicator": "CTLT_Momentum_Confirm",
+            "indicator": "Ponch_Momentum_Confirm",
             "note":      "Confirm",
         })
 
@@ -56,7 +56,7 @@ def check_momentum_confirm(df):
 
 def check_range_confirm(df, levels):
     """
-    CTLT_RangeTrader_Confirm — Range-based confirmation when price
+    Ponch_RangeTrader_Confirm — Range-based confirmation when price
     interacts with key levels while in trend direction.
 
     Returns list of signal dicts.
@@ -72,28 +72,27 @@ def check_range_confirm(df, levels):
     pdl = levels.get("PDL", 0)
     pdh = levels.get("PDH", 0)
 
-    # LONG confirmation: Close bounces off support zone (near PDL or below DO)
-    if close < do and prev_close >= do:
-        # Price dropped below DO — range trader sees short confirmation
+    # LONG confirmation: Close reclaim DO
+    if close > do and prev_close <= do:
         signals.append({
-            "side":      "SHORT",
-            "signal":    "S2",
-            "points":    SIGNAL_POINTS["S2"],
+            "side":      "LONG",
+            "signal":    "L++",
+            "points":    SIGNAL_POINTS["L++"],
             "strength":  "Strong",
             "price":     close,
-            "indicator": "CTLT_RangeTrader_Confirm",
+            "indicator": "Ponch_RangeTrader_Confirm",
             "note":      "Confirm",
         })
 
-    if close > do and prev_close <= do:
-        # Price reclaimed DO — range trader sees long confirmation
+    # SHORT confirmation: Close drop below DO
+    if close < do and prev_close >= do:
         signals.append({
-            "side":      "LONG",
-            "signal":    "L2",
-            "points":    SIGNAL_POINTS["L2"],
+            "side":      "SHORT",
+            "signal":    "S++",
+            "points":    SIGNAL_POINTS["S++"],
             "strength":  "Strong",
             "price":     close,
-            "indicator": "CTLT_RangeTrader_Confirm",
+            "indicator": "Ponch_RangeTrader_Confirm",
             "note":      "Confirm",
         })
 
@@ -102,7 +101,7 @@ def check_range_confirm(df, levels):
 
 def check_flow_confirm(df):
     """
-    CTLT_Flow_Confirm — Volume-weighted flow confirmation.
+    Ponch_Flow_Confirm — Volume-weighted flow confirmation.
     Triggers when volume spike aligns with price direction.
 
     Returns list of signal dicts.
@@ -129,7 +128,7 @@ def check_flow_confirm(df):
             "points":    SIGNAL_POINTS["L"],
             "strength":  "Low",
             "price":     close,
-            "indicator": "CTLT_Flow_Confirm",
+            "indicator": "Ponch_Flow_Confirm",
             "note":      "Confirm",
         })
 
@@ -141,7 +140,7 @@ def check_flow_confirm(df):
             "points":    SIGNAL_POINTS["S"],
             "strength":  "Low",
             "price":     close,
-            "indicator": "CTLT_Flow_Confirm",
+            "indicator": "Ponch_Flow_Confirm",
             "note":      "Confirm",
         })
 

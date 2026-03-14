@@ -1,4 +1,4 @@
-# ─── CTLT Momentum Scalp System ──────────────────────────────
+# ─── Ponch Momentum Scalp System ──────────────────────────────
 
 import pandas as pd
 import numpy as np
@@ -65,14 +65,9 @@ class ScalpTracker:
         self.state = "IDLE"
         self.side = None
         self.entry_price = None
-        self.zone_entry_idx = None
+        self.last_processed_ts = None # Cooldown timestamp
 
-        profile = TIMEFRAME_PROFILES.get(timeframe, TIMEFRAME_PROFILES["5m"])
-        self.strength = profile["strength"]
-        self.emoji    = profile["emoji"]
-        self.size     = profile["size"]
-
-    def update(self, zone, close, atr_value):
+    def update(self, zone, close, atr_value, candle_ts=None):
         """
         Process new candle data. Returns list of events to act on.
 
@@ -82,6 +77,10 @@ class ScalpTracker:
         events = []
 
         if self.state == "IDLE":
+            # Cooldown check: don't restart on the same candle
+            if candle_ts and candle_ts == self.last_processed_ts:
+                return []
+                
             # Check for zone entry
             if zone == "OS":
                 self.state = "ZONE_ENTRY"
@@ -105,6 +104,7 @@ class ScalpTracker:
             if zone == "NEUTRAL":
                 # Zone exit → CONFIRMED
                 self.state = "IDLE"
+                self.last_processed_ts = candle_ts # Update cooldown timestamp
                 entry = close
                 calc = self._calc_sl_tp(entry, atr_value, self.side)
                 events.append({
@@ -118,17 +118,25 @@ class ScalpTracker:
 
             elif zone == opposite_zone:
                 # Crossed directly to opposite zone → CLOSED without confirmation
+                self.state = "IDLE"
+                self.last_processed_ts = candle_ts # Update cooldown timestamp
                 events.append({
                     "type":  "CLOSED",
                     "side":  self.side,
                     "price": close,
                 })
                 
-                # Switch directly to the new zone's entry
-                self.side = "SHORT" if opposite_zone == "OB" else "LONG"
-                self.entry_price = close
-                events.append({"type": "OPEN", "side": self.side, "price": close})
-                events.append({"type": "PREPARE", "side": self.side, "price": close})
+                # Cooldown check before switching
+                if candle_ts and candle_ts == self.last_processed_ts:
+                    self.side = None
+                    self.entry_price = None
+                else:
+                    # Switch directly to the new zone's entry
+                    self.side = "SHORT" if opposite_zone == "OB" else "LONG"
+                    self.entry_price = close
+                    self.state = "ZONE_ENTRY"
+                    events.append({"type": "OPEN", "side": self.side, "price": close})
+                    events.append({"type": "PREPARE", "side": self.side, "price": close})
 
         return events
 

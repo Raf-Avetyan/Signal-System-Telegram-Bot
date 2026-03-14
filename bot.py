@@ -1,4 +1,4 @@
-# ─── CTLT Signal System — Main Bot ───────────────────────────
+# ─── Ponch Signal System — Main Bot ───────────────────────────
 
 """
 Main entry point. Monitors BTCUSDT across multiple timeframes,
@@ -22,8 +22,8 @@ from confirmation import ConfirmationTracker
 import telegram as tg
 
 
-class CTLTBot:
-    """Main CTLT Signal System bot."""
+class PonchBot:
+    """Main Ponch Signal System bot."""
 
     def __init__(self):
         # Scalp trackers — one per timeframe
@@ -47,7 +47,7 @@ class CTLTBot:
     def run(self):
         """Main loop — fetches data and processes signals."""
         print(f"{'='*50}")
-        print(f"  CTLT Signal System")
+        print(f"  Ponch Signal System")
         print(f"  Symbol: {SYMBOL}")
         print(f"  Timeframes: {', '.join(SCALP_TIMEFRAMES)}")
         print(f"  Poll interval: {POLL_INTERVAL}s")
@@ -161,16 +161,17 @@ class CTLTBot:
                 prev_high=prev_high, prev_low=prev_low
             )
             for sw in sweeps:
-                sig_key = f"sweep_{tf}_{sw['level']}_{sw['side']}"
+                # Include candle timestamp in deduplication key
+                sig_key = f"sweep_{tf}_{sw['level']}_{sw['side']}_{candle_ts}"
                 if sig_key not in self.sent_signals:
                     self.sent_signals.add(sig_key)
                     tg.send_liquidity_sweep(**sw)
-                    print(f"  [TG] 🧹 Liquidity Sweep: {sw['level']} ({sw['side']})")
+                    print(f"  [TG] Liquidity Sweep: {sw['level']} ({sw['side']})")
 
                     # Add to confirmation tracker
                     self.confirmations.add_signal({
                         "side":      sw["side"],
-                        "indicator": f"CTLT_RangeTrader_Sweep_{sw['level']}",
+                        "indicator": f"Ponch_RangeTrader_Sweep_{sw['level']}",
                         "signal":    f"LIQUIDITY SWEEP: {sw['level']}",
                         "points":    sw["points"],
                     })
@@ -182,37 +183,78 @@ class CTLTBot:
                 prev_high=prev_high, prev_low=prev_low
             )
             for vt in touches:
-                sig_key = f"vol_{tf}_{vt['level']}_{vt['side']}"
+                # Include candle timestamp in deduplication key
+                sig_key = f"vol_{tf}_{vt['level']}_{vt['side']}_{candle_ts}"
                 if sig_key not in self.sent_signals:
                     self.sent_signals.add(sig_key)
                     tg.send_volatility_touch(**vt)
-                    print(f"  [TG] 📊 Vol Zone Touch: {vt['level']} ({vt['side']})")
+                    print(f"  [TG] Vol Zone Touch: {vt['level']} ({vt['side']})")
 
                     # Add to confirmation tracker
                     self.confirmations.add_signal({
                         "side":      vt["side"],
-                        "indicator": f"CTLT_RangeTrader_VolZone_{vt['level']}",
+                        "indicator": f"Ponch_RangeTrader_VolZone_{vt['level']}",
                         "signal":    f"VOL ZONE TOUCH: {vt['level']}",
                         "points":    vt["points"],
                     })
 
+        # ─── Trade Signals (Channels) ────────────────────
+        ch_sigs = check_channel_signals(df)
+        for sig in ch_sigs:
+            sig_key = f"tr_sig_{tf}_{sig['signal']}_{candle_ts}"
+            if sig_key not in self.sent_signals:
+                self.sent_signals.add(sig_key)
+                tg.send_trade_signal(tf, sig["side"], sig["signal"], sig["price"])
+                print(f"  [TG] Trade Signal [{tf}] {sig['signal']} @ {sig['price']:,.2f}")
+                self.confirmations.add_signal(sig)
+
+        # 2. Momentum confirmation
+        mom_sigs = check_momentum_confirm(df)
+        for sig in mom_sigs:
+            sig_key = f"mom_sig_{tf}_{sig['side']}_{candle_ts}"
+            if sig_key not in self.sent_signals:
+                self.sent_signals.add(sig_key)
+                self.confirmations.add_signal(sig)
+
+        # 3. Range trader confirmation
+        rng_sigs = check_range_confirm(df, self.levels)
+        for sig in rng_sigs:
+            sig_key = f"rng_sig_{tf}_{sig['signal']}_{candle_ts}"
+            if sig_key not in self.sent_signals:
+                self.sent_signals.add(sig_key)
+                self.confirmations.add_signal(sig)
+
+        # 4. Flow confirmation
+        flow_sigs = check_flow_confirm(df)
+        for sig in flow_sigs:
+            sig_key = f"flow_sig_{tf}_{sig['side']}_{candle_ts}"
+            if sig_key not in self.sent_signals:
+                self.sent_signals.add(sig_key)
+                self.confirmations.add_signal(sig)
+
         # ─── Scalp Momentum System ───────────────────────
         tracker = self.scalp_trackers[tf]
-        events = tracker.update(zone, close, atr_val)
+        events = tracker.update(zone, close, atr_val, candle_ts=candle_ts)
 
         profile = TIMEFRAME_PROFILES.get(tf, TIMEFRAME_PROFILES["5m"])
         emoji = profile["emoji"]
 
         for evt in events:
-            evt_key = f"scalp_{tf}_{evt['type']}_{evt['side']}"
+            # Scalp signals usually only one of each type per candle
+            evt_key = f"scalp_{tf}_{evt['type']}_{evt['side']}_{candle_ts}"
+
+            if evt_key in self.sent_signals:
+                continue
+
+            self.sent_signals.add(evt_key)
 
             if evt["type"] == "OPEN":
                 tg.send_scalp_open(tf, evt["side"], evt["price"], emoji=emoji)
-                print(f"  [TG] {emoji} Scalp Open [{tf}] {evt['side']}")
+                print(f"  [TG] Scalp Open [{tf}] {evt['side']}")
 
             elif evt["type"] == "PREPARE":
                 tg.send_scalp_prepare(tf, evt["side"], emoji=emoji)
-                print(f"  [TG] ⚠️ Prepare [{tf}] {evt['side']}")
+                print(f"  [TG] Prepare [{tf}] {evt['side']}")
 
             elif evt["type"] == "CONFIRMED":
                 tg.send_scalp_confirmed(
@@ -227,11 +269,11 @@ class CTLTBot:
                     size=profile["size"],
                     emoji=emoji,
                 )
-                print(f"  [TG] {emoji} Scalp Confirmed [{tf}] {evt['side']} @ {evt['entry']:,.2f}")
+                print(f"  [TG] Scalp Confirmed [{tf}] {evt['side']} @ {evt['entry']:,.2f}")
 
             elif evt["type"] == "CLOSED":
                 tg.send_scalp_closed(tf, evt["side"], evt["price"], emoji=emoji)
-                print(f"  [TG] {emoji} Scalp Closed [{tf}] {evt['side']}")
+                print(f"  [TG] Scalp Closed [{tf}] {evt['side']}")
 
         # ─── Check Confirmation Aggregation ──────────────
         for side in ["LONG", "SHORT"]:
@@ -267,5 +309,5 @@ class CTLTBot:
 # ═══════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    bot = CTLTBot()
+    bot = PonchBot()
     bot.run()
