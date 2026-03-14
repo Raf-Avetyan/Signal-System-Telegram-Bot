@@ -151,13 +151,12 @@ def send_scalp_closed(timeframe, side, price, emoji="⚡️"):
 # TRADE SIGNAL
 # ═══════════════════════════════════════════════════════════════
 
-def send_trade_signal(side, signal, indicator, price, timestamp,
-                      points, strength, note=""):
+def send_trade_signal(tf, side, signal, price, indicator, points, strength, timestamp):
     """
-    🎯 TRADE SIGNAL (Kept just in case, but no longer used in standard Ponch flow)
+    🎯 TRADE SIGNAL [{TF}]
     """
     msg = (
-        f"🎯 TRADE SIGNAL\n"
+        f"🎯 TRADE SIGNAL [{tf.upper()}]\n"
         f"{SYMBOL}\n"
         f"──────────\n"
         f"Points: {points}\n"
@@ -166,7 +165,7 @@ def send_trade_signal(side, signal, indicator, price, timestamp,
         f"Signal: ENTRY {signal}\n"
         f"Price: {fmt_price(price)}\n"
         f"Time: {timestamp}\n"
-        f"Note: {note}"
+        f"Indicator: {indicator}"
     )
     send(msg)
 

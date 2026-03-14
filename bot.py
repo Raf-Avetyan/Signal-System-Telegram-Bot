@@ -204,7 +204,16 @@ class PonchBot:
             sig_key = f"tr_sig_{tf}_{sig['signal']}_{candle_ts}"
             if sig_key not in self.sent_signals:
                 self.sent_signals.add(sig_key)
-                tg.send_trade_signal(tf, sig["side"], sig["signal"], sig["price"])
+                tg.send_trade_signal(
+                    tf=tf,
+                    side=sig["side"],
+                    signal=sig["signal"],
+                    price=sig["price"],
+                    indicator=sig["indicator"],
+                    points=sig["points"],
+                    strength=sig["strength"],
+                    timestamp=candle_ts
+                )
                 print(f"  [TG] Trade Signal [{tf}] {sig['signal']} @ {sig['price']:,.2f}")
                 self.confirmations.add_signal(sig)
 
