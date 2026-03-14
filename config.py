@@ -1,8 +1,12 @@
 # ─── CTLT Signal System Configuration ────────────────────────
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ─── TELEGRAM ─────────────────────────────────
-BOT_TOKEN = "8312618850:AAHM7Sjrgjcz0S895xQlZvOYeMpn6vWwjZc"
-CHAT_ID   = "@ponch_alerts"
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+CHAT_ID   = os.getenv("CHAT_ID", "")
 
 # ─── SYMBOL ───────────────────────────────────
 SYMBOL = "BTCUSDT"
