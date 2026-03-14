@@ -1,46 +1,47 @@
-# ─── CTLT Data Fetcher (Bybit V5 REST API) ────────────────────
+# ─── CTLT Data Fetcher (OKX V5 REST API) ────────────────────
 
 import pandas as pd
 import requests
 import time
 from config import SYMBOL, KLINE_LIMITS
 
-BYBIT_BASE = "https://api.bybit.com"
-KLINES_URL = f"{BYBIT_BASE}/v5/market/kline"
+OKX_BASE = "https://www.okx.com"
+KLINES_URL = f"{OKX_BASE}/api/v5/market/candles"
 
-# Map Binance intervals to Bybit V5 intervals
+# Map Binance intervals to OKX V5 intervals
 INTERVAL_MAP = {
-    "1m": "1",
-    "3m": "3",
-    "5m": "5",
-    "15m": "15",
-    "30m": "30",
-    "1h": "60",
-    "2h": "120",
-    "4h": "240",
-    "6h": "360",
-    "12h": "720",
-    "1d": "D",
-    "1w": "W",
-    "1M": "M"
+    "1m": "1m",
+    "3m": "3m",
+    "5m": "5m",
+    "15m": "15m",
+    "30m": "30m",
+    "1h": "1H",
+    "2h": "2H",
+    "4h": "4H",
+    "6h": "6H",
+    "12h": "12H",
+    "1d": "1D",
+    "1w": "1W",
+    "1M": "1M"
 }
 
 def fetch_klines(symbol=SYMBOL, interval="1h", limit=None):
     """
-    Fetch OHLCV klines from Bybit V5 public API.
+    Fetch OHLCV klines from OKX V5 public API.
     Returns a pandas DataFrame with columns: Open, High, Low, Close, Volume
     and a DatetimeIndex (UTC).
     """
     if limit is None:
         limit = KLINE_LIMITS.get(interval, 500)
 
-    # Convert binance format (e.g. "1h") to bybit format (e.g. "60")
-    bybit_interval = INTERVAL_MAP.get(interval, "60")
+    # OKX symbol format for spot is usually BTC-USDT
+    okx_symbol = symbol.replace("USDT", "-USDT")
+
+    okx_interval = INTERVAL_MAP.get(interval, "1H")
 
     params = {
-        "category": "linear",
-        "symbol": symbol,
-        "interval": bybit_interval,
+        "instId": okx_symbol,
+        "bar": okx_interval,
         "limit": limit,
     }
 
@@ -50,10 +51,10 @@ def fetch_klines(symbol=SYMBOL, interval="1h", limit=None):
             resp = requests.get(KLINES_URL, params=params, timeout=15)
             resp.raise_for_status()
             res_json = resp.json()
-            if res_json.get("retCode") == 0:
-                data = res_json.get("result", {}).get("list", [])
+            if res_json.get("code") == "0":
+                data = res_json.get("data", [])
             else:
-                print(f"[ERROR] Bybit API returned error: {res_json.get('retMsg')}")
+                print(f"[ERROR] OKX API returned error: {res_json.get('msg')}")
             break
         except Exception as e:
             if attempt == 2:
@@ -64,10 +65,10 @@ def fetch_klines(symbol=SYMBOL, interval="1h", limit=None):
     if not data:
         return pd.DataFrame()
 
-    # Bybit klines array: [startTime, openPrice, highPrice, lowPrice, closePrice, volume, turnover]
+    # OKX klines array: [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
     # Data is returned from newest to oldest, so we reverse it
     df = pd.DataFrame(data, columns=[
-        "OpenTime", "Open", "High", "Low", "Close", "Volume", "Turnover"
+        "OpenTime", "Open", "High", "Low", "Close", "Volume", "VolCcy", "VolCcyQuote", "Confirm"
     ])
     df = df.iloc[::-1].reset_index(drop=True)
 
@@ -75,7 +76,7 @@ def fetch_klines(symbol=SYMBOL, interval="1h", limit=None):
     for col in ["Open", "High", "Low", "Close", "Volume"]:
         df[col] = df[col].astype(float)
 
-    # Set datetime index (UTC) - Bybit OpenTime is string timestamp in ms
+    # Set datetime index (UTC) - OKX OpenTime is string timestamp in ms
     df.index = pd.to_datetime(df["OpenTime"].astype(float), unit="ms", utc=True)
     df.index.name = "Datetime"
 
