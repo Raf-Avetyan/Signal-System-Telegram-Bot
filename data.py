@@ -118,3 +118,24 @@ def fetch_weekly(symbol=SYMBOL, limit=52):
 def fetch_monthly(symbol=SYMBOL, limit=12):
     """Convenience: fetch monthly data."""
     return fetch_klines(symbol=symbol, interval="1M", limit=limit)
+
+
+def fetch_funding_rate(symbol=SYMBOL):
+    """
+    Fetch current funding rate from OKX perpetual swap.
+    Returns float (e.g. 0.0001 = 0.01%) or None on failure.
+    """
+    okx_symbol = symbol.replace("USDT", "-USDT-SWAP")
+    url = f"{OKX_BASE}/api/v5/public/funding-rate"
+    params = {"instId": okx_symbol}
+
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") == "0" and data.get("data"):
+            rate = float(data["data"][0].get("fundingRate", 0))
+            return rate
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch funding rate: {e}")
+    return None

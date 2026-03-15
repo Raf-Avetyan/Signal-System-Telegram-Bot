@@ -93,3 +93,28 @@ EXTREME_THRESHOLD = 3    # 3+ confirmations = EXTREME
 # ─── TIMING ──────────────────────────────────
 POLL_INTERVAL = 60       # Seconds between data fetches
 CONFIRMATION_WINDOW = 300  # 5 min window to aggregate signals
+
+# ─── FUNDING RATE ALERTS ─────────────────────
+FUNDING_THRESHOLD = 0.0005       # 0.05% — trigger alert above this
+FUNDING_CHECK_INTERVAL = 300     # Check every 5 min
+FUNDING_COOLDOWN = 3600          # 1 hour cooldown between alerts
+
+# ─── VOLUME SPIKE DETECTION ──────────────────
+VOLUME_SPIKE_MULT = 3.0                   # Alert when vol > 3x average
+VOLUME_SPIKE_TIMEFRAMES = ["15m", "1h"]   # Skip 5m (too noisy)
+VOLUME_AVG_PERIOD = 20                    # 20-candle volume SMA
+
+# ─── PRICE APPROACHING ALERTS ────────────────
+APPROACH_THRESHOLD = 0.003       # 0.3% distance from level
+APPROACH_COOLDOWN = 900          # 15 min cooldown per level
+APPROACH_LEVELS = ["Pump", "Dump", "PumpMax", "DumpMax"]  # Which levels to watch
+
+# ─── SESSION TIMES (UTC hours) ───────────────
+SESSIONS = {
+    "ASIA":   {"open": 0,  "close": 8},
+    "LONDON": {"open": 8,  "close": 16},
+    "NY":     {"open": 13, "close": 21},
+}
+
+# ─── TELEGRAM COMMANDS ───────────────────────
+COMMAND_POLL_INTERVAL = 5   # Seconds between getUpdates polls

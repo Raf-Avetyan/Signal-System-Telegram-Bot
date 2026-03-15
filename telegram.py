@@ -51,18 +51,21 @@ def send_liquidity_sweep(side, level, price, points, strength, note=""):
     """
     🧹 Liquidity Sweep
     """
-    msg = (
-        f"🧹 Liquidity Sweep\n"
-        f"{SYMBOL}\n"
-        f"──────────\n"
-        f"Points: {points}\n"
-        f"Strength: {strength}\n"
-        f"Side: {side}\n"
-        f"Level: {level}\n"
-        f"Price: {fmt_price(price)}\n"
-        f"Note: {note}"
+    code_part = (
+        f"Points:    {points}\n"
+        f"Strength:  {strength}\n"
+        f"Side:      {side}\n"
+        f"Level:     {level}\n"
+        f"Price:     {fmt_price(price)}\n"
+        f"Note:      {note}"
     )
-    send(msg)
+    
+    msg = (
+        f"<b>🧹 Liquidity Sweep</b>\n"
+        f"<i>{SYMBOL}</i>\n"
+        f"<pre>{code_part}</pre>"
+    )
+    send(msg, parse_mode="HTML")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -73,18 +76,21 @@ def send_volatility_touch(side, level, price, points, strength, note=""):
     """
     📊 Volatility Zone Touch
     """
-    msg = (
-        f"📊 Volatility Zone Touch\n"
-        f"{SYMBOL}\n"
-        f"──────────\n"
-        f"Points: {points}\n"
-        f"Strength: {strength}\n"
-        f"Side: {side}\n"
-        f"Level: {level}\n"
-        f"Price: {fmt_price(price)}\n"
-        f"Note: {note}"
+    code_part = (
+        f"Points:    {points}\n"
+        f"Strength:  {strength}\n"
+        f"Side:      {side}\n"
+        f"Level:     {level}\n"
+        f"Price:     {fmt_price(price)}\n"
+        f"Note:      {note}"
     )
-    send(msg)
+    
+    msg = (
+        f"<b>📊 Volatility Zone Touch</b>\n"
+        f"<i>{SYMBOL}</i>\n"
+        f"<pre>{code_part}</pre>"
+    )
+    send(msg, parse_mode="HTML")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -96,14 +102,17 @@ def send_scalp_open(timeframe, side, price, emoji="⚡️"):
     ⚡️/🚀 SCALP WINDOW OPEN [TF] 🟢/🔴 SIDE
     """
     side_emoji = "🟢" if side == "LONG" else "🔴"
-    msg = (
-        f"{emoji} SCALP WINDOW OPEN [{timeframe.upper()}] {side_emoji} {side}\n"
-        f"{SYMBOL}\n"
-        f"──────────\n"
+    code_part = (
         f"Momentum: Zone Entry\n"
-        f"Price: {fmt_price(price)}"
+        f"Price:    {fmt_price(price)}"
     )
-    send(msg)
+    
+    msg = (
+        f"<b>{emoji} SCALP WINDOW OPEN</b> [{timeframe.upper()}] {side_emoji} <b>{side}</b>\n"
+        f"<i>{SYMBOL}</i>\n"
+        f"<pre>{code_part}</pre>"
+    )
+    send(msg, parse_mode="HTML")
 
 
 def send_scalp_prepare(timeframe, side, points=None, strength=None, emoji="⚡️"):
@@ -111,18 +120,23 @@ def send_scalp_prepare(timeframe, side, points=None, strength=None, emoji="⚡�
     ⚠️ PREPARE FOR ENTRY [TF] 🟢/🔴 SIDE
     """
     side_emoji = "🟢" if side == "LONG" else "🔴"
-    lines = [
-        f"⚠️ PREPARE FOR ENTRY [{timeframe.upper()}] {side_emoji} {side}",
-        SYMBOL,
-        "──────────",
-    ]
+    msg = (
+        f"⚠️ <b>PREPARE FOR ENTRY</b> [{timeframe.upper()}] {side_emoji} <b>{side}</b>\n"
+        f"<i>{SYMBOL}</i>\n"
+        f"<pre>"
+    )
+    
+    code_lines = []
     if points is not None:
-        lines.append(f"Points: {points}")
+        code_lines.append(f"Points:   {points}")
     if strength is not None:
-        lines.append(f"Strength: {strength}")
-    lines.append("Signal detected inside momentum zone")
-    lines.append("Awaiting confirmation on zone exit")
-    send("\n".join(lines))
+        code_lines.append(f"Strength: {strength}")
+    
+    code_lines.append(f"\nSignal detected inside momentum zone")
+    code_lines.append(f"Awaiting confirmation on zone exit")
+    
+    msg += "\n".join(code_lines) + "</pre>"
+    send(msg, parse_mode="HTML")
 
 
 def send_scalp_confirmed(timeframe, side, entry, sl, tp1, tp2, tp3,
@@ -131,23 +145,24 @@ def send_scalp_confirmed(timeframe, side, entry, sl, tp1, tp2, tp3,
     ⚡️/🚀 SCALP ENTRY CONFIRMED [TF] 🟢/🔴 SIDE
     """
     side_emoji = "🟢" if side == "LONG" else "🔴"
-    msg = (
-        f"{emoji} SCALP ENTRY CONFIRMED [{timeframe.upper()}] {side_emoji} {side}\n"
-        f"{SYMBOL}\n"
-        f"──────────\n"
+    code_part = (
         f"Trigger: Momentum Exit Confirmation\n"
-        f"Entry: {fmt_price(entry)}\n"
-        f"SL: {fmt_price(sl)}\n"
-        f"\n"
-        f"TP1: {fmt_price(tp1)} (30%)\n"
-        f"TP2: {fmt_price(tp2)} (40%)\n"
-        f"TP3: {fmt_price(tp3)} (30%)\n"
+        f"Entry:   {fmt_price(entry)}\n"
+        f"SL:      {fmt_price(sl)}\n\n"
+        f"TP1:     {fmt_price(tp1)} (30%)\n"
+        f"TP2:     {fmt_price(tp2)} (40%)\n"
+        f"TP3:     {fmt_price(tp3)} (30%)\n"
         f"──────────\n"
         f"Strength: {strength}\n"
-        f"──────────\n"
-        f"Size: {size}%"
+        f"Size:     {size}%"
     )
-    send(msg)
+    
+    msg = (
+        f"<b>{emoji} SCALP ENTRY CONFIRMED</b> [{timeframe.upper()}] {side_emoji} <b>{side}</b>\n"
+        f"<i>{SYMBOL}</i>\n"
+        f"<pre>{code_part}</pre>"
+    )
+    send(msg, parse_mode="HTML")
 
 
 def send_scalp_closed(timeframe, side, price, emoji="⚡️"):
@@ -155,14 +170,17 @@ def send_scalp_closed(timeframe, side, price, emoji="⚡️"):
     ⚡️/🚀 SCALP WINDOW CLOSED [TF] 🟢/🔴 SIDE
     """
     side_emoji = "🟢" if side == "LONG" else "🔴"
-    msg = (
-        f"{emoji} SCALP WINDOW CLOSED [{timeframe.upper()}] {side_emoji} {side}\n"
-        f"{SYMBOL}\n"
-        f"──────────\n"
+    code_part = (
         f"Momentum: Zone Exit\n"
-        f"Price: {fmt_price(price)}"
+        f"Price:    {fmt_price(price)}"
     )
-    send(msg)
+    
+    msg = (
+        f"<b>{emoji} SCALP WINDOW CLOSED</b> [{timeframe.upper()}] {side_emoji} <b>{side}</b>\n"
+        f"<i>{SYMBOL}</i>\n"
+        f"<pre>{code_part}</pre>"
+    )
+    send(msg, parse_mode="HTML")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -202,11 +220,11 @@ def send_daily_levels(date_str, daily_open, resistance, resistance_pct,
         f"🚨 Critical Low   {fmt_price(critical_low)}"
     )
     msg = (
-        f"📊 {SYMBOL} DAILY LEVELS\n"
-        f"──────────\n"
-        f"• {date_str}\n"
-        f"• DO: {fmt_price(daily_open)}\n"
-        f"\n"
+        f"<b>📊 {SYMBOL} DAILY LEVELS</b>\n"
+        f"<blockquote>"
+        f"• Date: <i>{date_str}</i>\n"
+        f"• DO:   {fmt_price(daily_open)}\n"
+        f"</blockquote>\n"
         f"<pre>{quote}</pre>"
     )
     
@@ -214,6 +232,159 @@ def send_daily_levels(date_str, daily_open, resistance, resistance_pct,
         send_photo(chart_path, caption=msg)
     else:
         send(msg, parse_mode="HTML")
+        
+# ═══════════════════════════════════════════════════════════════
+# PERFORMANCE SUMMARY
+# ═══════════════════════════════════════════════════════════════
+
+def send_performance_summary(stats):
+    """Send daily signal performance recap."""
+    if not stats or stats["total"] == 0:
+        return
+
+    formatted_stats = (
+        f"TP1 Hit:  {stats['tp1_hits']}\n"
+        f"TP2 Hit:  {stats['tp2_hits']}\n"
+        f"TP3 Hit:  {stats['tp3_hits']}\n"
+        f"SL Hit:   {stats['sl_hits']}\n"
+        f"Open:     {stats['still_open']}\n"
+        f"───────────────────\n"
+        f"Win Rate: {stats['win_rate']:.1f}%"
+    )
+
+    msg = (
+        f"📊 SIGNAL PERFORMANCE\n"
+        f"\n"
+        f"Total Signals: {stats['total']}\n"
+        f"<pre>{formatted_stats}</pre>"
+    )
+    send(msg, parse_mode="HTML")
+
+
+# ═══════════════════════════════════════════════════════════════
+# PRICE APPROACHING LEVEL
+# ═══════════════════════════════════════════════════════════════
+
+def send_approaching_level(level_name, level_price, current_price, distance_pct):
+    """Alert when price is within threshold of a key level."""
+    direction = "above" if current_price > level_price else "below"
+    
+    code_part = (
+        f"Level:    {fmt_price(level_price)}\n"
+        f"Price:    {fmt_price(current_price)}\n"
+        f"Distance: {distance_pct:.2f}% {direction}"
+    )
+    
+    msg = (
+        f"⚠️ PRICE APPROACHING TO {level_name.upper()} LEVEL\n"
+        f"\n"
+        f"<pre>{code_part}</pre>"
+    )
+    send(msg, parse_mode="HTML")
+
+
+# ═══════════════════════════════════════════════════════════════
+# FUNDING RATE ALERT
+# ═══════════════════════════════════════════════════════════════
+
+def send_funding_alert(rate, direction):
+    """Alert when funding rate is extreme."""
+    rate_pct = rate * 100
+    emoji = "🟢" if direction == "POSITIVE" else "🔴"
+    
+    code_part = (
+        f"{emoji} Rate: {rate_pct:.4f}%\n"
+        f"Direction: {direction}\n"
+        f"Note: High funding = potential reversal"
+    )
+    
+    msg = (
+        f"💰 EXTREME FUNDING RATE\n"
+        f"\n"
+        f"<pre>{code_part}</pre>"
+    )
+    send(msg, parse_mode="HTML")
+
+
+# ═══════════════════════════════════════════════════════════════
+# VOLUME SPIKE
+# ═══════════════════════════════════════════════════════════════
+
+def send_volume_spike(tf, current_vol, avg_vol, multiplier, price):
+    """Alert when volume is abnormally high."""
+    code_part = (
+        f"Volume:     {current_vol:,.0f}\n"
+        f"Average:    {avg_vol:,.0f}\n"
+        f"Multiplier: {multiplier:.1f}x\n"
+        f"Price:      {fmt_price(price)}"
+    )
+    
+    msg = (
+        f"📈 VOLUME SPIKE [{tf.upper()}]\n"
+        f"\n"
+        f"<pre>{code_part}</pre>"
+    )
+    send(msg, parse_mode="HTML")
+
+
+# ═══════════════════════════════════════════════════════════════
+# SESSION SUMMARY
+# ═══════════════════════════════════════════════════════════════
+
+def send_session_summary(session_name, price_open, price_close, signals_count, levels_tested):
+    """Send session recap at session close."""
+    change = price_close - price_open
+    change_pct = (change / price_open) * 100 if price_open else 0
+    direction = "+" if change >= 0 else ""
+
+    code_part = (
+        f"Open:   {fmt_price(price_open)}\n"
+        f"Close:  {fmt_price(price_close)}\n"
+        f"Change: {direction}{fmt_price(change)} ({direction}{change_pct:.2f}%)\n"
+        f"───────────────────\n"
+        f"Signals:       {signals_count}\n"
+        f"Levels Tested: {levels_tested}"
+    )
+
+    msg = (
+        f"🕐 {session_name} SESSION CLOSE\n"
+        f"\n"
+        f"<pre>{code_part}</pre>"
+    )
+    send(msg, parse_mode="HTML")
+
+
+# ═══════════════════════════════════════════════════════════════
+# ALERT BATCHING
+# ═══════════════════════════════════════════════════════════════
+
+def send_batched_alerts(alerts):
+    """Send multiple alerts as a single message."""
+    if not alerts:
+        return
+
+    lines = []
+    for i, alert in enumerate(alerts, 1):
+        lines.append(f"{i}. {alert['type']}")
+        if "tf" in alert:
+            lines.append(f"   TF:    {alert['tf'].upper()}")
+        if "side" in alert:
+            lines.append(f"   Side:  {alert['side']}")
+        if "price" in alert:
+            lines.append(f"   Price: {fmt_price(alert['price'])}")
+        if "note" in alert:
+            lines.append(f"   {alert['note']}")
+        lines.append("")  # Empty line between alerts
+
+    code_part = "\n".join(lines).strip()
+    
+    msg = (
+        f"📑 ALERT BATCH ({len(alerts)} signals)\n"
+        f"\n"
+        f"<pre>{code_part}</pre>"
+    )
+
+    send(msg, parse_mode="HTML")
 
 
 # ═══════════════════════════════════════════════════════════════

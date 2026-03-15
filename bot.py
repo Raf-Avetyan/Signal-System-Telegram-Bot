@@ -11,15 +11,19 @@ from datetime import datetime, timezone
 
 from config import (
     SYMBOL, SCALP_TIMEFRAMES, POLL_INTERVAL,
-    TIMEFRAME_PROFILES,
+    TIMEFRAME_PROFILES, FUNDING_THRESHOLD, FUNDING_CHECK_INTERVAL,
+    FUNDING_COOLDOWN, VOLUME_SPIKE_MULT, VOLUME_SPIKE_TIMEFRAMES,
+    VOLUME_AVG_PERIOD, APPROACH_THRESHOLD, APPROACH_COOLDOWN,
+    APPROACH_LEVELS, SESSIONS
 )
-from data import fetch_klines, fetch_daily, fetch_weekly, fetch_monthly
+from data import fetch_klines, fetch_daily, fetch_weekly, fetch_monthly, fetch_funding_rate
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
 from momentum import calculate_momentum, ScalpTracker
 from signals import check_momentum_confirm, check_range_confirm, check_flow_confirm
 from confirmation import ConfirmationTracker
 from charting import generate_daily_levels_chart
+from tracker import SignalTracker
 import telegram as tg
 
 
@@ -45,10 +49,34 @@ class PonchBot:
         self.levels = {}
         self.last_levels_date = None
 
+        # ─── New Features ─────────────────────────────────
+        self.tracker = SignalTracker()
+        self.approach_alerts = {}      # { "Pump": timestamp }
+        self.last_funding_check = 0
+        self.last_funding_alert = 0
+        self.sent_sessions = set()     # "session_LONDON_2023-10-14"
+
+        # Alert Batching
+        self.pending_alerts = []
+        self.batch_timer_start = None
+
+        # Mute state
+        self.muted_until = None
+
+    def queue_alert(self, alert_dict):
+        """Queue alert for batching."""
+        if self.muted_until and datetime.now(timezone.utc) < self.muted_until:
+            return  # Suppress alerts if muted
+        self.pending_alerts.append(alert_dict)
+        if self.batch_timer_start is None:
+            self.batch_timer_start = time.time()
+
+
     def run(self):
         """Main loop — fetches data and processes signals."""
+
         print(f"{'='*50}")
-        print(f"  Ponch Signal System")
+        print(f"  Ponch Signal System (v2)")
         print(f"  Symbol: {SYMBOL}")
         print(f"  Timeframes: {', '.join(SCALP_TIMEFRAMES)}")
         print(f"  Poll interval: {POLL_INTERVAL}s")
@@ -72,6 +100,7 @@ class PonchBot:
     def _tick(self):
         """One iteration of the main loop."""
         now = datetime.now(timezone.utc)
+        current_time = time.time()
         print(f"\n[{now.strftime('%H:%M:%S')} UTC] Fetching data...")
 
         # ─── Check if new day → update levels & send report ──
@@ -82,13 +111,56 @@ class PonchBot:
             self.last_levels_date = today
             self.sent_signals.clear()  # Reset duplicate tracking
 
+        # ─── Check Funding Rate ──────────────────────────────
+        if current_time - self.last_funding_check > FUNDING_CHECK_INTERVAL:
+            self.last_funding_check = current_time
+            rate = fetch_funding_rate()
+            if rate is not None:
+                if abs(rate) >= FUNDING_THRESHOLD:
+                    if current_time - self.last_funding_alert > FUNDING_COOLDOWN:
+                        direction = "POSITIVE" if rate > 0 else "NEGATIVE"
+                        self.queue_alert({
+                            "type": "FUNDING ALERT",
+                            "note": f"{direction} Funding Rate: {rate*100:.4f}%"
+                        })
+                        tg.send_funding_alert(rate, direction)
+                        self.last_funding_alert = current_time
+
+        # ─── Check Session Closes ────────────────────────────
+        current_hour = now.hour
+        for s_name, s_times in SESSIONS.items():
+            if current_hour == s_times["close"]:
+                session_key = f"session_{s_name}_{today}"
+                if session_key not in self.sent_sessions:
+                    self.sent_sessions.add(session_key)
+                    # Get session recap data
+                    stats = self.tracker.get_session_stats(s_times["open"], s_times["close"])
+                    # Send telegram msg (price data mock for now, we'd need exact open/close, simplifying to just stats or 0)
+                    tg.send_session_summary(s_name, 0, 0, stats["total"], "Active")
+
         # ─── Process each scalp timeframe ────────────────────
+        latest_price = None
         for tf in SCALP_TIMEFRAMES:
             df = fetch_klines(interval=tf, limit=200)
             if df.empty:
                 continue
 
+            if latest_price is None:
+                latest_price = float(df.iloc[-1]["Close"])
+
             self._process_timeframe(tf, df)
+
+        # ─── Update Performance Tracker ──────────────────────
+        if latest_price is not None:
+            self.tracker.check_outcomes(latest_price)
+
+        # ─── Flush Batched Alerts ────────────────────────────
+        if self.pending_alerts and self.batch_timer_start:
+            # If 30 seconds have passed since the first queued alert, flush
+            if current_time - self.batch_timer_start >= 30:
+                tg.send_batched_alerts(self.pending_alerts)
+                self.pending_alerts = []
+                self.batch_timer_start = None
 
     def _update_levels(self):
         """Fetch daily/weekly/monthly data and calculate levels."""
@@ -114,6 +186,15 @@ class PonchBot:
         if not self.levels:
             return
 
+        # --- Performance Summary first ---
+        try:
+            stats = self.tracker.get_daily_summary()
+            if stats:
+                tg.send_performance_summary(stats)
+            self.tracker.cleanup_old(7)
+        except Exception as e:
+            print(f"[TRACKER ERROR] {e}")
+
         date_str = now.strftime("%d.%m.%Y")
         do = self.levels["DO"]
 
@@ -130,14 +211,14 @@ class PonchBot:
         tg.send_daily_levels(
             date_str=date_str,
             daily_open=do,
-            resistance=self.levels["Resistance"],
-            resistance_pct=self.levels["ResistancePct"],
-            support=self.levels["Support"],
-            support_pct=self.levels["SupportPct"],
-            volatility=self.levels["Volatility"],
-            volatility_pct=self.levels["VolatilityPct"],
-            critical_high=self.levels["CriticalHigh"],
-            critical_low=self.levels["CriticalLow"],
+            resistance=self.levels.get("Pump", 0),
+            resistance_pct=self.levels.get("ResistancePct", 0),
+            support=self.levels.get("Dump", 0),
+            support_pct=self.levels.get("SupportPct", 0),
+            volatility=self.levels.get("Volatility", 0),
+            volatility_pct=self.levels.get("VolatilityPct", 0),
+            critical_high=self.levels.get("PumpMax", 0),
+            critical_low=self.levels.get("DumpMax", 0),
             chart_path=chart_path
         )
         print("[TG] Daily levels report sent")
@@ -167,6 +248,41 @@ class PonchBot:
         prev_low  = float(prev["Low"])
 
         candle_ts = curr.name.strftime("%d.%m.%Y %H:%M UTC") if hasattr(curr.name, 'strftime') else ""
+
+        current_time = time.time()
+
+        # ─── Volume Spike Detection ──────────────────────
+        if tf in VOLUME_SPIKE_TIMEFRAMES and len(df) > VOLUME_AVG_PERIOD:
+            vol_col = df["Volume"]
+            avg_vol = vol_col.iloc[-VOLUME_AVG_PERIOD-1:-1].mean()
+            current_vol = float(curr["Volume"])
+            if avg_vol > 0 and current_vol > (avg_vol * VOLUME_SPIKE_MULT):
+                sig_key = f"volspike_{tf}_{candle_ts}"
+                if sig_key not in self.sent_signals:
+                    self.sent_signals.add(sig_key)
+                    self.queue_alert({
+                        "type": "VOLUME SPIKE",
+                        "tf": tf,
+                        "price": close,
+                        "note": f"{current_vol/avg_vol:.1f}x average volume"
+                    })
+                    tg.send_volume_spike(tf, current_vol, avg_vol, current_vol/avg_vol, close)
+
+        # ─── Price Approaching Key Levels ────────────────
+        if tf == "1h" and self.levels:
+            for lvl_name in APPROACH_LEVELS:
+                lvl_price = self.levels.get(lvl_name)
+                if lvl_price:
+                    dist_pct = abs(close - lvl_price) / lvl_price
+                    if dist_pct <= APPROACH_THRESHOLD:
+                        last_alert = self.approach_alerts.get(lvl_name, 0)
+                        if current_time - last_alert > APPROACH_COOLDOWN:
+                            self.queue_alert({
+                                "type": "APPROACHING LEVEL",
+                                "note": f"Approaching {lvl_name} ({dist_pct*100:.2f}%)"
+                            })
+                            tg.send_approaching_level(lvl_name, lvl_price, close, dist_pct * 100)
+                            self.approach_alerts[lvl_name] = current_time
 
         # ─── Liquidity Sweeps ────────────────────────────
         if self.levels:
@@ -283,6 +399,18 @@ class PonchBot:
                     emoji=emoji,
                 )
                 print(f"  [TG] Scalp Confirmed [{tf}] {evt['side']} @ {evt['entry']:,.2f}")
+                
+                # Log signal for performance tracking
+                self.tracker.log_signal(
+                    side=evt["side"],
+                    entry=evt["entry"],
+                    sl=evt["sl"],
+                    tp1=evt["tp1"],
+                    tp2=evt["tp2"],
+                    tp3=evt["tp3"],
+                    tf=tf,
+                    timestamp=candle_ts
+                )
 
             elif evt["type"] == "CLOSED":
                 tg.send_scalp_closed(tf, evt["side"], evt["price"], emoji=emoji)
