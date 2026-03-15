@@ -793,6 +793,7 @@ class PonchBot:
         close      = float(curr["Close"])
         atr_val    = float(curr["ATR"]) if "ATR" in curr else 0
         zone       = curr["MomentumZone"] if "MomentumZone" in curr else "NEUTRAL"
+        rsi_val    = float(curr["MomentumSmooth"]) if "MomentumSmooth" in curr else 50
 
         # ─── REAL-TIME MONITOR (Debug) ───────────────────
 
@@ -949,7 +950,7 @@ class PonchBot:
 
         # ─── Scalp Momentum System ───────────────────────
         tracker = self.scalp_trackers[tf]
-        events = tracker.update(zone, close, atr_val, candle_ts=candle_ts)
+        events = tracker.update(zone, close, atr_val, candle_ts=candle_ts, rsi_value=rsi_val)
 
         profile = TIMEFRAME_PROFILES.get(tf, TIMEFRAME_PROFILES["5m"])
         emoji = profile["emoji"]

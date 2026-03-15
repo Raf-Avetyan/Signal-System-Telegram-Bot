@@ -58,6 +58,7 @@ class ScalpTracker:
         PREPARED   → Prepare message sent, waiting for exit
         CONFIRMED  → Entry confirmed on zone exit
         CLOSED     → Window closed without confirmation
+        RESTING    → Cooldown period, waiting for RSI buffer (65/35)
     """
 
     def __init__(self, timeframe):
@@ -66,8 +67,9 @@ class ScalpTracker:
         self.side = None
         self.entry_price = None
         self.last_processed_ts = None # Cooldown timestamp
+        self.last_side = None         # Remember last side for resting buffer
 
-    def update(self, zone, close, atr_value, candle_ts=None):
+    def update(self, zone, close, atr_value, candle_ts=None, **extra):
         """
         Process new candle data. Returns list of events to act on.
 
@@ -75,6 +77,9 @@ class ScalpTracker:
                   "side": ..., "price": ..., ...}]
         """
         events = []
+
+        # Current smoothed RSI value
+        rsi_value = extra.get("rsi_value", 50)
 
         if self.state == "IDLE":
             # Cooldown check: don't restart on the same candle
@@ -103,7 +108,8 @@ class ScalpTracker:
 
             if zone == "NEUTRAL":
                 # Zone exit → CONFIRMED
-                self.state = "IDLE"
+                self.last_side = self.side # Store for RESTING logic
+                self.state = "RESTING"    # Move to RESTING instead of IDLE
                 self.last_processed_ts = candle_ts # Update cooldown timestamp
                 entry = close
                 calc = self._calc_sl_tp(entry, atr_value, self.side)
@@ -118,7 +124,8 @@ class ScalpTracker:
 
             elif zone == opposite_zone:
                 # Crossed directly to opposite zone → CLOSED without confirmation
-                self.state = "IDLE"
+                self.last_side = self.side
+                self.state = "RESTING" 
                 self.last_processed_ts = candle_ts # Update cooldown timestamp
                 events.append({
                     "type":  "CLOSED",
@@ -132,11 +139,25 @@ class ScalpTracker:
                     self.entry_price = None
                 else:
                     # Switch directly to the new zone's entry
+                    self.last_side = self.side # Remember for buffer
                     self.side = "SHORT" if opposite_zone == "OB" else "LONG"
                     self.entry_price = close
                     self.state = "ZONE_ENTRY"
                     events.append({"type": "OPEN", "side": self.side, "price": close})
                     events.append({"type": "PREPARE", "side": self.side, "price": close})
+
+        elif self.state == "RESTING":
+            # Buffer check: wait for RSI to move away from the edge
+            if self.last_side == "SHORT":
+                # SHORT confirmed above 70, must drop below 65 to reset
+                if rsi_value <= 65:
+                    self.state = "IDLE"
+                    self.last_side = None
+            else: # LONG
+                # LONG confirmed below 30, must rise above 35 to reset
+                if rsi_value >= 35:
+                    self.state = "IDLE"
+                    self.last_side = None
 
         return events
 
@@ -145,7 +166,8 @@ class ScalpTracker:
             "state": self.state,
             "side": self.side,
             "entry_price": self.entry_price,
-            "last_processed_ts": self.last_processed_ts
+            "last_processed_ts": self.last_processed_ts,
+            "last_side": self.last_side
         }
 
     def from_dict(self, data):
@@ -154,6 +176,7 @@ class ScalpTracker:
         self.side = data.get("side")
         self.entry_price = data.get("entry_price")
         self.last_processed_ts = data.get("last_processed_ts")
+        self.last_side = data.get("last_side")
 
     def _calc_sl_tp(self, entry, atr_val, side):
         """Calculate SL and 3 TP levels based on ATR."""
