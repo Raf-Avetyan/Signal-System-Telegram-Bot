@@ -64,7 +64,10 @@ class PonchBot:
         self.state_file = "bot_state.json"
         
         state = self._load_state()
-        self.daily_report_msg_id = state.get("daily_report_msg_id")
+        self.daily_report_msg_id = state.get("daily_report_msg_id") # Int or Dict: {"msg_id": ..., "data": ...}
+        self.session_msg_ids = state.get("session_msg_ids", {}) # { session_id: {msg_id, name, open, history} }
+        self.last_session_update = 0
+        self.last_daily_update   = 0
 
         # Macro Trend & Context
         self.macro_trend = "Ranging"
@@ -261,7 +264,10 @@ class PonchBot:
         import json
         try:
             with open(self.state_file, "w") as f:
-                json.dump({"daily_report_msg_id": self.daily_report_msg_id}, f)
+                json.dump({
+                    "daily_report_msg_id": self.daily_report_msg_id,
+                    "session_msg_ids": self.session_msg_ids
+                }, f)
         except: pass
 
     def _generate_current_chart(self, output_path="session_chart.png", show_sessions=True):
@@ -372,7 +378,7 @@ class PonchBot:
                     chart_path = self._generate_current_chart(f"session_open_{s_name}.png")
 
                     # Notify Telegram
-                    tg.send_session_open(
+                    resp = tg.send_session_open(
                         session_name=s_name, 
                         open_price=open_p, 
                         current_price=latest_price if is_mid else None,
@@ -381,6 +387,20 @@ class PonchBot:
                         low=self.session_data[session_id]["low"],
                         chart_path=chart_path
                     )
+                    
+                    if resp and "response" in resp:
+                        msg_data = resp["response"]
+                        if msg_data and "result" in msg_data:
+                            msg_id = msg_data["result"]["message_id"]
+                            # Now we store metadata so we can REGENERATE the text later
+                            self.session_msg_ids[session_id] = {
+                                "msg_id": msg_id,
+                                "name": s_name,
+                                "open": open_p,
+                                "history": history_text
+                            }
+                            self.last_session_update = current_time
+                            self._save_state()
 
                 # Update High/Low with current candle wicks
                 if is_active and session_id in self.session_data:
@@ -447,15 +467,82 @@ class PonchBot:
                 self.pending_alerts = []
                 self.batch_timer_start = None
 
+        # ─── Periodic Chart Updates ──────────────────────────
+        # 1. Session Updates (10s)
+        if current_time - self.last_session_update > 30:
+            self.last_session_update = current_time
+            if self.session_msg_ids:
+                print(f"[BOT] Refreshing session charts (10s interval)...")
+                chart_path = self._generate_current_chart(f"session_update_{now.strftime('%H%M%S')}.png")
+                if chart_path:
+                    for s_id, info in list(self.session_msg_ids.items()):
+                        s_data = self.session_data.get(s_id, {})
+                        new_html = tg.get_session_open_html(
+                            session_name=info["name"],
+                            open_price=info["open"],
+                            current_price=latest_price,
+                            history=info["history"],
+                            high=s_data.get("high"),
+                            low=s_data.get("low")
+                        )
+                        res = tg.edit_message_media(info["msg_id"], chart_path, caption=new_html)
+                        if res == "DELETED":
+                            del self.session_msg_ids[s_id]
+                            self._save_state()
+                    
+                    try:
+                        import os
+                        if os.path.exists(chart_path): os.remove(chart_path)
+                    except: pass
+
+        # 2. Daily Levels Update (15s)
+        if current_time - self.last_daily_update > 600:
+            self.last_daily_update = current_time
+            if self.daily_report_msg_id:
+                print(f"[BOT] Refreshing daily levels report (15s interval)...")
+                chart_path = self._generate_current_chart(f"daily_update_{now.strftime('%H%M%S')}.png", show_sessions=False)
+                if chart_path:
+                    d_msg_id = self.daily_report_msg_id if isinstance(self.daily_report_msg_id, (int, str)) else self.daily_report_msg_id.get("msg_id")
+                    d_data = self.daily_report_msg_id.get("data") if isinstance(self.daily_report_msg_id, dict) else None
+                    if not d_data and self.levels:
+                        d_data = {
+                            "date": now.strftime("%d.%m.%Y"),
+                            "do": self.levels.get("DO", 0),
+                            "res": self.levels.get("Pump", 0), "res_p": self.levels.get("ResistancePct", 0),
+                            "sup": self.levels.get("Dump", 0), "sup_p": self.levels.get("SupportPct", 0),
+                            "vol": self.levels.get("Volatility", 0), "vol_p": self.levels.get("VolatilityPct", 0),
+                            "high": self.levels.get("PumpMax", 0), "low": self.levels.get("DumpMax", 0)
+                        }
+                    if d_data:
+                        new_inds = fetch_global_indicators()
+                        new_html = tg.get_daily_levels_html(
+                            date_str=d_data["date"], daily_open=d_data["do"],
+                            resistance=d_data["res"], resistance_pct=d_data["res_p"],
+                            support=d_data["sup"], support_pct=d_data["sup_p"],
+                            volatility=d_data["vol"], volatility_pct=d_data["vol_p"],
+                            critical_high=d_data["high"], critical_low=d_data["low"],
+                            indicators=new_inds
+                        )
+                        tg.edit_message_media(d_msg_id, chart_path, caption=new_html)
+
+                    try:
+                        import os
+                        if os.path.exists(chart_path): os.remove(chart_path)
+                    except: pass
+
     def _update_levels_if_needed(self, now):
         """Update levels at the start of a new day."""
         today = now.strftime("%d.%m.%Y")
         if today != self.last_levels_date:
+            self.daily_report_msg_id = None # Clear OLD one before sending NEW one
             self._update_levels()
             self._send_daily_report(now)
+            
             self.last_levels_date = today
             self.sent_signals.clear()  # Reset duplicate tracking
             self.session_history.clear() # Reset session history for new day
+            self.session_msg_ids.clear() # Reset message IDs for new day
+            self._save_state()
         
         self._reconstruct_session_history(now.hour)
 
@@ -508,7 +595,7 @@ class PonchBot:
         # Fetch indicators
         indicators = fetch_global_indicators()
 
-        tg.send_daily_levels(
+        resp_data = tg.send_daily_levels(
             date_str=date_str,
             daily_open=do,
             resistance=self.levels.get("Pump", 0),
@@ -522,6 +609,22 @@ class PonchBot:
             indicators=indicators,
             chart_path=chart_path
         )
+        
+        if resp_data and "response" in resp_data:
+            msg_data = resp_data["response"]
+            if msg_data and "result" in msg_data:
+                self.daily_report_msg_id = {
+                    "msg_id": msg_data["result"]["message_id"],
+                    "data": {
+                        "date": date_str, "do": do,
+                        "res": self.levels.get("Pump", 0), "res_p": self.levels.get("ResistancePct", 0),
+                        "sup": self.levels.get("Dump", 0), "sup_p": self.levels.get("SupportPct", 0),
+                        "vol": self.levels.get("Volatility", 0), "vol_p": self.levels.get("VolatilityPct", 0),
+                        "high": self.levels.get("PumpMax", 0), "low": self.levels.get("DumpMax", 0)
+                    }
+                }
+                self._save_state()
+        
         print("[TG] Daily levels report sent")
 
     def _process_timeframe(self, tf, df):

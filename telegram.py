@@ -4,6 +4,7 @@ from config import BOT_TOKEN, CHAT_ID, SYMBOL
 
 API_URL_MSG   = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 API_URL_PHOTO = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+API_URL_EDIT_MEDIA = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageMedia"
 
 
 def send(text, parse_mode=None):
@@ -18,8 +19,11 @@ def send(text, parse_mode=None):
         resp = requests.post(API_URL_MSG, data=payload)
         if not resp.ok:
             print(f"[TG ERROR] {resp.status_code}: {resp.text}")
+            return None
+        return resp.json()
     except Exception as e:
         print(f"[TG ERROR] {e}")
+        return None
 
 
 def send_photo(photo_path, caption=None):
@@ -35,8 +39,45 @@ def send_photo(photo_path, caption=None):
             resp = requests.post(API_URL_PHOTO, data=payload, files=files)
             if not resp.ok:
                 print(f"[TG ERROR] {resp.status_code}: {resp.text}")
+                return None
+            return resp.json()
     except Exception as e:
         print(f"[TG ERROR] Photo: {e}")
+        return None
+
+
+def edit_message_media(message_id, photo_path, caption=None):
+    """Edit the photo of an existing message."""
+    try:
+        import json
+        with open(photo_path, 'rb') as f:
+            media = {
+                "type": "photo",
+                "media": "attach://photo",
+                "caption": caption if caption else "",
+                "parse_mode": "HTML"
+            }
+            payload = {
+                "chat_id": CHAT_ID,
+                "message_id": message_id,
+                "media": json.dumps(media)
+            }
+            files = {'photo': f}
+            resp = requests.post(API_URL_EDIT_MEDIA, data=payload, files=files)
+            if not resp.ok:
+                # 1. Ignore "message is not modified" errors
+                if "message is not modified" in resp.text:
+                    return True
+                # 2. Handle deleted messages
+                if "message to edit not found" in resp.text:
+                    return "DELETED"
+                
+                print(f"[TG ERROR] Edit Media {resp.status_code}: {resp.text}")
+                return False
+            return True
+    except Exception as e:
+        print(f"[TG ERROR] Edit Media: {e}")
+        return False
 
 
 def fmt_price(price):
@@ -213,12 +254,10 @@ def send_extreme(side, total_points, confirmations, indicators_list):
 # DAILY LEVELS REPORT
 # ═══════════════════════════════════════════════════════════════
 
-def send_daily_levels(date_str, daily_open, resistance, resistance_pct,
-                      support, support_pct, volatility, volatility_pct,
-                      critical_high, critical_low, indicators=None, chart_path=None):
-    """
-    📊 BTCUSDT DAILY LEVELS
-    """
+def get_daily_levels_html(date_str, daily_open, resistance, resistance_pct,
+                          support, support_pct, volatility, volatility_pct,
+                          critical_high, critical_low, indicators=None):
+    """Generate the HTML for daily levels message."""
     indicator_part = ""
     if indicators:
         btc_d = indicators.get("BTC.D_change", 0)
@@ -250,11 +289,26 @@ def send_daily_levels(date_str, daily_open, resistance, resistance_pct,
         f"{indicator_part}"
         f"<pre>{quote}</pre>"
     )
+    return msg
+
+def send_daily_levels(date_str, daily_open, resistance, resistance_pct,
+                      support, support_pct, volatility, volatility_pct,
+                      critical_high, critical_low, indicators=None, chart_path=None):
+    """
+    📊 BTCUSDT DAILY LEVELS
+    """
+    msg = get_daily_levels_html(
+        date_str, daily_open, resistance, resistance_pct,
+        support, support_pct, volatility, volatility_pct,
+        critical_high, critical_low, indicators
+    )
     
     if chart_path:
-        send_photo(chart_path, caption=msg)
+        resp = send_photo(chart_path, caption=msg)
+        return {"response": resp, "html": msg}
     else:
-        send(msg, parse_mode="HTML")
+        resp = send(msg, parse_mode="HTML")
+        return {"response": resp, "html": msg}
         
 # ═══════════════════════════════════════════════════════════════
 # PERFORMANCE SUMMARY
@@ -354,8 +408,8 @@ def send_volume_spike(tf, current_vol, avg_vol, multiplier, price):
 # SESSION ALERTS
 # ═══════════════════════════════════════════════════════════════
 
-def send_session_open(session_name, open_price, current_price=None, history=None, high=None, low=None, chart_path=None):
-    """Send alert when a session opens or bot starts mid-session."""
+def get_session_open_html(session_name, open_price, current_price=None, history=None, high=None, low=None):
+    """Generate the HTML for session open message."""
     is_mid = current_price is not None and abs(current_price - open_price) > 0.0001
     
     lines = [f"Open:   {fmt_price(open_price)}"]
@@ -379,11 +433,18 @@ def send_session_open(session_name, open_price, current_price=None, history=None
     
     if history:
         msg += f"\n\n{history}"
+    return msg
+
+def send_session_open(session_name, open_price, current_price=None, history=None, high=None, low=None, chart_path=None):
+    """Send alert when a session opens or bot starts mid-session."""
+    msg = get_session_open_html(session_name, open_price, current_price, history, high, low)
         
     if chart_path and os.path.exists(chart_path):
-        send_photo(chart_path, caption=msg)
+        resp = send_photo(chart_path, caption=msg)
+        return {"response": resp, "html": msg}
     else:
         send(msg, parse_mode="HTML")
+        return None
 
 
 def send_session_summary(session_name, price_open, price_close, signals_count, levels_tested, history=None, high=None, low=None, chart_path=None):
@@ -413,9 +474,10 @@ def send_session_summary(session_name, price_open, price_close, signals_count, l
         msg += f"\n\n{history}"
         
     if chart_path and os.path.exists(chart_path):
-        send_photo(chart_path, caption=msg)
+        return send_photo(chart_path, caption=msg)
     else:
         send(msg, parse_mode="HTML")
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════
