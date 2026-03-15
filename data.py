@@ -139,3 +139,100 @@ def fetch_funding_rate(symbol=SYMBOL):
     except Exception as e:
         print(f"[ERROR] Failed to fetch funding rate: {e}")
     return None
+
+
+def fetch_open_interest(symbol=SYMBOL):
+    """
+    Fetch current open interest for the perpetual swap.
+    Returns float (number of contracts) or None.
+    """
+    okx_symbol = symbol.replace("USDT", "-USDT-SWAP")
+    url = f"{OKX_BASE}/api/v5/public/open-interest"
+    params = {"instId": okx_symbol}
+
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        data = resp.json()
+        if data.get("code") == "0" and data.get("data"):
+            oi = float(data["data"][0].get("oi", 0))
+            return oi
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch OI: {e}")
+    return None
+
+
+def fetch_liquidations(symbol=SYMBOL):
+    """
+    Fetch recent liquidation history for the instrument.
+    Aggregates the total USD value of liquidations in the last block.
+    """
+    okx_symbol = symbol.replace("USDT", "-USDT-SWAP")
+    url = f"{OKX_BASE}/api/v5/public/liquidation-orders"
+    # instType=SWAP, mgnMode=cross/isolated
+    params = {
+        "instType": "SWAP",
+        "instId": okx_symbol,
+        "state": "filled",
+        "limit": 50
+    }
+
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        data = resp.json()
+        if data.get("code") == "0" and data.get("data"):
+            total_usd = 0
+            for order in data["data"]:
+                # posSide: long/short
+                sz = float(order.get("sz", 0))
+                price = float(order.get("bkPx", 0)) # Bankruptcy price
+                total_usd += sz * price
+            return total_usd
+    except Exception as e:
+        # print(f"[DEBUG] No recent liquidations found or error: {e}")
+        pass
+    return 0
+
+
+def fetch_global_indicators():
+    """
+    Fetch BTC Dominance and DXY Index approximate values.
+    Uses EUR-USD index as a proxy for DXY.
+    """
+    indicators = {
+        "BTC.D_change": 0.0,
+        "DXY_change": 0.0
+    }
+    
+    try:
+        # 1. BTC Dominance Proxy: BTC Index vs ETH Index
+        btc_resp = requests.get(f"{OKX_BASE}/api/v5/market/ticker", params={"instId": "BTC-USDT"})
+        eth_resp = requests.get(f"{OKX_BASE}/api/v5/market/ticker", params={"instId": "ETH-USDT"})
+        
+        if btc_resp.ok and eth_resp.ok:
+            btc_data = btc_resp.json()["data"][0]
+            eth_data = eth_resp.json()["data"][0]
+            
+            btc_24h = float(btc_data["last"]) / float(btc_data["open24h"]) - 1
+            eth_24h = float(eth_data["last"]) / float(eth_data["open24h"]) - 1
+            
+            indicators["BTC.D_change"] = (btc_24h - eth_24h) * 100
+
+        # 2. DXY Proxy: Inverse of EUR-USD index daily change
+        # DXY is ~57% EUR, so -EURUSD change is a strong proxy.
+        dxy_resp = requests.get(f"{OKX_BASE}/api/v5/market/index-candles", 
+                                params={"instId": "EUR-USD", "bar": "1D", "limit": "1"})
+        
+        if dxy_resp.ok and dxy_resp.json()["data"]:
+            day_data = dxy_resp.json()["data"][0]
+            # [ts, open, high, low, close, confirm]
+            eur_open = float(day_data[1])
+            eur_curr = float(day_data[4])
+            
+            if eur_open > 0:
+                eur_change = (eur_curr / eur_open) - 1
+                indicators["DXY_change"] = -eur_change * 100
+            
+    except Exception as e:
+        print(f"[ERROR] Global indicators: {e}")
+        
+    return indicators

@@ -72,3 +72,61 @@ from charting import generate_daily_levels_chart
 # ])
 
 # # print("Test messages sent to Telegram!")
+
+# print("1. Sending Daily Levels with Global Context...")
+# indicators = fetch_global_indicators() # Get real live proxy values
+# # Mock some data for the chart
+# try:
+#     df = fetch_klines(interval="1h", limit=48)
+#     levels_dict = {
+#         "Pump": 72000, "ResistancePct": 1.4,
+#         "Dump": 70500, "SupportPct": -0.7,
+#         "Volatility": 71200, "VolatilityPct": 0.5,
+#         "PumpMax": 74000, "DumpMax": 68000,
+#         "DO": 71000
+#     }
+#     chart_path = generate_daily_levels_chart(df, levels_dict)
+# except:
+#     chart_path = None
+
+# tg.send_daily_levels(
+#     "15.03.2024", 71000.00, 
+#     72000.00, 1.4, 70500.00, -0.7, 
+#     71200.00, 0.5, 74000.00, 68000.00,
+#     indicators=indicators,
+#     chart_path=chart_path
+# )
+
+# print("2. Sending Extreme Scalp Signal (Calculated Score)...")
+# # Mocking an 'Extreme' 9/10 signal
+# tg.send_scalp_confirmed(
+#     timeframe="15m", 
+#     side="LONG", 
+#     entry=70850.00, 
+#     sl=70600.00, 
+#     tp1=70950.00, tp2=71200.00, tp3=71500.00,
+#     strength="Extreme", 
+#     size=2.0, 
+#     score=9, 
+#     trend="Trending Bullish", 
+#     reasons=["Near DO", "Extreme Channel", "Volume Spike", "Trend Aligned", "High Liquidations ($150k)"],
+#     emoji="🚀"
+# )
+
+# print("3. Sending Counter-Trend Scalp Signal (Low Score)...")
+# # Mocking a weak signal
+# tg.send_scalp_confirmed(
+#     timeframe="5m", 
+#     side="SHORT", 
+#     entry=71500.00, 
+#     sl=71800.00, 
+#     tp1=71300.00, tp2=71100.00, tp3=70800.00,
+#     strength="Weak", 
+#     size=1.0, 
+#     score=3, 
+#     trend="Trending Bullish", 
+#     reasons=["Outer Channel", "Counter-trend"],
+#     emoji="⚡️"
+# )
+
+# print("\n[OK] Test messages sent to Telegram! Check your bot.")

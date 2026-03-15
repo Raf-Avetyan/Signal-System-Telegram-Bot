@@ -16,13 +16,17 @@ from config import (
     VOLUME_AVG_PERIOD, APPROACH_THRESHOLD, APPROACH_COOLDOWN,
     APPROACH_LEVELS, SESSIONS, ALERT_BATCH_WINDOW
 )
-from data import fetch_klines, fetch_daily, fetch_weekly, fetch_monthly, fetch_funding_rate
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
-from momentum import calculate_momentum, ScalpTracker
+from momentum import calculate_momentum, ScalpTracker, detect_trend
+from scoring import calculate_signal_score
 from signals import check_momentum_confirm, check_range_confirm, check_flow_confirm
 from confirmation import ConfirmationTracker
 from charting import generate_daily_levels_chart
+from data import (
+    fetch_klines, fetch_all_timeframes, fetch_daily, fetch_weekly, fetch_monthly, 
+    fetch_funding_rate, fetch_open_interest, fetch_liquidations, fetch_global_indicators
+)
 from tracker import SignalTracker
 import telegram as tg
 
@@ -57,6 +61,15 @@ class PonchBot:
         self.sent_sessions = set()     # "session_LONDON_2023-10-14"
         self.session_data = {}         # { "LONDON_2024-03-15": {"open": 70000, "levels": set()} }
         self.session_history = {}      # { "ASIA": "Asia recap text" }
+        self.state_file = "bot_state.json"
+        
+        state = self._load_state()
+        self.daily_report_msg_id = state.get("daily_report_msg_id")
+
+        # Macro Trend & Context
+        self.macro_trend = "Ranging"
+        self.last_oi = 0
+        self.last_liqs = 0
 
         # Alert Batching
         self.pending_alerts = []
@@ -177,7 +190,7 @@ class PonchBot:
                     sign = "+" if change >= 0 else ""
                     
                     summary_str = (
-                        f"<b>{s_name} RECAP</b>\n"
+                        f"<b>{s_name} SESSION</b>\n"
                         f"<pre>"
                         f"Open:    {open_p:,.2f}\n"
                         f"High:    {high_p:,.2f}\n"
@@ -203,7 +216,7 @@ class PonchBot:
             if s_name in self.session_history:
                 hist_items.append(self.session_history[s_name])
             
-            # 2. If it's currently active (started before us), show Snapshot "SO FAR"
+            # 2. If it's currently active (started before us), show Snapshot "YET"
             else:
                 today = datetime.now(timezone.utc).strftime("%d.%m.%Y")
                 session_id = f"{s_name}_{today}"
@@ -221,7 +234,7 @@ class PonchBot:
                     stats = self.tracker.get_session_stats(SESSIONS[s_name]["open"], SESSIONS[s_name]["close"])
                     
                     snap_str = (
-                        f"<b>{s_name} (SO FAR)</b>\n"
+                        f"<b>{s_name} SESSION</b>\n"
                         f"<pre>"
                         f"Open:    {o:,.2f}\n"
                         f"High:    {h:,.2f}\n"
@@ -233,6 +246,23 @@ class PonchBot:
                     hist_items.append(snap_str)
                     
         return "\n\n".join(hist_items) if hist_items else None
+
+    def _load_state(self):
+        import json
+        import os
+        if os.path.exists(self.state_file):
+            try:
+                with open(self.state_file, "r") as f:
+                    return json.load(f)
+            except: pass
+        return {}
+
+    def _save_state(self):
+        import json
+        try:
+            with open(self.state_file, "w") as f:
+                json.dump({"daily_report_msg_id": self.daily_report_msg_id}, f)
+        except: pass
 
     def _generate_current_chart(self, output_path="session_chart.png", show_sessions=True):
         """Generate a fresh chart image with current levels and sessions."""
@@ -250,19 +280,23 @@ class PonchBot:
         current_time = time.time()
         print(f"\n[{now.strftime('%H:%M:%S')} UTC] Fetching data...")
 
-        # ─── Check if new day → update levels & send report ──
-        today = now.strftime("%d.%m.%Y")
-        if today != self.last_levels_date:
-            self._update_levels()
-            self._send_daily_report(now)
-            self.last_levels_date = today
-            self.sent_signals.clear()  # Reset duplicate tracking
-            self.session_history.clear() # Reset session history for new day
-        
-        # Ensure history is present if we just started
-        self._reconstruct_session_history(now.hour)
+        # 1. Update Levels if new day
+        self._update_levels_if_needed(now)
 
-        # ─── Check Funding Rate ──────────────────────────────
+        # 2. Fetch Global context
+        self.last_oi = fetch_open_interest()
+        self.last_liqs = fetch_liquidations()
+
+        # 3. Fetch all timeframes
+        data = fetch_all_timeframes()
+        if not data: return
+
+        # 4. Update Macro Trend (1h baseline)
+        if "1h" in data:
+            self.macro_trend = detect_trend(data["1h"])
+            print(f"  Trend: {self.macro_trend}")
+
+        # 5. Check Funding Rate
         if current_time - self.last_funding_check > FUNDING_CHECK_INTERVAL:
             self.last_funding_check = current_time
             rate = fetch_funding_rate()
@@ -270,26 +304,18 @@ class PonchBot:
                 if abs(rate) >= FUNDING_THRESHOLD:
                     if current_time - self.last_funding_alert > FUNDING_COOLDOWN:
                         direction = "POSITIVE" if rate > 0 else "NEGATIVE"
-                        self.queue_alert(
-                            alert_dict={
-                                "type": "FUNDING ALERT",
-                                "note": f"{direction} Funding Rate: {rate*100:.4f}%"
-                            },
-                            callback=tg.send_funding_alert,
-                            args=(rate, direction)
-                        )
+                        tg.send_funding_alert(rate, direction)
                         self.last_funding_alert = current_time
 
-        # ─── Process each scalp timeframe ────────────────────
+        # 6. Process each scalp timeframe
         latest_price = None
         current_candle_high = 0
         current_candle_low = 9999999
         
         for tf in SCALP_TIMEFRAMES:
-            df = fetch_klines(interval=tf, limit=200)
-            if df.empty:
-                continue
-
+            if tf not in data: continue
+            df = data[tf]
+            
             # Update session-level H/L tracking using the current candle's wicks
             last_c = df.iloc[-1]
             current_candle_high = max(current_candle_high, float(last_c["High"]))
@@ -305,6 +331,7 @@ class PonchBot:
             self.tracker.check_outcomes(latest_price)
 
             # --- Session Tracking ---
+            today = now.strftime("%d.%m.%Y")
             current_hour = now.hour
             for s_name, s_times in SESSIONS.items():
                 session_id = f"{s_name}_{today}"
@@ -420,6 +447,18 @@ class PonchBot:
                 self.pending_alerts = []
                 self.batch_timer_start = None
 
+    def _update_levels_if_needed(self, now):
+        """Update levels at the start of a new day."""
+        today = now.strftime("%d.%m.%Y")
+        if today != self.last_levels_date:
+            self._update_levels()
+            self._send_daily_report(now)
+            self.last_levels_date = today
+            self.sent_signals.clear()  # Reset duplicate tracking
+            self.session_history.clear() # Reset session history for new day
+        
+        self._reconstruct_session_history(now.hour)
+
     def _update_levels(self):
         """Fetch daily/weekly/monthly data and calculate levels."""
         print("[LEVELS] Updating daily/weekly/monthly levels...")
@@ -466,6 +505,9 @@ class PonchBot:
         except Exception as e:
             print(f"[CHARTING] Failed to generate: {e}")
 
+        # Fetch indicators
+        indicators = fetch_global_indicators()
+
         tg.send_daily_levels(
             date_str=date_str,
             daily_open=do,
@@ -477,6 +519,7 @@ class PonchBot:
             volatility_pct=self.levels.get("VolatilityPct", 0),
             critical_high=self.levels.get("PumpMax", 0),
             critical_low=self.levels.get("DumpMax", 0),
+            indicators=indicators,
             chart_path=chart_path
         )
         print("[TG] Daily levels report sent")
@@ -669,6 +712,11 @@ class PonchBot:
                 print(f"  [TG] Prepare [{tf}] {evt['side']}")
 
             elif evt["type"] == "CONFIRMED":
+                # --- Calculate Signal Strength Score ---
+                score, reasons = calculate_signal_score(
+                    evt, df, self.levels, self.macro_trend, self.last_oi, self.last_liqs
+                )
+
                 tg.send_scalp_confirmed(
                     timeframe=tf,
                     side=evt["side"],
@@ -679,6 +727,9 @@ class PonchBot:
                     tp3=evt["tp3"],
                     strength=profile["strength"],
                     size=profile["size"],
+                    score=score,
+                    trend=self.macro_trend,
+                    reasons=reasons,
                     emoji=emoji,
                 )
                 print(f"  [TG] Scalp Confirmed [{tf}] {evt['side']} @ {evt['entry']:,.2f}")

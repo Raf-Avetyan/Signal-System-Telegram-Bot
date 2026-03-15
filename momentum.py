@@ -157,3 +157,32 @@ class ScalpTracker:
             tp3 = entry - atr_val * TP3_ATR_MULT
 
         return {"sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3}
+
+def detect_trend(df_1h):
+    """
+    Detect the macro trend based on 1h timeframe prices relative to EMAs.
+    Returns: "Trending Bullish", "Trending Bearish", or "Ranging"
+    """
+    if len(df_1h) < 200:
+        return "Ranging"
+
+    close = df_1h["Close"]
+    ema50 = close.ewm(span=50, adjust=False).mean()
+    ema100 = close.ewm(span=100, adjust=False).mean()
+    ema200 = close.ewm(span=200, adjust=False).mean()
+
+    curr_p = close.iloc[-1]
+    e50 = ema50.iloc[-1]
+    e100 = ema100.iloc[-1]
+    e200 = ema200.iloc[-1]
+
+    # Bullish: Price > all EMAs and EMAs are stacked (50 > 100 > 200)
+    if curr_p > e50 and e50 > e100 and e100 > e200:
+        return "Trending Bullish"
+
+    # Bearish: Price < all EMAs and EMAs are stacked (50 < 100 < 200)
+    elif curr_p < e50 and e50 < e100 and e100 < e200:
+        return "Trending Bearish"
+
+    # Otherwise Ranging
+    return "Ranging"

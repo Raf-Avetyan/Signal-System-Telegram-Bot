@@ -141,23 +141,30 @@ def send_scalp_prepare(timeframe, side, points=None, strength=None, emoji="⚡�
 
 
 def send_scalp_confirmed(timeframe, side, entry, sl, tp1, tp2, tp3,
-                         strength, size, emoji="⚡️"):
+                         strength, size, score=None, trend=None, reasons=None, emoji="⚡️"):
     """
     ⚡️/🚀 SCALP ENTRY CONFIRMED [TF] 🟢/🔴 SIDE
     """
     side_emoji = "🟢" if side == "LONG" else "🔴"
-    code_part = (
-        f"Trigger: Momentum Exit Confirmation\n"
-        f"Entry:   {fmt_price(entry)}\n"
-        f"SL:      {fmt_price(sl)}\n\n"
-        f"TP1:     {fmt_price(tp1)} (30%)\n"
-        f"TP2:     {fmt_price(tp2)} (40%)\n"
-        f"TP3:     {fmt_price(tp3)} (30%)\n"
-        f"──────────\n"
-        f"Strength: {strength}\n"
-        f"Size:     {size}%"
-    )
     
+    score_display = f"Score:    {score}/10" if score else ""
+    trend_display = f"Trend:    {trend}" if trend else ""
+    
+    code_part = (
+        f"Trigger:  Momentum Exit\n"
+        f"Entry:    {fmt_price(entry)}\n"
+        f"SL:       {fmt_price(sl)}\n\n"
+        f"TP1:      {fmt_price(tp1)} (30%)\n"
+        f"TP2:      {fmt_price(tp2)} (40%)\n"
+        f"TP3:      {fmt_price(tp3)} (30%)\n"
+        f"──────────\n"
+        f"{score_display}\n"
+        f"{trend_display}\n"
+    )
+    if reasons:
+        confl_str = ", ".join(reasons)
+        code_part += f"Confluence: {confl_str}\n"
+
     msg = (
         f"<b>{emoji} SCALP ENTRY CONFIRMED</b> [{timeframe.upper()}] {side_emoji} <b>{side}</b>\n"
         f"<i>{SYMBOL}</i>\n"
@@ -208,10 +215,24 @@ def send_extreme(side, total_points, confirmations, indicators_list):
 
 def send_daily_levels(date_str, daily_open, resistance, resistance_pct,
                       support, support_pct, volatility, volatility_pct,
-                      critical_high, critical_low, chart_path=None):
+                      critical_high, critical_low, indicators=None, chart_path=None):
     """
     📊 BTCUSDT DAILY LEVELS
     """
+    indicator_part = ""
+    if indicators:
+        btc_d = indicators.get("BTC.D_change", 0)
+        dxy = indicators.get("DXY_change", 0)
+        indicator_part = (
+            f"\n"
+            f"<b>🌍 GLOBAL CONTEXT</b>\n"
+            f"<blockquote>"
+            f"• BTC.D: {'+' if btc_d >= 0 else ''}{btc_d:.2f}%\n"
+            f"• DXY Proxy: {'+' if dxy >= 0 else ''}{dxy:.2f}%"
+            f"</blockquote>\n"
+            f"\n"
+        )
+
     quote = (
         f"Level            Value\n"
         f"🟥 Resistance     {fmt_price(resistance)}  ({resistance_pct:.2f}%)\n"
@@ -222,11 +243,11 @@ def send_daily_levels(date_str, daily_open, resistance, resistance_pct,
     )
     msg = (
         f"<b>📊 {SYMBOL} DAILY LEVELS</b>\n"
-        f"\n"
         f"<blockquote>"
         f"• Date: <i>{date_str}</i>\n"
         f"• DO:   {fmt_price(daily_open)}\n"
         f"</blockquote>\n"
+        f"{indicator_part}"
         f"<pre>{quote}</pre>"
     )
     
@@ -357,7 +378,7 @@ def send_session_open(session_name, open_price, current_price=None, history=None
     )
     
     if history:
-        msg += f"\n\n<blockquote>{history}</blockquote>"
+        msg += f"\n\n{history}"
         
     if chart_path and os.path.exists(chart_path):
         send_photo(chart_path, caption=msg)
@@ -389,7 +410,7 @@ def send_session_summary(session_name, price_open, price_close, signals_count, l
     )
     
     if history:
-        msg += f"\n\n<blockquote>{history}</blockquote>"
+        msg += f"\n\n{history}"
         
     if chart_path and os.path.exists(chart_path):
         send_photo(chart_path, caption=msg)
