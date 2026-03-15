@@ -2,9 +2,10 @@
 
 import pandas as pd
 import mplfinance as mpf
+import matplotlib.pyplot as plt
 import os
 
-def generate_daily_levels_chart(df, levels, symbol="BTCUSDT", output_path="daily_chart.png"):
+def generate_daily_levels_chart(df, levels, symbol="BTCUSDT", timeframe="1H", output_path="daily_chart.png"):
     """
     Generate a candlestick chart with daily levels as horizontal lines.
     """
@@ -21,49 +22,31 @@ def generate_daily_levels_chart(df, levels, symbol="BTCUSDT", output_path="daily
     # Required for scaling
     all_values = list(plot_df["High"]) + list(plot_df["Low"])
 
-    # 1. DO (Daily Open) - White
-    if "DO" in levels:
-        val = levels["DO"]
-        hlines.append(val)
-        hcolors.append('#ffffff')
-        hwidths.append(1.0)
-        all_values.append(val)
-    
-    # 2. PDH/PDL (Previous Day High/Low) - Cyan
-    if "PDH" in levels:
-        val = levels["PDH"]
-        hlines.append(val)
-        hcolors.append('#00e5ff')
-        hwidths.append(1.0)
-        all_values.append(val)
-    if "PDL" in levels:
-        val = levels["PDL"]
-        hlines.append(val)
-        hcolors.append('#00e5ff')
-        hwidths.append(1.0)
-        all_values.append(val)
-
-    # 3. Main Resistance / Support (Pump/Dump) - Red/Green
+    # 1. Resistance (Pump) - Red
     if "Pump" in levels:
         val = levels["Pump"]
         hlines.append(val)
-        hcolors.append('#ff0000') # Pure Red
+        hcolors.append('#ff0000')
         hwidths.append(1.5)
         all_values.append(val)
+
+    # 2. Support (Dump) - Green
     if "Dump" in levels:
         val = levels["Dump"]
         hlines.append(val)
-        hcolors.append('#00ff00') # Pure Green
+        hcolors.append('#00ff00')
         hwidths.append(1.5)
         all_values.append(val)
         
-    # 4. Critical High / Low (PumpMax / DumpMax) - Bold Red
+    # 3. Critical High (PumpMax) - Bold Red
     if "PumpMax" in levels:
         val = levels["PumpMax"]
         hlines.append(val)
         hcolors.append('#ff1744')
         hwidths.append(2.5)
         all_values.append(val)
+
+    # 4. Critical Low (DumpMax) - Bold Red
     if "DumpMax" in levels:
         val = levels["DumpMax"]
         hlines.append(val)
@@ -77,9 +60,9 @@ def generate_daily_levels_chart(df, levels, symbol="BTCUSDT", output_path="daily
     padding_y = (ymax - ymin) * 0.05
     ylim = (ymin - padding_y, ymax + padding_y)
 
-    # Perfect Framing: Cut left empty space, add right space for labels
+    # Framing: Cut left, add right space for labels
     num_candles = len(plot_df)
-    xlim = (0, num_candles + 10) # Start exactly at first candle, end 10 units after
+    xlim = (0, num_candles + 14)
 
     # Style
     mc = mpf.make_marketcolors(up='#26a69a', down='#ef5350', edge='inherit', wick='inherit')
@@ -88,12 +71,11 @@ def generate_daily_levels_chart(df, levels, symbol="BTCUSDT", output_path="daily
     hlines_dict = dict(hlines=hlines, colors=hcolors, linestyle='--', linewidths=hwidths)
 
     try:
-        # Use returnfig to add labels
         fig, axlist = mpf.plot(plot_df, 
                                type='candle', 
                                style=s, 
                                hlines=hlines_dict,
-                               title=f"\n{symbol} Daily Levels",
+                               title=f"\n{symbol} · {timeframe.upper()} Daily Levels",
                                ylabel='Price',
                                datetime_format='%H:%M',
                                tight_layout=True,
@@ -104,26 +86,35 @@ def generate_daily_levels_chart(df, levels, symbol="BTCUSDT", output_path="daily
                                xlim=xlim,
                                returnfig=True)
         
-        # Add text labels on the padded right side
         ax = axlist[0]
         label_x = num_candles + 1
-        
+
+        # --- Volatility zone (shaded area between Pump and Dump) ---
+        if "Pump" in levels and "Dump" in levels:
+            ax.axhspan(levels["Dump"], levels["Pump"], 
+                       alpha=0.08, color='#ffab00', zorder=0)
+            # Add VOLATILITY ZONE label in the middle of the shaded area
+            mid_vol = (levels["Pump"] + levels["Dump"]) / 2
+            ax.text(label_x, mid_vol, "  VOLATILITY ZONE", 
+                    color='#ffab00', va='center', fontsize=8, fontstyle='italic', alpha=0.7)
+
+        # --- Full text labels ---
         label_map = {
-            "DO": ("DO", '#ffffff'),
-            "PDH": ("PDH", '#00e5ff'),
-            "PDL": ("PDL", '#00e5ff'),
-            "Pump": ("RES", '#ff0000'),
-            "Dump": ("SUP", '#00ff00'),
-            "PumpMax": ("CRIT H", '#ff1744'),
-            "DumpMax": ("CRIT L", '#ff1744')
+            "Pump": ("RESISTANCE", '#ff0000'),
+            "Dump": ("SUPPORT", '#00ff00'),
+            "PumpMax": ("CRITICAL HIGH", '#ff1744'),
+            "DumpMax": ("CRITICAL LOW", '#ff1744'),
         }
 
         for key, (label, color) in label_map.items():
             if key in levels:
-                ax.text(label_x, levels[key], f"  {label}", 
+                price = levels[key]
+                ax.text(label_x, price, f"{label} ({price:,.2f})", 
                         color=color, va='center', fontsize=9, fontweight='bold')
 
-        fig.savefig(output_path)
+        fig.subplots_adjust(left=0.06, right=0.98)
+        fig.savefig(output_path, bbox_inches='tight', pad_inches=0.1)
+        plt.close(fig)
         return os.path.abspath(output_path)
     except Exception as e:
         print(f"[CHART ERROR] {e}")
