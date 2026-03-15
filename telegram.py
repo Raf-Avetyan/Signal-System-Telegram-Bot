@@ -328,8 +328,33 @@ def send_volume_spike(tf, current_vol, avg_vol, multiplier, price):
 
 
 # ═══════════════════════════════════════════════════════════════
-# SESSION SUMMARY
+# SESSION ALERTS
 # ═══════════════════════════════════════════════════════════════
+
+def send_session_open(session_name, open_price, current_price=None, signals_count=0):
+    """Send alert when a session opens or bot starts mid-session."""
+    is_mid = current_price is not None and abs(current_price - open_price) > 0.0001
+    
+    lines = [f"Open:   {fmt_price(open_price)}"]
+    
+    if is_mid:
+        change = current_price - open_price
+        pct = (change / open_price) * 100 if open_price else 0
+        sign = "+" if change >= 0 else ""
+        lines.append(f"Now:    {fmt_price(current_price)}")
+        lines.append(f"Change: {sign}{fmt_price(change)} ({sign}{pct:.2f}%)")
+        if signals_count > 0:
+            lines.append(f"Signals so far: {signals_count}")
+
+    code_part = "\n".join(lines)
+    
+    msg = (
+        f"🕐 <b>{session_name} SESSION OPEN</b>\n"
+        f"\n"
+        f"<pre>{code_part}</pre>"
+    )
+    send(msg, parse_mode="HTML")
+
 
 def send_session_summary(session_name, price_open, price_close, signals_count, levels_tested):
     """Send session recap at session close."""

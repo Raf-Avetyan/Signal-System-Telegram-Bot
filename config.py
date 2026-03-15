@@ -118,3 +118,4 @@ SESSIONS = {
 
 # ─── TELEGRAM COMMANDS ───────────────────────
 COMMAND_POLL_INTERVAL = 5   # Seconds between getUpdates polls
+ALERT_BATCH_WINDOW = 10     # Seconds to wait for multiple alerts before batching

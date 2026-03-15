@@ -14,7 +14,7 @@ from config import (
     TIMEFRAME_PROFILES, FUNDING_THRESHOLD, FUNDING_CHECK_INTERVAL,
     FUNDING_COOLDOWN, VOLUME_SPIKE_MULT, VOLUME_SPIKE_TIMEFRAMES,
     VOLUME_AVG_PERIOD, APPROACH_THRESHOLD, APPROACH_COOLDOWN,
-    APPROACH_LEVELS, SESSIONS
+    APPROACH_LEVELS, SESSIONS, ALERT_BATCH_WINDOW
 )
 from data import fetch_klines, fetch_daily, fetch_weekly, fetch_monthly, fetch_funding_rate
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
@@ -55,6 +55,7 @@ class PonchBot:
         self.last_funding_check = 0
         self.last_funding_alert = 0
         self.sent_sessions = set()     # "session_LONDON_2023-10-14"
+        self.session_data = {}         # { "LONDON_2024-03-15": {"open": 70000, "levels": set()} }
 
         # Alert Batching
         self.pending_alerts = []
@@ -63,11 +64,18 @@ class PonchBot:
         # Mute state
         self.muted_until = None
 
-    def queue_alert(self, alert_dict):
+    def queue_alert(self, alert_dict, callback=None, args=None):
         """Queue alert for batching."""
         if self.muted_until and datetime.now(timezone.utc) < self.muted_until:
             return  # Suppress alerts if muted
-        self.pending_alerts.append(alert_dict)
+        
+        # Add to queue with callback info for individual send if needed
+        self.pending_alerts.append({
+            "data": alert_dict,
+            "callback": callback,
+            "args": args or ()
+        })
+        
         if self.batch_timer_start is None:
             self.batch_timer_start = time.time()
 
@@ -97,6 +105,23 @@ class PonchBot:
 
             time.sleep(POLL_INTERVAL)
 
+    def get_price_at_hour(self, target_hour):
+        """Fetch the exact opening price for a specific UTC hour today from OKX."""
+        try:
+            # Fetch 1h klines (limit 24 is plenty for today)
+            df = fetch_klines(interval="1h", limit=48)
+            if df.empty:
+                return None
+            
+            # Find the candle matching today's target hour
+            today = datetime.now(timezone.utc).date()
+            for idx, row in df.iterrows():
+                if idx.date() == today and idx.hour == target_hour:
+                    return float(row["Open"])
+        except Exception as e:
+            print(f"[ERROR] Failed to fetch price for hour {target_hour}: {e}")
+        return None
+
     def _tick(self):
         """One iteration of the main loop."""
         now = datetime.now(timezone.utc)
@@ -119,24 +144,15 @@ class PonchBot:
                 if abs(rate) >= FUNDING_THRESHOLD:
                     if current_time - self.last_funding_alert > FUNDING_COOLDOWN:
                         direction = "POSITIVE" if rate > 0 else "NEGATIVE"
-                        self.queue_alert({
-                            "type": "FUNDING ALERT",
-                            "note": f"{direction} Funding Rate: {rate*100:.4f}%"
-                        })
-                        tg.send_funding_alert(rate, direction)
+                        self.queue_alert(
+                            alert_dict={
+                                "type": "FUNDING ALERT",
+                                "note": f"{direction} Funding Rate: {rate*100:.4f}%"
+                            },
+                            callback=tg.send_funding_alert,
+                            args=(rate, direction)
+                        )
                         self.last_funding_alert = current_time
-
-        # ─── Check Session Closes ────────────────────────────
-        current_hour = now.hour
-        for s_name, s_times in SESSIONS.items():
-            if current_hour == s_times["close"]:
-                session_key = f"session_{s_name}_{today}"
-                if session_key not in self.sent_sessions:
-                    self.sent_sessions.add(session_key)
-                    # Get session recap data
-                    stats = self.tracker.get_session_stats(s_times["open"], s_times["close"])
-                    # Send telegram msg (price data mock for now, we'd need exact open/close, simplifying to just stats or 0)
-                    tg.send_session_summary(s_name, 0, 0, stats["total"], "Active")
 
         # ─── Process each scalp timeframe ────────────────────
         latest_price = None
@@ -154,11 +170,74 @@ class PonchBot:
         if latest_price is not None:
             self.tracker.check_outcomes(latest_price)
 
+            # --- Session Price Tracking ---
+            current_hour = now.hour
+            for s_name, s_times in SESSIONS.items():
+                session_id = f"{s_name}_{today}"
+                
+                # Check if session is active now
+                is_active = False
+                if s_times["open"] < s_times["close"]:
+                    is_active = s_times["open"] <= current_hour < s_times["close"]
+                else:
+                    is_active = current_hour >= s_times["open"] or current_hour < s_times["close"]
+
+                # Capture Open Price (Historical from OKX if bot starts mid-session)
+                if is_active and session_id not in self.session_data:
+                    open_p = self.get_price_at_hour(s_times["open"])
+                    if open_p is None:
+                        open_p = latest_price  # Fallback
+                        
+                    self.session_data[session_id] = {
+                        "open_price": open_p,
+                        "levels_tested": set()
+                    }
+                    
+                    is_mid = current_hour != s_times["open"]
+                    status = "opened" if not is_mid else "active (recovered from OKX)"
+                    print(f"[SESSION] {s_name} {status} at {open_p:,.2f}")
+                    
+                    # Fetch stats so far if mid-session
+                    stats = self.tracker.get_session_stats(s_times["open"], s_times["close"])
+                    
+                    # Notify Telegram
+                    tg.send_session_open(
+                        session_name=s_name, 
+                        open_price=open_p, 
+                        current_price=latest_price if is_mid else None,
+                        signals_count=stats["total"] if is_mid else 0
+                    )
+
+                # Capture Close & Send Summary
+                if current_hour == s_times["close"]:
+                    sent_key = f"sent_{session_id}"
+                    if sent_key not in self.sent_sessions:
+                        self.sent_sessions.add(sent_key)
+                        
+                        s_data = self.session_data.get(session_id, {"open_price": latest_price, "levels_tested": set()})
+                        open_p = s_data["open_price"]
+                        levels = ", ".join(sorted(list(s_data["levels_tested"]))) if s_data["levels_tested"] else "None"
+                        
+                        stats = self.tracker.get_session_stats(s_times["open"], s_times["close"])
+                        tg.send_session_summary(s_name, open_p, latest_price, stats["total"], levels)
+                        print(f"[SESSION] {s_name} closed. Recap sent.")
+
         # ─── Flush Batched Alerts ────────────────────────────
         if self.pending_alerts and self.batch_timer_start:
-            # If 30 seconds have passed since the first queued alert, flush
-            if current_time - self.batch_timer_start >= 30:
-                tg.send_batched_alerts(self.pending_alerts)
+            # Check if batch window has passed
+            if current_time - self.batch_timer_start >= ALERT_BATCH_WINDOW:
+                if len(self.pending_alerts) > 1:
+                    # Send as batch
+                    batch_data = [a["data"] for a in self.pending_alerts]
+                    tg.send_batched_alerts(batch_data)
+                    print(f"[TG] Sent batch of {len(batch_data)} alerts")
+                elif len(self.pending_alerts) == 1:
+                    # Send as individual alert
+                    alert = self.pending_alerts[0]
+                    if alert["callback"]:
+                        alert["callback"](*alert["args"])
+                        print(f"[TG] Sent individual alert: {alert['data']['type']}")
+                
                 self.pending_alerts = []
                 self.batch_timer_start = None
 
@@ -248,8 +327,25 @@ class PonchBot:
         prev_low  = float(prev["Low"])
 
         candle_ts = curr.name.strftime("%d.%m.%Y %H:%M UTC") if hasattr(curr.name, 'strftime') else ""
-
         current_time = time.time()
+        
+        # Helper to record levels tested in active sessions
+        def record_level(lvl):
+            now = datetime.now(timezone.utc)
+            today = now.strftime("%d.%m.%Y")
+            current_hour = now.hour
+            for s_name, s_times in SESSIONS.items():
+                # Check if session is currently active
+                is_active = False
+                if s_times["open"] < s_times["close"]:
+                    is_active = s_times["open"] <= current_hour < s_times["close"]
+                else: # Crosses midnight
+                    is_active = current_hour >= s_times["open"] or current_hour < s_times["close"]
+                
+                if is_active:
+                    session_id = f"{s_name}_{today}"
+                    if session_id in self.session_data:
+                        self.session_data[session_id]["levels_tested"].add(lvl)
 
         # ─── Volume Spike Detection ──────────────────────
         if tf in VOLUME_SPIKE_TIMEFRAMES and len(df) > VOLUME_AVG_PERIOD:
@@ -260,13 +356,16 @@ class PonchBot:
                 sig_key = f"volspike_{tf}_{candle_ts}"
                 if sig_key not in self.sent_signals:
                     self.sent_signals.add(sig_key)
-                    self.queue_alert({
-                        "type": "VOLUME SPIKE",
-                        "tf": tf,
-                        "price": close,
-                        "note": f"{current_vol/avg_vol:.1f}x average volume"
-                    })
-                    tg.send_volume_spike(tf, current_vol, avg_vol, current_vol/avg_vol, close)
+                    self.queue_alert(
+                        alert_dict={
+                            "type": "VOLUME SPIKE",
+                            "tf": tf,
+                            "price": close,
+                            "note": f"{current_vol/avg_vol:.1f}x average volume"
+                        },
+                        callback=tg.send_volume_spike,
+                        args=(tf, current_vol, avg_vol, current_vol/avg_vol, close)
+                    )
 
         # ─── Price Approaching Key Levels ────────────────
         if tf == "1h" and self.levels:
@@ -277,11 +376,14 @@ class PonchBot:
                     if dist_pct <= APPROACH_THRESHOLD:
                         last_alert = self.approach_alerts.get(lvl_name, 0)
                         if current_time - last_alert > APPROACH_COOLDOWN:
-                            self.queue_alert({
-                                "type": "APPROACHING LEVEL",
-                                "note": f"Approaching {lvl_name} ({dist_pct*100:.2f}%)"
-                            })
-                            tg.send_approaching_level(lvl_name, lvl_price, close, dist_pct * 100)
+                            self.queue_alert(
+                                alert_dict={
+                                    "type": "APPROACHING LEVEL",
+                                    "note": f"Approaching {lvl_name} ({dist_pct*100:.2f}%)"
+                                },
+                                callback=tg.send_approaching_level,
+                                args=(lvl_name, lvl_price, close, dist_pct * 100)
+                            )
                             self.approach_alerts[lvl_name] = current_time
 
         # ─── Liquidity Sweeps ────────────────────────────
@@ -297,6 +399,7 @@ class PonchBot:
                     self.sent_signals.add(sig_key)
                     tg.send_liquidity_sweep(**sw)
                     print(f"  [TG] Liquidity Sweep: {sw['level']} ({sw['side']})")
+                    record_level(sw['level'])
 
                     # Add to confirmation tracker
                     self.confirmations.add_signal({
@@ -319,6 +422,7 @@ class PonchBot:
                     self.sent_signals.add(sig_key)
                     tg.send_volatility_touch(**vt)
                     print(f"  [TG] Vol Zone Touch: {vt['level']} ({vt['side']})")
+                    record_level(vt['level'])
 
                     # Add to confirmation tracker
                     self.confirmations.add_signal({
@@ -335,7 +439,7 @@ class PonchBot:
             if sig_key not in self.sent_signals:
                 self.sent_signals.add(sig_key)
                 print(f"  [SIG] Trade Signal [{tf}] {sig['signal']} @ {sig['price']:,.2f}")
-                self.confirmations.adxd_signal(sig)
+                self.confirmations.add_signal(sig)
 
         # 2. Momentum confirmation
         mom_sigs = check_momentum_confirm(df)
