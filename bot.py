@@ -64,10 +64,11 @@ class PonchBot:
         self.state_file = "bot_state.json"
         
         state = self._load_state()
-        self.daily_report_msg_id = state.get("daily_report_msg_id") # Int or Dict: {"msg_id": ..., "data": ...}
-        self.session_msg_ids = state.get("session_msg_ids", {}) # { session_id: {msg_id, name, open, history} }
-        self.last_session_update = 0
-        self.last_daily_update   = 0
+        self.daily_report_msg_id = state.get("daily_report_msg_id")
+        self.session_msg_ids     = state.get("session_msg_ids", {})
+        self.session_data        = state.get("session_data", {}) # Persist session H/L and open prices
+        self.last_session_update = time.time()
+        self.last_daily_update   = time.time()
 
         # Macro Trend & Context
         self.macro_trend = "Ranging"
@@ -266,7 +267,8 @@ class PonchBot:
             with open(self.state_file, "w") as f:
                 json.dump({
                     "daily_report_msg_id": self.daily_report_msg_id,
-                    "session_msg_ids": self.session_msg_ids
+                    "session_msg_ids": self.session_msg_ids,
+                    "session_data": self.session_data
                 }, f)
         except: pass
 
@@ -468,11 +470,11 @@ class PonchBot:
                 self.batch_timer_start = None
 
         # ─── Periodic Chart Updates ──────────────────────────
-        # 1. Session Updates (10s)
+        # 1. Session Updates (30s)
         if current_time - self.last_session_update > 30:
             self.last_session_update = current_time
             if self.session_msg_ids:
-                print(f"[BOT] Refreshing session charts (10s interval)...")
+                print(f"[BOT] Refreshing session charts (30s interval)...")
                 chart_path = self._generate_current_chart(f"session_update_{now.strftime('%H%M%S')}.png")
                 if chart_path:
                     for s_id, info in list(self.session_msg_ids.items()):
@@ -495,11 +497,11 @@ class PonchBot:
                         if os.path.exists(chart_path): os.remove(chart_path)
                     except: pass
 
-        # 2. Daily Levels Update (15s)
+        # 2. Daily Levels Update (600s)
         if current_time - self.last_daily_update > 600:
             self.last_daily_update = current_time
             if self.daily_report_msg_id:
-                print(f"[BOT] Refreshing daily levels report (15s interval)...")
+                print(f"[BOT] Refreshing daily levels report (600s interval)...")
                 chart_path = self._generate_current_chart(f"daily_update_{now.strftime('%H%M%S')}.png", show_sessions=False)
                 if chart_path:
                     d_msg_id = self.daily_report_msg_id if isinstance(self.daily_report_msg_id, (int, str)) else self.daily_report_msg_id.get("msg_id")
@@ -624,6 +626,7 @@ class PonchBot:
                     }
                 }
                 self._save_state()
+                self.last_daily_update = time.time()
         
         print("[TG] Daily levels report sent")
 
