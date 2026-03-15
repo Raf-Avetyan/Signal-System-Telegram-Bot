@@ -123,3 +123,18 @@ class ConfirmationTracker:
         else:
             for s in ["LONG", "SHORT"]:
                 self.reset(s)
+
+    def to_dict(self):
+        """Export state for persistence."""
+        return {
+            "signals": self.signals,
+            "last_strong_count": self.last_strong_count,
+            "last_extreme_count": self.last_extreme_count
+        }
+
+    def from_dict(self, data):
+        """Import state for persistence."""
+        if not data: return
+        self.signals = data.get("signals", {"LONG": [], "SHORT": []})
+        self.last_strong_count = data.get("last_strong_count", {"LONG": 0, "SHORT": 0})
+        self.last_extreme_count = data.get("last_extreme_count", {"LONG": 0, "SHORT": 0})

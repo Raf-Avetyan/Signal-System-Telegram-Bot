@@ -46,8 +46,7 @@ class PonchBot:
         # Previous candle data for cross detection
         self.prev_candles = {}   # {timeframe: {"High": ..., "Low": ...}}
 
-        # Track sent signals to avoid duplicates
-        self.sent_signals = set()
+        # Track sent signals to avoid duplicates (restored from state below)
 
         # Daily levels
         self.levels = {}
@@ -66,8 +65,13 @@ class PonchBot:
         state = self._load_state()
         self.daily_report_msg_id = state.get("daily_report_msg_id")
         self.session_msg_ids     = state.get("session_msg_ids", {})
+        self.confirmations.from_dict(state.get("confirmations", {})) # Restore confirmation state
         self.session_data        = state.get("session_data", {})
-        self.last_levels_date    = state.get("last_levels_date") # Persist to prevent duplicates
+        self.last_levels_date    = state.get("last_levels_date")
+        self.sent_signals        = set(state.get("sent_signals", []))
+        self.sent_sessions       = set(state.get("sent_sessions", [])) # New: Persist session summaries
+        self.approach_alerts     = state.get("approach_alerts", {})    # New: Persist approaching level cooldowns
+        self.last_funding_alert  = state.get("last_funding_alert", 0)   # New: Persist funding alert cooldown
         self.last_session_update = time.time()
         self.last_daily_update   = time.time()
 
@@ -269,8 +273,13 @@ class PonchBot:
                 json.dump({
                     "daily_report_msg_id": self.daily_report_msg_id,
                     "session_msg_ids": self.session_msg_ids,
+                    "confirmations": self.confirmations.to_dict(), # New: Save confirmations
                     "session_data": self.session_data,
-                    "last_levels_date": self.last_levels_date
+                    "last_levels_date": self.last_levels_date,
+                    "sent_signals": list(self.sent_signals),
+                    "sent_sessions": list(self.sent_sessions),
+                    "approach_alerts": self.approach_alerts,
+                    "last_funding_alert": self.last_funding_alert
                 }, f)
         except: pass
 
@@ -449,6 +458,7 @@ class PonchBot:
                             f"</pre>"
                         )
                         self.session_history[s_name] = summary_str
+                        self._save_state() # Save summary sent state
                         
                         print(f"[SESSION] {s_name} closed. Recap sent.")
 
@@ -547,6 +557,8 @@ class PonchBot:
             self.session_history.clear() # Reset session history for new day
             self.session_msg_ids.clear() # Reset message IDs for new day
             self.session_data.clear()    # Clear old session data for new day
+            self.sent_sessions.clear()   # New: Reset session recap tracking
+            self.approach_alerts.clear() # New: Reset level approach tracking
             self._save_state()
         
         self._reconstruct_session_history(now.hour)
@@ -716,6 +728,7 @@ class PonchBot:
                                 args=(lvl_name, lvl_price, close, dist_pct * 100)
                             )
                             self.approach_alerts[lvl_name] = current_time
+                            self._save_state() # Save approach timestamp
 
         # ─── Liquidity Sweeps ────────────────────────────
         if self.levels:
@@ -729,6 +742,7 @@ class PonchBot:
                 if sig_key not in self.sent_signals:
                     self.sent_signals.add(sig_key)
                     tg.send_liquidity_sweep(**sw)
+                    self._save_state() # Save immediately to avoid double sends
                     print(f"  [TG] Liquidity Sweep: {sw['level']} ({sw['side']})")
                     record_level(sw['level'])
 
@@ -752,6 +766,7 @@ class PonchBot:
                 if sig_key not in self.sent_signals:
                     self.sent_signals.add(sig_key)
                     tg.send_volatility_touch(**vt)
+                    self._save_state()
                     print(f"  [TG] Vol Zone Touch: {vt['level']} ({vt['side']})")
                     record_level(vt['level'])
 
@@ -814,10 +829,12 @@ class PonchBot:
 
             if evt["type"] == "OPEN":
                 tg.send_scalp_open(tf, evt["side"], evt["price"], emoji=emoji)
+                self._save_state()
                 print(f"  [TG] Scalp Open [{tf}] {evt['side']}")
 
             elif evt["type"] == "PREPARE":
                 tg.send_scalp_prepare(tf, evt["side"], emoji=emoji)
+                self._save_state()
                 print(f"  [TG] Prepare [{tf}] {evt['side']}")
 
             elif evt["type"] == "CONFIRMED":
@@ -841,6 +858,7 @@ class PonchBot:
                     reasons=reasons,
                     emoji=emoji,
                 )
+                self._save_state()
                 print(f"  [TG] Scalp Confirmed [{tf}] {evt['side']} @ {evt['entry']:,.2f}")
                 
                 # Log signal for performance tracking
@@ -857,6 +875,7 @@ class PonchBot:
 
             elif evt["type"] == "CLOSED":
                 tg.send_scalp_closed(tf, evt["side"], evt["price"], emoji=emoji)
+                self._save_state()
                 print(f"  [TG] Scalp Closed [{tf}] {evt['side']}")
 
         # ─── Check Confirmation Aggregation ──────────────
@@ -870,6 +889,7 @@ class PonchBot:
                         confirmations=ce["confirmations"],
                         indicators_list=ce["indicators"],
                     )
+                    self._save_state() # Save confirmation send state
                     print(f"  [TG] ✅ STRONG {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
 
                 elif ce["type"] == "EXTREME":
@@ -879,6 +899,7 @@ class PonchBot:
                         confirmations=ce["confirmations"],
                         indicators_list=ce["indicators"],
                     )
+                    self._save_state() # Save confirmation send state
                     print(f"  [TG] 🔥 EXTREME {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
 
         # ─── Store prev candle data ──────────────────────
