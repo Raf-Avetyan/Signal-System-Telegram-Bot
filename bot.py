@@ -287,6 +287,12 @@ class PonchBot:
                         if isinstance(sdata, dict) and "levels_tested" in sdata:
                             sdata["levels_tested"] = set(sdata.get("levels_tested", []))
                     
+                    # Restore Scalp Tracker states
+                    scalp_states = state.get("scalp_trackers", {})
+                    for tf, t_state in scalp_states.items():
+                        if tf in self.scalp_trackers:
+                            self.scalp_trackers[tf].from_dict(t_state)
+                    
                     return state
             except Exception as e:
                 print(f"[STATE] Error loading state file: {e}")
@@ -317,7 +323,8 @@ class PonchBot:
                 "sent_signals": list(self.sent_signals),
                 "sent_sessions": list(self.sent_sessions),
                 "approach_alerts": self.approach_alerts,
-                "last_funding_alert": self.last_funding_alert
+                "last_funding_alert": self.last_funding_alert,
+                "scalp_trackers": {tf: tracker.to_dict() for tf, tracker in self.scalp_trackers.items()}
             }
 
             # Atomic write: Write to temp file then rename

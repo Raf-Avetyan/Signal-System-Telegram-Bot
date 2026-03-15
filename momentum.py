@@ -140,6 +140,21 @@ class ScalpTracker:
 
         return events
 
+    def to_dict(self):
+        return {
+            "state": self.state,
+            "side": self.side,
+            "entry_price": self.entry_price,
+            "last_processed_ts": self.last_processed_ts
+        }
+
+    def from_dict(self, data):
+        if not data: return
+        self.state = data.get("state", "IDLE")
+        self.side = data.get("side")
+        self.entry_price = data.get("entry_price")
+        self.last_processed_ts = data.get("last_processed_ts")
+
     def _calc_sl_tp(self, entry, atr_val, side):
         """Calculate SL and 3 TP levels based on ATR."""
         if pd.isna(atr_val) or atr_val == 0:
