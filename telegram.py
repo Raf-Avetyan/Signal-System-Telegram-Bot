@@ -1,7 +1,8 @@
 import requests
 from config import BOT_TOKEN, CHAT_ID, SYMBOL
 
-API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+API_URL_MSG   = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+API_URL_PHOTO = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
 
 
 def send(text, parse_mode=None):
@@ -13,11 +14,28 @@ def send(text, parse_mode=None):
         }
         if parse_mode:
             payload["parse_mode"] = parse_mode
-        resp = requests.post(API_URL, data=payload)
+        resp = requests.post(API_URL_MSG, data=payload)
         if not resp.ok:
             print(f"[TG ERROR] {resp.status_code}: {resp.text}")
     except Exception as e:
         print(f"[TG ERROR] {e}")
+
+
+def send_photo(photo_path, caption=None):
+    """Send a photo via Telegram Bot API."""
+    try:
+        with open(photo_path, 'rb') as f:
+            files = {'photo': f}
+            payload = {'chat_id': CHAT_ID}
+            if caption:
+                payload['caption'] = caption
+                payload['parse_mode'] = 'HTML'
+            
+            resp = requests.post(API_URL_PHOTO, data=payload, files=files)
+            if not resp.ok:
+                print(f"[TG ERROR] {resp.status_code}: {resp.text}")
+    except Exception as e:
+        print(f"[TG ERROR] Photo: {e}")
 
 
 def fmt_price(price):
@@ -147,27 +165,6 @@ def send_scalp_closed(timeframe, side, price, emoji="⚡️"):
     send(msg)
 
 
-# ═══════════════════════════════════════════════════════════════
-# TRADE SIGNAL
-# ═══════════════════════════════════════════════════════════════
-
-def send_trade_signal(tf, side, signal, price, indicator, points, strength, timestamp):
-    """
-    🎯 TRADE SIGNAL [{TF}]
-    """
-    msg = (
-        f"🎯 TRADE SIGNAL [{tf.upper()}]\n"
-        f"{SYMBOL}\n"
-        f"──────────\n"
-        f"Points: {points}\n"
-        f"Side: {side}\n"
-        f"Strength: {strength}\n"
-        f"Signal: ENTRY {signal}\n"
-        f"Price: {fmt_price(price)}\n"
-        f"Time: {timestamp}\n"
-        f"Indicator: {indicator}"
-    )
-    send(msg)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -194,7 +191,7 @@ def send_extreme(side, total_points, confirmations, indicators_list):
 
 def send_daily_levels(date_str, daily_open, resistance, resistance_pct,
                       support, support_pct, volatility, volatility_pct,
-                      critical_high, critical_low):
+                      critical_high, critical_low, chart_path=None):
     """
     📊 BTCUSDT DAILY LEVELS
     """
@@ -214,7 +211,11 @@ def send_daily_levels(date_str, daily_open, resistance, resistance_pct,
         f"\n"
         f"<pre>{quote}</pre>"
     )
-    send(msg, parse_mode="HTML")
+    
+    if chart_path:
+        send_photo(chart_path, caption=msg)
+    else:
+        send(msg, parse_mode="HTML")
 
 
 # ═══════════════════════════════════════════════════════════════

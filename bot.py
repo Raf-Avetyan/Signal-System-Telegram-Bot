@@ -19,6 +19,7 @@ from channels import calculate_channels, check_channel_signals
 from momentum import calculate_momentum, ScalpTracker
 from signals import check_momentum_confirm, check_range_confirm, check_flow_confirm
 from confirmation import ConfirmationTracker
+from charting import generate_daily_levels_chart
 import telegram as tg
 
 
@@ -116,6 +117,16 @@ class PonchBot:
         date_str = now.strftime("%d.%m.%Y")
         do = self.levels["DO"]
 
+        # Generate visual chart for the report
+        chart_path = None
+        try:
+            # Fetch 1h data for charting (last 48h)
+            chart_df = fetch_klines(interval="1h", limit=48)
+            if not chart_df.empty:
+                chart_path = generate_daily_levels_chart(chart_df, self.levels)
+        except Exception as e:
+            print(f"[CHARTING] Failed to generate: {e}")
+
         tg.send_daily_levels(
             date_str=date_str,
             daily_open=do,
@@ -127,6 +138,7 @@ class PonchBot:
             volatility_pct=self.levels["VolatilityPct"],
             critical_high=self.levels["CriticalHigh"],
             critical_low=self.levels["CriticalLow"],
+            chart_path=chart_path
         )
         print("[TG] Daily levels report sent")
 
@@ -206,17 +218,7 @@ class PonchBot:
             sig_key = f"tr_sig_{tf}_{sig['signal']}_{candle_ts}"
             if sig_key not in self.sent_signals:
                 self.sent_signals.add(sig_key)
-                tg.send_trade_signal(
-                    tf=tf,
-                    side=sig["side"],
-                    signal=sig["signal"],
-                    price=sig["price"],
-                    indicator=sig["indicator"],
-                    points=sig["points"],
-                    strength=sig["strength"],
-                    timestamp=candle_ts
-                )
-                print(f"  [TG] Trade Signal [{tf}] {sig['signal']} @ {sig['price']:,.2f}")
+                print(f"  [SIG] Trade Signal [{tf}] {sig['signal']} @ {sig['price']:,.2f}")
                 self.confirmations.add_signal(sig)
 
         # 2. Momentum confirmation
