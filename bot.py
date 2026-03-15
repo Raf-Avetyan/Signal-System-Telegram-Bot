@@ -15,6 +15,7 @@ from config import (
     FUNDING_COOLDOWN, VOLUME_SPIKE_MULT, VOLUME_SPIKE_TIMEFRAMES,
     VOLUME_AVG_PERIOD, APPROACH_THRESHOLD, APPROACH_COOLDOWN,
     APPROACH_LEVELS, SESSIONS, ALERT_BATCH_WINDOW,
+    OI_CHANGE_THRESHOLD, LIQ_SQUEEZE_THRESHOLD, LIQ_ALERT_COOLDOWN, PUBLIC_TEASER_TP_LEVEL,
     PUBLIC_CHAT_ID, PRIVATE_CHAT_ID
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
@@ -80,6 +81,8 @@ class PonchBot:
         self.macro_trend = "Ranging"
         self.last_oi = 0
         self.last_liqs = 0
+        self.last_oi_price = 0
+        self.last_liq_alert_time = 0
 
         # Alert Batching
         self.pending_alerts = []
@@ -394,9 +397,53 @@ class PonchBot:
 
             self._process_timeframe(tf, df, now)
 
-        # ─── Update Performance Tracker ──────────────────────
+        # ─── Update Performance Tracker & Success Teasers ────
         if latest_price is not None:
-            self.tracker.check_outcomes(latest_price)
+            # 1. Success Teasers
+            trade_events = self.tracker.check_outcomes(latest_price)
+            for event in trade_events:
+                sig = event["sig"]
+                # Only send teaser if it's the specific TP level we want and it's haven't already sent one for this trade
+                if event["type"] == PUBLIC_TEASER_TP_LEVEL and not sig.get("teaser_sent"):
+                    sig["teaser_sent"] = True
+                    # Calculate profit % (absolute distance from entry to current price)
+                    profit = abs(latest_price - sig["entry"]) / sig["entry"] * 100
+                    tg.send_success_teaser(sig["side"], sig["tf"], profit, chat_id=PUBLIC_CHAT_ID)
+                    self.tracker._save() # Persist the teaser_sent flag
+            
+            # 2. Liquidation Squeezes
+            if self.last_liqs >= LIQ_SQUEEZE_THRESHOLD:
+                if current_time - self.last_liq_alert_time > LIQ_ALERT_COOLDOWN:
+                    tg.send_squeeze_alert(self.last_liqs, latest_price, chat_id=PRIVATE_CHAT_ID)
+                    self.last_liq_alert_time = current_time
+                    print(f"  [TG] 🚨 Liquidation Squeeze: ${self.last_liqs/1e6:.1f}M")
+
+            # 3. OI Divergence
+            if self.last_oi and self.last_oi_price:
+                price_chg = (latest_price / self.last_oi_price) - 1
+                oi_chg = (self.last_oi / self.last_oi_base) - 1 if hasattr(self, 'last_oi_base') else 0
+                
+                # We only check if OI change is significant
+                if abs(oi_chg) >= OI_CHANGE_THRESHOLD:
+                    note = None
+                    if price_chg > 0.005 and oi_chg < -0.01: # Price up, OI down
+                        note = "Short Covering (Weak Pump). Price rising as shorts close, not as new longs open."
+                    elif price_chg < -0.005 and oi_chg < -0.01: # Price down, OI down
+                        note = "Long Liquidation (Weak Dump). Price falling as longs are forced out."
+                    elif abs(price_chg) < 0.005 and oi_chg > 0.02: # Price flat, OI up
+                        note = "Accumulation/Distribution. Huge new positions opening while price stays flat. Breakout imminent."
+                    
+                    if note:
+                        sig_key = f"oi_div_{now.strftime('%Y-%m-%d_%H')}" # Max 1 per hour
+                        if sig_key not in self.sent_signals:
+                            self.sent_signals.add(sig_key)
+                            tg.send_oi_divergence(price_chg*100, oi_chg*100, note, chat_id=PRIVATE_CHAT_ID)
+                            self._save_state()
+                            print(f"  [TG] ⚠️ OI Divergence: {note}")
+
+            # Update baselines for next tick comparison
+            self.last_oi_price = latest_price
+            self.last_oi_base = self.last_oi
 
             # --- Session Tracking ---
             today = now.strftime("%d.%m.%Y")

@@ -53,6 +53,7 @@ class SignalTracker:
             "tp2_hit": False,
             "tp3_hit": False,
             "sl_hit": False,
+            "teaser_sent": False,
             "closed_at": None,
         }
         self.signals.append(signal)
@@ -62,6 +63,7 @@ class SignalTracker:
     def check_outcomes(self, current_price):
         """Check all OPEN signals against current price."""
         changed = False
+        events = []
 
         for sig in self.signals:
             if sig["status"] in ("SL", "TP3"):
@@ -75,11 +77,13 @@ class SignalTracker:
                 sig["status"] = "SL"
                 sig["closed_at"] = datetime.now(timezone.utc).isoformat()
                 changed = True
+                events.append({"type": "SL", "sig": sig})
             elif not is_long and current_price >= sig["sl"]:
                 sig["sl_hit"] = True
                 sig["status"] = "SL"
                 sig["closed_at"] = datetime.now(timezone.utc).isoformat()
                 changed = True
+                events.append({"type": "SL", "sig": sig})
 
             # Check TPs (progressive)
             if is_long:
@@ -87,32 +91,40 @@ class SignalTracker:
                     sig["tp1_hit"] = True
                     sig["status"] = "TP1"
                     changed = True
+                    events.append({"type": "TP1", "sig": sig})
                 if not sig["tp2_hit"] and current_price >= sig["tp2"]:
                     sig["tp2_hit"] = True
                     sig["status"] = "TP2"
                     changed = True
+                    events.append({"type": "TP2", "sig": sig})
                 if not sig["tp3_hit"] and current_price >= sig["tp3"]:
                     sig["tp3_hit"] = True
                     sig["status"] = "TP3"
                     sig["closed_at"] = datetime.now(timezone.utc).isoformat()
                     changed = True
+                    events.append({"type": "TP3", "sig": sig})
             else:
                 if not sig["tp1_hit"] and current_price <= sig["tp1"]:
                     sig["tp1_hit"] = True
                     sig["status"] = "TP1"
                     changed = True
+                    events.append({"type": "TP1", "sig": sig})
                 if not sig["tp2_hit"] and current_price <= sig["tp2"]:
                     sig["tp2_hit"] = True
                     sig["status"] = "TP2"
                     changed = True
+                    events.append({"type": "TP2", "sig": sig})
                 if not sig["tp3_hit"] and current_price <= sig["tp3"]:
                     sig["tp3_hit"] = True
                     sig["status"] = "TP3"
                     sig["closed_at"] = datetime.now(timezone.utc).isoformat()
                     changed = True
+                    events.append({"type": "TP3", "sig": sig})
 
         if changed:
             self._save()
+        
+        return events
 
     def get_daily_summary(self):
         """Get performance stats for today's signals."""

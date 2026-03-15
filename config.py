@@ -113,6 +113,12 @@ APPROACH_THRESHOLD = 0.003       # 0.3% distance from level
 APPROACH_COOLDOWN = 900          # 15 min cooldown per level
 APPROACH_LEVELS = ["Pump", "Dump", "PumpMax", "DumpMax"]  # Which levels to watch
 
+# ─── ADVANCED ALERTS (NEW) ───────────────────
+OI_CHANGE_THRESHOLD = 0.015      # 1.5% change in OI to trigger divergence check
+LIQ_SQUEEZE_THRESHOLD = 500000   # $500k in liquidations to trigger squeeze alert
+LIQ_ALERT_COOLDOWN = 600         # 10 min cooldown for squeeze alerts
+PUBLIC_TEASER_TP_LEVEL = "TP2"    # Which TP level triggers a public success message
+
 # ─── SESSION TIMES (UTC hours) ───────────────
 SESSIONS = {
     "ASIA":   {"open": 0,  "close": 8},

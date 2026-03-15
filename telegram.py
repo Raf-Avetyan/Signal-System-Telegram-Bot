@@ -426,6 +426,47 @@ def send_funding_alert(rate, direction, chat_id=None):
 
 
 # ═══════════════════════════════════════════════════════════════
+# ADVANCED ALERTS (NEW)
+# ═══════════════════════════════════════════════════════════════
+
+def send_success_teaser(side, tf, profit_pct, chat_id=None):
+    """📢 SUCCESS TEASER (Public)"""
+    side_emoji = "🟢" if side == "LONG" else "🔴"
+    msg = (
+        f"📢 <b>STRATEGY SUCCESS</b>\n"
+        f"\n"
+        f"{side_emoji} <b>{side} [{tf}]</b> Scalp Strategy has hit Targets!\n"
+        f"💰 <b>Estimated Profit: +{profit_pct:.2f}%</b>\n"
+        f"\n"
+        f"🔒 <i>Full entry logic and real-time confluences are exclusive to the Private Channel.</i>"
+    )
+    send(msg, parse_mode="HTML", chat_id=chat_id)
+
+def send_oi_divergence(price_change, oi_change, note, chat_id=None):
+    """⚠️ OI DIVERGENCE (Private)"""
+    msg = (
+        f"⚠️ <b>OPEN INTEREST DIVERGENCE</b>\n"
+        f"\n"
+        f"Price Change: <b>{price_change:+.2f}%</b>\n"
+        f"OI Change:    <b>{oi_change:+.2f}%</b>\n"
+        f"\n"
+        f"<b>Logic:</b> {note}"
+    )
+    send(msg, parse_mode="HTML", chat_id=chat_id)
+
+def send_squeeze_alert(total_liq, price, chat_id=None):
+    """🚨 LIQUIDATION SQUEEZE (Private)"""
+    msg = (
+        f"🚨 <b>LIQUIDATION SQUEEZE ALERT</b>\n"
+        f"\n"
+        f"Total Liquidated: <b>${total_liq/1_000_000:.1f}M</b>\n"
+        f"Current Price:    <b>{fmt_price(price)}</b>\n"
+        f"\n"
+        f"<i>Significant volatility expected as positions are washed out.</i>"
+    )
+    send(msg, parse_mode="HTML", chat_id=chat_id)
+
+# ═══════════════════════════════════════════════════════════════
 # VOLUME SPIKE
 # ═══════════════════════════════════════════════════════════════
 
