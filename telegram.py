@@ -459,16 +459,32 @@ def send_funding_alert(rate, direction, chat_id=None):
 # ADVANCED ALERTS (NEW)
 # ═══════════════════════════════════════════════════════════════
 
-def send_success_teaser(side, tf, profit_pct, chat_id=None):
+def send_success_teaser(side, tf, profit_pct, level="TP1", chat_id=None):
     """📢 SUCCESS TEASER (Public)"""
     side_emoji = "🟢" if side == "LONG" else "🔴"
+    
+    # Differentiate between Confluence and standard Scalps
+    is_confluence = (tf.lower() == "confluence")
+    strategy_label = "Confluence Setup" if is_confluence else "Scalp Strategy"
+    display_tf = "VVIP" if is_confluence else tf
+
+    # Dynamic target hit text
+    if level == "TP1":
+        action_text = "hit its First Target!"
+    elif level == "TP2":
+        action_text = "has hit its Targets!"
+    elif level == "TP3":
+        action_text = "hit ALL TARGETS! 🔥"
+    else:
+        action_text = "hit Targets!"
+
     msg = (
         f"📢 <b>STRATEGY SUCCESS</b>\n"
         f"\n"
-        f"{side_emoji} <b>{side} [{tf}]</b> Scalp Strategy has hit Targets!\n"
+        f"{side_emoji} <b>{side} [{display_tf}]</b> {strategy_label} {action_text}\n"
         f"💰 <b>Estimated Profit: +{profit_pct:.2f}%</b>\n"
         f"\n"
-        f"🔒 <i>Full entry logic and real-time confluences are exclusive to the Private Channel.</i>"
+        f"🔒 <i>Full setup logic and real-time confluences are exclusive to the Private Channel.</i>"
     )
     send(msg, parse_mode="HTML", chat_id=chat_id)
 

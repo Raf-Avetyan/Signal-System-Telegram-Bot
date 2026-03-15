@@ -15,7 +15,7 @@ from config import (
     FUNDING_COOLDOWN, VOLUME_SPIKE_MULT, VOLUME_SPIKE_TIMEFRAMES,
     VOLUME_AVG_PERIOD, APPROACH_THRESHOLD, APPROACH_COOLDOWN,
     APPROACH_LEVELS, SESSIONS, ALERT_BATCH_WINDOW,
-    OI_CHANGE_THRESHOLD, LIQ_SQUEEZE_THRESHOLD, LIQ_ALERT_COOLDOWN, PUBLIC_TEASER_TP_LEVEL,
+    OI_CHANGE_THRESHOLD, LIQ_SQUEEZE_THRESHOLD, LIQ_ALERT_COOLDOWN,
     PUBLIC_CHAT_ID, PRIVATE_CHAT_ID
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
@@ -414,13 +414,16 @@ class PonchBot:
             trade_events = self.tracker.check_outcomes(latest_price)
             for event in trade_events:
                 sig = event["sig"]
-                # Only send teaser if it's the specific TP level we want and it's haven't already sent one for this trade
-                if event["type"] == PUBLIC_TEASER_TP_LEVEL and not sig.get("teaser_sent"):
-                    sig["teaser_sent"] = True
-                    # Calculate profit % (absolute distance from entry to current price)
+                evt_type = event["type"] # "TP1", "TP2", "TP3"
+                
+                # Check if this specific TP level has already been teased for this trade
+                teaser_key = f"teaser_{evt_type}"
+                if not sig.get(teaser_key):
+                    sig[teaser_key] = True
+                    # Calculate profit %
                     profit = abs(latest_price - sig["entry"]) / sig["entry"] * 100
-                    tg.send_success_teaser(sig["side"], sig["tf"], profit, chat_id=PUBLIC_CHAT_ID)
-                    self.tracker._save() # Persist the teaser_sent flag
+                    tg.send_success_teaser(sig["side"], sig["tf"], profit, level=evt_type, chat_id=PUBLIC_CHAT_ID)
+                    self.tracker._save()
             
             # 2. Liquidation Squeezes
             if self.last_liqs >= LIQ_SQUEEZE_THRESHOLD:
@@ -1039,6 +1042,11 @@ class PonchBot:
                         sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
                         chat_id=PRIVATE_CHAT_ID
                     )
+                    # Log for performance tracking
+                    self.tracker.log_signal(
+                        side=ce["side"], entry=close, sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
+                        tf="Confluence", timestamp=candle_ts
+                    )
                     self._save_state() # Save confirmation send state
                     print(f"  [TG] ✅ STRONG {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
 
@@ -1064,6 +1072,11 @@ class PonchBot:
                         price=close,
                         sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
                         chat_id=PRIVATE_CHAT_ID
+                    )
+                    # Log for performance tracking
+                    self.tracker.log_signal(
+                        side=ce["side"], entry=close, sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
+                        tf="Confluence", timestamp=candle_ts
                     )
                     self._save_state() # Save confirmation send state
                     print(f"  [TG] 🔥 EXTREME {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")

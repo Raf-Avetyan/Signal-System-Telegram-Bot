@@ -117,7 +117,6 @@ APPROACH_LEVELS = ["Pump", "Dump", "PumpMax", "DumpMax"]  # Which levels to watc
 OI_CHANGE_THRESHOLD = 0.015      # 1.5% change in OI to trigger divergence check
 LIQ_SQUEEZE_THRESHOLD = 500000   # $500k in liquidations to trigger squeeze alert
 LIQ_ALERT_COOLDOWN = 600         # 10 min cooldown for squeeze alerts
-PUBLIC_TEASER_TP_LEVEL = "TP2"    # Which TP level triggers a public success message
 
 # ─── SESSION TIMES (UTC hours) ───────────────
 SESSIONS = {
