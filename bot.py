@@ -140,11 +140,11 @@ class PonchBot:
             if df.empty:
                 return None
             
-            # Find the candle matching today's target hour
-            today = datetime.now(timezone.utc).date()
-            for idx, row in df.iterrows():
-                if idx.date() == today and idx.hour == target_hour:
-                    return float(row["Open"])
+            # Search backwards for the MOST RECENT candle matching this hour
+            for i in range(len(df) - 1, -1, -1):
+                idx = df.index[i]
+                if idx.hour == target_hour:
+                    return float(df.iloc[i]["Open"])
         except Exception as e:
             print(f"[ERROR] Failed to fetch price for hour {target_hour}: {e}")
         return None
@@ -187,9 +187,15 @@ class PonchBot:
             if s_name in self.session_history:
                 continue
             
+            # Check if session is finished
             is_completed = False
             if s_times["open"] < s_times["close"]:
+                # Normal: open at 8, close at 16. Finished if current hour >= 16.
                 is_completed = current_hour >= s_times["close"]
+            else:
+                # Cross Midnight: open at 22, close at 6. 
+                # Finished if current hour is between 6 and 22.
+                is_completed = s_times["close"] <= current_hour < s_times["open"]
             
             if is_completed:
                 print(f"[SESSION] Reconstructing history for {s_name}...")

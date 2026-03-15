@@ -10,7 +10,7 @@ Detects individual trade signals from multiple "virtual" indicators:
 
 import pandas as pd
 import numpy as np
-from config import SIGNAL_POINTS
+from config import SIGNAL_POINTS, MOMENTUM_OB, MOMENTUM_OS
 
 
 def check_momentum_confirm(df):
@@ -28,7 +28,7 @@ def check_momentum_confirm(df):
     prev_rsi = df["RSI"].iloc[-2]
 
     # LONG confirmation: RSI was oversold and now crossing back up above OS
-    if prev_rsi <= 30 and curr_rsi > 30:
+    if prev_rsi <= MOMENTUM_OS and curr_rsi > MOMENTUM_OS:
         signals.append({
             "side":      "LONG",
             "signal":    "L",
@@ -40,7 +40,7 @@ def check_momentum_confirm(df):
         })
 
     # SHORT confirmation: RSI was overbought and now crossing back down below OB
-    if prev_rsi >= 70 and curr_rsi < 70:
+    if prev_rsi >= MOMENTUM_OB and curr_rsi < MOMENTUM_OB:
         signals.append({
             "side":      "SHORT",
             "signal":    "S",
@@ -69,8 +69,6 @@ def check_range_confirm(df, levels):
     prev_close = float(df["Close"].iloc[-2])
 
     do = levels.get("DO", 0)
-    pdl = levels.get("PDL", 0)
-    pdh = levels.get("PDH", 0)
 
     # LONG confirmation: Close reclaim DO
     if close > do and prev_close <= do:
@@ -111,9 +109,8 @@ def check_flow_confirm(df):
 
     signals = []
     curr = df.iloc[-1]
-    avg_vol = df["Volume"].iloc[-10:].mean()
-
-    # Volume spike: current volume > 2x average
+    # Volume spike: current volume > 2x average (exclude current candle from average)
+    avg_vol = df["Volume"].iloc[-11:-1].mean()
     if curr["Volume"] < avg_vol * 2.0:
         return signals
 
