@@ -14,7 +14,8 @@ from config import (
     TIMEFRAME_PROFILES, FUNDING_THRESHOLD, FUNDING_CHECK_INTERVAL,
     FUNDING_COOLDOWN, VOLUME_SPIKE_MULT, VOLUME_SPIKE_TIMEFRAMES,
     VOLUME_AVG_PERIOD, APPROACH_THRESHOLD, APPROACH_COOLDOWN,
-    APPROACH_LEVELS, SESSIONS, ALERT_BATCH_WINDOW
+    APPROACH_LEVELS, SESSIONS, ALERT_BATCH_WINDOW,
+    PUBLIC_CHAT_ID, PRIVATE_CHAT_ID
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
@@ -87,7 +88,7 @@ class PonchBot:
         # Mute state
         self.muted_until = None
 
-    def queue_alert(self, alert_dict, callback=None, args=None):
+    def queue_alert(self, alert_dict, callback=None, args=None, chat_id=None):
         """Queue alert for batching."""
         if self.muted_until and datetime.now(timezone.utc) < self.muted_until:
             return  # Suppress alerts if muted
@@ -96,7 +97,8 @@ class PonchBot:
         self.pending_alerts.append({
             "data": alert_dict,
             "callback": callback,
-            "args": args or ()
+            "args": args or (),
+            "chat_id": chat_id
         })
         
         if self.batch_timer_start is None:
@@ -262,26 +264,65 @@ class PonchBot:
         if os.path.exists(self.state_file):
             try:
                 with open(self.state_file, "r") as f:
-                    return json.load(f)
-            except: pass
+                    state = json.load(f)
+                    
+                    # Deep-restore sets in session_data
+                    session_data = state.get("session_data", {})
+                    for sid, sdata in session_data.items():
+                        if isinstance(sdata, dict) and "levels_tested" in sdata:
+                            sdata["levels_tested"] = set(sdata.get("levels_tested", []))
+                    
+                    return state
+            except Exception as e:
+                print(f"[STATE] Error loading state file: {e}")
         return {}
 
     def _save_state(self):
         import json
+        import os
+        import tempfile
         try:
-            with open(self.state_file, "w") as f:
-                json.dump({
-                    "daily_report_msg_id": self.daily_report_msg_id,
-                    "session_msg_ids": self.session_msg_ids,
-                    "confirmations": self.confirmations.to_dict(), # New: Save confirmations
-                    "session_data": self.session_data,
-                    "last_levels_date": self.last_levels_date,
-                    "sent_signals": list(self.sent_signals),
-                    "sent_sessions": list(self.sent_sessions),
-                    "approach_alerts": self.approach_alerts,
-                    "last_funding_alert": self.last_funding_alert
-                }, f)
-        except: pass
+            # Prepare session_data by deep-converting sets to lists
+            serializable_sessions = {}
+            for sid, sdata in self.session_data.items():
+                if isinstance(sdata, dict):
+                    serializable_sessions[sid] = sdata.copy()
+                    if "levels_tested" in serializable_sessions[sid]:
+                        serializable_sessions[sid]["levels_tested"] = list(sdata["levels_tested"])
+                else:
+                    serializable_sessions[sid] = sdata
+
+            # Collect all state items
+            payload = {
+                "daily_report_msg_id": self.daily_report_msg_id,
+                "session_msg_ids": self.session_msg_ids,
+                "confirmations": self.confirmations.to_dict(),
+                "session_data": serializable_sessions,
+                "last_levels_date": self.last_levels_date,
+                "sent_signals": list(self.sent_signals),
+                "sent_sessions": list(self.sent_sessions),
+                "approach_alerts": self.approach_alerts,
+                "last_funding_alert": self.last_funding_alert
+            }
+
+            # Atomic write: Write to temp file then rename
+            fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(self.state_file)))
+            try:
+                with os.fdopen(fd, 'w') as tmp:
+                    json.dump(payload, tmp)
+                # On Windows, os.replace might fail if target exists, but we use os.replace/remove
+                if os.path.exists(self.state_file):
+                    os.remove(self.state_file)
+                os.rename(temp_path, self.state_file)
+            except Exception as e:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise e
+
+        except Exception as e:
+            print(f"[STATE ERROR] Failed to save {self.state_file}: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _generate_current_chart(self, output_path="session_chart.png", show_sessions=True):
         """Generate a fresh chart image with current levels and sessions."""
@@ -323,7 +364,7 @@ class PonchBot:
                 if abs(rate) >= FUNDING_THRESHOLD:
                     if current_time - self.last_funding_alert > FUNDING_COOLDOWN:
                         direction = "POSITIVE" if rate > 0 else "NEGATIVE"
-                        tg.send_funding_alert(rate, direction)
+                        tg.send_funding_alert(rate, direction, chat_id=PUBLIC_CHAT_ID)
                         self.last_funding_alert = current_time
 
         # 6. Process each scalp timeframe
@@ -343,7 +384,7 @@ class PonchBot:
             if latest_price is None:
                 latest_price = float(df.iloc[-1]["Close"])
 
-            self._process_timeframe(tf, df)
+            self._process_timeframe(tf, df, now)
 
         # ─── Update Performance Tracker ──────────────────────
         if latest_price is not None:
@@ -398,7 +439,8 @@ class PonchBot:
                         history=history_text,
                         high=self.session_data[session_id]["high"],
                         low=self.session_data[session_id]["low"],
-                        chart_path=chart_path
+                        chart_path=chart_path,
+                        chat_id=PUBLIC_CHAT_ID
                     )
                     
                     if resp and "response" in resp:
@@ -440,7 +482,7 @@ class PonchBot:
                         # Generate session chart
                         chart_path = self._generate_current_chart(f"session_close_{s_name}.png")
 
-                        tg.send_session_summary(s_name, open_p, latest_price, stats["total"], levels, history=history_text, high=s_high, low=s_low, chart_path=chart_path)
+                        tg.send_session_summary(s_name, open_p, latest_price, stats["total"], levels, history=history_text, high=s_high, low=s_low, chart_path=chart_path, chat_id=PUBLIC_CHAT_ID)
                         
                         # Save to history for NEXT sessions
                         change = latest_price - open_p
@@ -466,17 +508,27 @@ class PonchBot:
         if self.pending_alerts and self.batch_timer_start:
             # Check if batch window has passed
             if current_time - self.batch_timer_start >= ALERT_BATCH_WINDOW:
-                if len(self.pending_alerts) > 1:
-                    # Send as batch
-                    batch_data = [a["data"] for a in self.pending_alerts]
-                    tg.send_batched_alerts(batch_data)
-                    print(f"[TG] Sent batch of {len(batch_data)} alerts")
-                elif len(self.pending_alerts) == 1:
-                    # Send as individual alert
-                    alert = self.pending_alerts[0]
-                    if alert["callback"]:
-                        alert["callback"](*alert["args"])
-                        print(f"[TG] Sent individual alert: {alert['data']['type']}")
+                # Group alerts by chat_id
+                by_chat = {}
+                for a in self.pending_alerts:
+                    cid = a.get("chat_id")
+                    if cid not in by_chat: by_chat[cid] = []
+                    by_chat[cid].append(a)
+                
+                for cid, alerts in by_chat.items():
+                    if len(alerts) > 1:
+                        # Send as batch
+                        batch_data = [a["data"] for a in alerts]
+                        tg.send_batched_alerts(batch_data, chat_id=cid)
+                        print(f"[TG] Sent batch of {len(batch_data)} alerts to {cid}")
+                    elif len(alerts) == 1:
+                        # Send as individual alert
+                        alert = alerts[0]
+                        if alert["callback"]:
+                            # All tg functions now accept chat_id
+                            kwargs = {"chat_id": cid}
+                            alert["callback"](*alert["args"], **kwargs)
+                            print(f"[TG] Sent individual alert: {alert['data']['type']} to {cid}")
                 
                 self.pending_alerts = []
                 self.batch_timer_start = None
@@ -499,7 +551,7 @@ class PonchBot:
                             high=s_data.get("high"),
                             low=s_data.get("low")
                         )
-                        res = tg.edit_message_media(info["msg_id"], chart_path, caption=new_html)
+                        res = tg.edit_message_media(info["msg_id"], chart_path, caption=new_html, chat_id=PUBLIC_CHAT_ID)
                         if res == "DELETED":
                             del self.session_msg_ids[s_id]
                             self._save_state()
@@ -591,7 +643,7 @@ class PonchBot:
         try:
             stats = self.tracker.get_daily_summary()
             if stats:
-                tg.send_performance_summary(stats)
+                tg.send_performance_summary(stats, chat_id=PUBLIC_CHAT_ID)
             self.tracker.cleanup_old(7)
         except Exception as e:
             print(f"[TRACKER ERROR] {e}")
@@ -624,7 +676,8 @@ class PonchBot:
             critical_high=self.levels.get("PumpMax", 0),
             critical_low=self.levels.get("DumpMax", 0),
             indicators=indicators,
-            chart_path=chart_path
+            chart_path=chart_path,
+            chat_id=PUBLIC_CHAT_ID
         )
         
         if resp_data and "response" in resp_data:
@@ -645,7 +698,7 @@ class PonchBot:
         
         print("[TG] Daily levels report sent")
 
-    def _process_timeframe(self, tf, df):
+    def _process_timeframe(self, tf, df, now):
         """Process one timeframe: channels, momentum, signals."""
 
         # ─── Calculate indicators ────────────────────────
@@ -669,12 +722,11 @@ class PonchBot:
         prev_high = float(prev["High"])
         prev_low  = float(prev["Low"])
 
-        candle_ts = curr.name.strftime("%d.%m.%Y %H:%M UTC") if hasattr(curr.name, 'strftime') else ""
+        candle_ts = curr.name.strftime("%Y-%m-%d %H:%M") if hasattr(curr.name, 'strftime') else str(curr.name)
         current_time = time.time()
         
-        # Helper to record levels tested in active sessions
         def record_level(lvl):
-            now = datetime.now(timezone.utc)
+            # Use now from outer scope
             today = now.strftime("%d.%m.%Y")
             current_hour = now.hour
             for s_name, s_times in SESSIONS.items():
@@ -707,7 +759,8 @@ class PonchBot:
                             "note": f"{current_vol/avg_vol:.1f}x average volume"
                         },
                         callback=tg.send_volume_spike,
-                        args=(tf, current_vol, avg_vol, current_vol/avg_vol, close)
+                        args=(tf, current_vol, avg_vol, current_vol/avg_vol, close),
+                        chat_id=PRIVATE_CHAT_ID
                     )
 
         # ─── Price Approaching Key Levels ────────────────
@@ -725,7 +778,8 @@ class PonchBot:
                                     "note": f"Approaching {lvl_name} ({dist_pct*100:.2f}%)"
                                 },
                                 callback=tg.send_approaching_level,
-                                args=(lvl_name, lvl_price, close, dist_pct * 100)
+                                args=(lvl_name, lvl_price, close, dist_pct * 100),
+                                chat_id=PUBLIC_CHAT_ID
                             )
                             self.approach_alerts[lvl_name] = current_time
                             self._save_state() # Save approach timestamp
@@ -737,11 +791,12 @@ class PonchBot:
                 prev_high=prev_high, prev_low=prev_low
             )
             for sw in sweeps:
-                # Include candle timestamp in deduplication key
-                sig_key = f"sweep_{sw['level']}_{sw['side']}_{candle_ts}"
+                # IMPORTANT: Use a TF-independent key for Global Levels 
+                # to prevent duplicates across 5m/15m/1h/4h
+                sig_key = f"sweep_{sw['level']}_{sw['side']}_{now.strftime('%Y-%m-%d')}"
                 if sig_key not in self.sent_signals:
                     self.sent_signals.add(sig_key)
-                    tg.send_liquidity_sweep(**sw)
+                    tg.send_liquidity_sweep(**sw, chat_id=PUBLIC_CHAT_ID)
                     self._save_state() # Save immediately to avoid double sends
                     print(f"  [TG] Liquidity Sweep: {sw['level']} ({sw['side']})")
                     record_level(sw['level'])
@@ -761,11 +816,11 @@ class PonchBot:
                 prev_high=prev_high, prev_low=prev_low
             )
             for vt in touches:
-                # Include candle timestamp in deduplication key
-                sig_key = f"vol_{vt['level']}_{vt['side']}_{candle_ts}"
+                # TF-independent key for daily/weekly zones
+                sig_key = f"vol_{vt['level']}_{vt['side']}_{now.strftime('%Y-%m-%d')}"
                 if sig_key not in self.sent_signals:
                     self.sent_signals.add(sig_key)
-                    tg.send_volatility_touch(**vt)
+                    tg.send_volatility_touch(**vt, chat_id=PRIVATE_CHAT_ID)
                     self._save_state()
                     print(f"  [TG] Vol Zone Touch: {vt['level']} ({vt['side']})")
                     record_level(vt['level'])
@@ -828,12 +883,12 @@ class PonchBot:
             self.sent_signals.add(evt_key)
 
             if evt["type"] == "OPEN":
-                tg.send_scalp_open(tf, evt["side"], evt["price"], emoji=emoji)
+                tg.send_scalp_open(tf, evt["side"], evt["price"], emoji=emoji, chat_id=PRIVATE_CHAT_ID)
                 self._save_state()
                 print(f"  [TG] Scalp Open [{tf}] {evt['side']}")
 
             elif evt["type"] == "PREPARE":
-                tg.send_scalp_prepare(tf, evt["side"], emoji=emoji)
+                tg.send_scalp_prepare(tf, evt["side"], emoji=emoji, chat_id=PRIVATE_CHAT_ID)
                 self._save_state()
                 print(f"  [TG] Prepare [{tf}] {evt['side']}")
 
@@ -857,6 +912,7 @@ class PonchBot:
                     trend=self.macro_trend,
                     reasons=reasons,
                     emoji=emoji,
+                    chat_id=PRIVATE_CHAT_ID
                 )
                 self._save_state()
                 print(f"  [TG] Scalp Confirmed [{tf}] {evt['side']} @ {evt['entry']:,.2f}")
@@ -874,7 +930,7 @@ class PonchBot:
                 )
 
             elif evt["type"] == "CLOSED":
-                tg.send_scalp_closed(tf, evt["side"], evt["price"], emoji=emoji)
+                tg.send_scalp_closed(tf, evt["side"], evt["price"], emoji=emoji, chat_id=PRIVATE_CHAT_ID)
                 self._save_state()
                 print(f"  [TG] Scalp Closed [{tf}] {evt['side']}")
 
@@ -888,6 +944,7 @@ class PonchBot:
                         total_points=ce["points"],
                         confirmations=ce["confirmations"],
                         indicators_list=ce["indicators"],
+                        chat_id=PRIVATE_CHAT_ID
                     )
                     self._save_state() # Save confirmation send state
                     print(f"  [TG] ✅ STRONG {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
@@ -898,6 +955,7 @@ class PonchBot:
                         total_points=ce["points"],
                         confirmations=ce["confirmations"],
                         indicators_list=ce["indicators"],
+                        chat_id=PRIVATE_CHAT_ID
                     )
                     self._save_state() # Save confirmation send state
                     print(f"  [TG] 🔥 EXTREME {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")

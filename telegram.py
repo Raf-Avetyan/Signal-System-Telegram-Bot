@@ -1,17 +1,18 @@
 import requests
 import os
-from config import BOT_TOKEN, CHAT_ID, SYMBOL
+from config import BOT_TOKEN, CHAT_ID, SYMBOL, PUBLIC_CHAT_ID, PRIVATE_CHAT_ID
 
 API_URL_MSG   = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 API_URL_PHOTO = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
 API_URL_EDIT_MEDIA = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageMedia"
 
 
-def send(text, parse_mode=None):
+def send(text, parse_mode=None, chat_id=None):
     """Send a message via Telegram Bot API."""
+    target_chat = chat_id if chat_id else CHAT_ID
     try:
         payload = {
-            "chat_id": CHAT_ID,
+            "chat_id": target_chat,
             "text":    text,
         }
         if parse_mode:
@@ -26,12 +27,13 @@ def send(text, parse_mode=None):
         return None
 
 
-def send_photo(photo_path, caption=None):
+def send_photo(photo_path, caption=None, chat_id=None):
     """Send a photo via Telegram Bot API."""
+    target_chat = chat_id if chat_id else CHAT_ID
     try:
         with open(photo_path, 'rb') as f:
             files = {'photo': f}
-            payload = {'chat_id': CHAT_ID}
+            payload = {'chat_id': target_chat}
             if caption:
                 payload['caption'] = caption
                 payload['parse_mode'] = 'HTML'
@@ -46,8 +48,9 @@ def send_photo(photo_path, caption=None):
         return None
 
 
-def edit_message_media(message_id, photo_path, caption=None):
+def edit_message_media(message_id, photo_path, caption=None, chat_id=None):
     """Edit the photo of an existing message."""
+    target_chat = chat_id if chat_id else CHAT_ID
     try:
         import json
         with open(photo_path, 'rb') as f:
@@ -58,7 +61,7 @@ def edit_message_media(message_id, photo_path, caption=None):
                 "parse_mode": "HTML"
             }
             payload = {
-                "chat_id": CHAT_ID,
+                "chat_id": target_chat,
                 "message_id": message_id,
                 "media": json.dumps(media)
             }
@@ -89,7 +92,7 @@ def fmt_price(price):
 # LIQUIDITY SWEEP
 # ═══════════════════════════════════════════════════════════════
 
-def send_liquidity_sweep(side, level, price, points, strength, note=""):
+def send_liquidity_sweep(side, level, price, points, strength, note="", chat_id=None):
     """
     🧹 Liquidity Sweep
     """
@@ -106,14 +109,14 @@ def send_liquidity_sweep(side, level, price, points, strength, note=""):
         f"<b>🧹 Liquidity Sweep</b>\n"
         f"<pre>{code_part}</pre>"
     )
-    send(msg, parse_mode="HTML")
+    send(msg, parse_mode="HTML", chat_id=chat_id)
 
 
 # ═══════════════════════════════════════════════════════════════
 # VOLATILITY ZONE TOUCH
 # ═══════════════════════════════════════════════════════════════
 
-def send_volatility_touch(side, level, price, points, strength, note=""):
+def send_volatility_touch(side, level, price, points, strength, note="", chat_id=None):
     """
     📊 Volatility Zone Touch
     """
@@ -130,14 +133,14 @@ def send_volatility_touch(side, level, price, points, strength, note=""):
         f"<b>📊 Volatility Zone Touch</b>\n"
         f"<pre>{code_part}</pre>"
     )
-    send(msg, parse_mode="HTML")
+    send(msg, parse_mode="HTML", chat_id=chat_id)
 
 
 # ═══════════════════════════════════════════════════════════════
 # SCALP SYSTEM
 # ═══════════════════════════════════════════════════════════════
 
-def send_scalp_open(timeframe, side, price, emoji="⚡️"):
+def send_scalp_open(timeframe, side, price, emoji="⚡️", chat_id=None):
     """
     ⚡️/🚀 SCALP WINDOW OPEN [TF] 🟢/🔴 SIDE
     """
@@ -153,10 +156,10 @@ def send_scalp_open(timeframe, side, price, emoji="⚡️"):
         f"<b>{side_emoji} {side}</b>\n"
         f"<pre>{code_part}</pre>"
     )
-    send(msg, parse_mode="HTML")
+    send(msg, parse_mode="HTML", chat_id=chat_id)
 
 
-def send_scalp_prepare(timeframe, side, points=None, strength=None, emoji="⚡️"):
+def send_scalp_prepare(timeframe, side, points=None, strength=None, emoji="⚡️", chat_id=None):
     """
     ⚠️ PREPARE FOR ENTRY [TF] 🟢/🔴 SIDE
     """
@@ -177,11 +180,11 @@ def send_scalp_prepare(timeframe, side, points=None, strength=None, emoji="⚡�
     code_lines.append(f"Awaiting confirmation on zone exit")
     
     msg += "\n".join(code_lines) + "</pre>"
-    send(msg, parse_mode="HTML")
+    send(msg, parse_mode="HTML", chat_id=chat_id)
 
 
 def send_scalp_confirmed(timeframe, side, entry, sl, tp1, tp2, tp3,
-                         strength, size, score=None, trend=None, reasons=None, emoji="⚡️"):
+                         strength, size, score=None, trend=None, reasons=None, emoji="⚡️", chat_id=None):
     """
     ⚡️/🚀 SCALP ENTRY CONFIRMED [TF] 🟢/🔴 SIDE
     """
@@ -211,10 +214,10 @@ def send_scalp_confirmed(timeframe, side, entry, sl, tp1, tp2, tp3,
         f"<b>{side_emoji} {side}</b>\n"
         f"<pre>{code_part}</pre>"
     )
-    send(msg, parse_mode="HTML")
+    send(msg, parse_mode="HTML", chat_id=chat_id)
 
 
-def send_scalp_closed(timeframe, side, price, emoji="⚡️"):
+def send_scalp_closed(timeframe, side, price, emoji="⚡️", chat_id=None):
     """
     ⚡️/🚀 SCALP WINDOW CLOSED [TF] 🟢/🔴 SIDE
     """
@@ -230,25 +233,57 @@ def send_scalp_closed(timeframe, side, price, emoji="⚡️"):
         f"<b>{side_emoji} {side}</b>\n"
         f"<pre>{code_part}</pre>"
     )
-    send(msg, parse_mode="HTML")
+    send(msg, parse_mode="HTML", chat_id=chat_id)
 
 
 # ═══════════════════════════════════════════════════════════════
 # CONFIRMATION AGGREGATION
 # ═══════════════════════════════════════════════════════════════
 
-def send_strong(side, total_points, confirmations, indicators_list):
+def send_strong(side, total_points, confirmations, indicators_list, chat_id=None):
     """
-    ✅ STRONG
+    ✅ STRONG CONFLUENCE
     """
-    pass # Disabled as requested to match exact format
+    emoji = "✅"
+    side_emoji = "🟢" if side == "LONG" else "🔴"
+    
+    ind_lines = []
+    for ind in indicators_list:
+        ind_lines.append(f"• {ind['name']}: {ind['signal']} (+{ind['points']})")
+    ind_str = "\n".join(ind_lines)
+
+    msg = (
+        f"<b>{emoji} STRONG {side} CONFIRMATION</b>\n"
+        f"<b>{side_emoji} {side}</b>\n\n"
+        f"<b>Confirmations:</b> {confirmations}\n"
+        f"<b>Total Points:</b>  {total_points}\n\n"
+        f"<b>Indicators:</b>\n"
+        f"<pre>{ind_str}</pre>"
+    )
+    send(msg, parse_mode="HTML", chat_id=chat_id)
 
 
-def send_extreme(side, total_points, confirmations, indicators_list):
+def send_extreme(side, total_points, confirmations, indicators_list, chat_id=None):
     """
-    🔥 EXTREME
+    🔥 EXTREME CONFLUENCE
     """
-    pass # Disabled as requested to match exact format
+    emoji = "🔥"
+    side_emoji = "🟢" if side == "LONG" else "🔴"
+    
+    ind_lines = []
+    for ind in indicators_list:
+        ind_lines.append(f"• {ind['name']}: {ind['signal']} (+{ind['points']})")
+    ind_str = "\n".join(ind_lines)
+
+    msg = (
+        f"<b>{emoji} EXTREME {side} CONFIRMATION</b>\n"
+        f"<b>{side_emoji} {side}</b>\n\n"
+        f"<b>Confirmations:</b> {confirmations}\n"
+        f"<b>Total Points:</b>  {total_points}\n\n"
+        f"<b>Indicators:</b>\n"
+        f"<pre>{ind_str}</pre>"
+    )
+    send(msg, parse_mode="HTML", chat_id=chat_id)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -294,7 +329,7 @@ def get_daily_levels_html(date_str, daily_open, resistance, resistance_pct,
 
 def send_daily_levels(date_str, daily_open, resistance, resistance_pct,
                       support, support_pct, volatility, volatility_pct,
-                      critical_high, critical_low, indicators=None, chart_path=None):
+                      critical_high, critical_low, indicators=None, chart_path=None, chat_id=None):
     """
     📊 DAILY LEVELS
     """
@@ -305,17 +340,17 @@ def send_daily_levels(date_str, daily_open, resistance, resistance_pct,
     )
     
     if chart_path:
-        resp = send_photo(chart_path, caption=msg)
+        resp = send_photo(chart_path, caption=msg, chat_id=chat_id)
         return {"response": resp, "html": msg}
     else:
-        resp = send(msg, parse_mode="HTML")
+        resp = send(msg, parse_mode="HTML", chat_id=chat_id)
         return {"response": resp, "html": msg}
         
 # ═══════════════════════════════════════════════════════════════
 # PERFORMANCE SUMMARY
 # ═══════════════════════════════════════════════════════════════
 
-def send_performance_summary(stats):
+def send_performance_summary(stats, chat_id=None):
     """Send daily signal performance recap."""
     if not stats or stats["total"] == 0:
         return
@@ -336,14 +371,14 @@ def send_performance_summary(stats):
         f"Total Signals: {stats['total']}\n"
         f"<pre>{formatted_stats}</pre>"
     )
-    send(msg, parse_mode="HTML")
+    send(msg, parse_mode="HTML", chat_id=chat_id)
 
 
 # ═══════════════════════════════════════════════════════════════
 # PRICE APPROACHING LEVEL
 # ═══════════════════════════════════════════════════════════════
 
-def send_approaching_level(level_name, level_price, current_price, distance_pct):
+def send_approaching_level(level_name, level_price, current_price, distance_pct, chat_id=None):
     """Alert when price is within threshold of a key level."""
     direction = "above" if current_price > level_price else "below"
     
@@ -358,14 +393,14 @@ def send_approaching_level(level_name, level_price, current_price, distance_pct)
         f"\n"
         f"<pre>{code_part}</pre>"
     )
-    send(msg, parse_mode="HTML")
+    send(msg, parse_mode="HTML", chat_id=chat_id)
 
 
 # ═══════════════════════════════════════════════════════════════
 # FUNDING RATE ALERT
 # ═══════════════════════════════════════════════════════════════
 
-def send_funding_alert(rate, direction):
+def send_funding_alert(rate, direction, chat_id=None):
     """Alert when funding rate is extreme."""
     rate_pct = rate * 100
     emoji = "🟢" if direction == "POSITIVE" else "🔴"
@@ -381,14 +416,14 @@ def send_funding_alert(rate, direction):
         f"\n"
         f"<pre>{code_part}</pre>"
     )
-    send(msg, parse_mode="HTML")
+    send(msg, parse_mode="HTML", chat_id=chat_id)
 
 
 # ═══════════════════════════════════════════════════════════════
 # VOLUME SPIKE
 # ═══════════════════════════════════════════════════════════════
 
-def send_volume_spike(tf, current_vol, avg_vol, multiplier, price):
+def send_volume_spike(tf, current_vol, avg_vol, multiplier, price, chat_id=None):
     """Alert when volume is abnormally high."""
     code_part = (
         f"Volume:     {current_vol:,.0f}\n"
@@ -402,7 +437,7 @@ def send_volume_spike(tf, current_vol, avg_vol, multiplier, price):
         f"\n"
         f"<pre>{code_part}</pre>"
     )
-    send(msg, parse_mode="HTML")
+    send(msg, parse_mode="HTML", chat_id=chat_id)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -436,19 +471,19 @@ def get_session_open_html(session_name, open_price, current_price=None, history=
         msg += f"\n\n{history}"
     return msg
 
-def send_session_open(session_name, open_price, current_price=None, history=None, high=None, low=None, chart_path=None):
+def send_session_open(session_name, open_price, current_price=None, history=None, high=None, low=None, chart_path=None, chat_id=None):
     """Send alert when a session opens or bot starts mid-session."""
     msg = get_session_open_html(session_name, open_price, current_price, history, high, low)
         
     if chart_path and os.path.exists(chart_path):
-        resp = send_photo(chart_path, caption=msg)
+        resp = send_photo(chart_path, caption=msg, chat_id=chat_id)
         return {"response": resp, "html": msg}
     else:
-        send(msg, parse_mode="HTML")
+        send(msg, parse_mode="HTML", chat_id=chat_id)
         return None
 
 
-def send_session_summary(session_name, price_open, price_close, signals_count, levels_tested, history=None, high=None, low=None, chart_path=None):
+def send_session_summary(session_name, price_open, price_close, signals_count, levels_tested, history=None, high=None, low=None, chart_path=None, chat_id=None):
     """Send session recap at session close."""
     change = price_close - price_open
     change_pct = (change / price_open) * 100 if price_open else 0
@@ -475,9 +510,9 @@ def send_session_summary(session_name, price_open, price_close, signals_count, l
         msg += f"\n\n{history}"
         
     if chart_path and os.path.exists(chart_path):
-        return send_photo(chart_path, caption=msg)
+        return send_photo(chart_path, caption=msg, chat_id=chat_id)
     else:
-        send(msg, parse_mode="HTML")
+        send(msg, parse_mode="HTML", chat_id=chat_id)
         return None
 
 
@@ -485,7 +520,7 @@ def send_session_summary(session_name, price_open, price_close, signals_count, l
 # ALERT BATCHING
 # ═══════════════════════════════════════════════════════════════
 
-def send_batched_alerts(alerts):
+def send_batched_alerts(alerts, chat_id=None):
     """Send multiple alerts as a single message."""
     if not alerts:
         return
@@ -511,7 +546,7 @@ def send_batched_alerts(alerts):
         f"<pre>{code_part}</pre>"
     )
 
-    send(msg, parse_mode="HTML")
+    send(msg, parse_mode="HTML", chat_id=chat_id)
 
 
 # ═══════════════════════════════════════════════════════════════

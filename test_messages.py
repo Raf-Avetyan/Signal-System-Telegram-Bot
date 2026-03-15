@@ -1,9 +1,7 @@
 # test_messages.py
 import telegram as tg
 
-import telegram as tg
-from data import fetch_klines
-from charting import generate_daily_levels_chart
+from config import PRIVATE_CHAT_ID
 
 # print("Fetching dummy chart data for test...")
 # df = fetch_klines(interval="1h", limit=48)
@@ -86,10 +84,10 @@ from charting import generate_daily_levels_chart
 # )
 
 print("Sending Scalp Open...")
-tg.send_scalp_open("15m", "LONG", 70800.00, emoji="🚀")
+tg.send_scalp_open("15m", "LONG", 70800.00, emoji="🚀", chat_id=PRIVATE_CHAT_ID)
 
 print("Sending Scalp Prepare...")
-tg.send_scalp_prepare("15m", "LONG", points=3, strength="Strong", emoji="🚀")
+tg.send_scalp_prepare("15m", "LONG", points=3, strength="Strong", emoji="🚀", chat_id=PRIVATE_CHAT_ID)
 
 print("2. Sending Extreme Scalp Signal (Calculated Score)...")
 # Mocking an 'Extreme' 9/10 signal
@@ -104,7 +102,8 @@ tg.send_scalp_confirmed(
     score=9, 
     trend="Trending Bullish", 
     reasons=["Near DO", "Extreme Channel", "Volume Spike", "Trend Aligned", "High Liquidations ($150k)"],
-    emoji="🚀"
+    emoji="🚀",
+    chat_id=PRIVATE_CHAT_ID
 )
 
 print("3. Sending Counter-Trend Scalp Signal (Low Score)...")
@@ -120,10 +119,11 @@ tg.send_scalp_confirmed(
     score=3, 
     trend="Trending Bullish", 
     reasons=["Outer Channel", "Counter-trend"],
-    emoji="⚡️"
+    emoji="⚡️",
+    chat_id=PRIVATE_CHAT_ID
 )
 
 print("Sending Scalp Closed...")
-tg.send_scalp_closed("15m", "LONG", 71000.00, emoji="🚀")
+tg.send_scalp_closed("15m", "LONG", 71000.00, emoji="🚀", chat_id=PRIVATE_CHAT_ID)
 
 # print("\n[OK] Test messages sent to Telegram! Check your bot.")

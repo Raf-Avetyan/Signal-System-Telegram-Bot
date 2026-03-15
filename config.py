@@ -5,8 +5,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ─── TELEGRAM ─────────────────────────────────
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-CHAT_ID   = os.getenv("CHAT_ID", "")
+BOT_TOKEN      = os.getenv("BOT_TOKEN", "")
+PUBLIC_CHAT_ID  = os.getenv("PUBLIC_CHAT_ID", os.getenv("CHAT_ID", ""))
+PRIVATE_CHAT_ID = os.getenv("PRIVATE_CHAT_ID", "")
+CHAT_ID         = PUBLIC_CHAT_ID # Legacy support
 
 # ─── SYMBOL ───────────────────────────────────
 SYMBOL = "BTCUSDT"
