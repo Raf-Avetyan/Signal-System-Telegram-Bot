@@ -56,6 +56,7 @@ class PonchBot:
         self.last_funding_alert = 0
         self.sent_sessions = set()     # "session_LONDON_2023-10-14"
         self.session_data = {}         # { "LONDON_2024-03-15": {"open": 70000, "levels": set()} }
+        self.session_history = {}      # { "ASIA": "Asia recap text" }
 
         # Alert Batching
         self.pending_alerts = []
@@ -122,6 +123,117 @@ class PonchBot:
             print(f"[ERROR] Failed to fetch price for hour {target_hour}: {e}")
         return None
 
+    def get_session_ohlc(self, start_hour, end_hour):
+        """Fetch O, H, L, C for a session period today from OKX."""
+        try:
+            df = fetch_klines(interval="1h", limit=48)
+            if df.empty:
+                return None, None, None, None
+            
+            today = datetime.now(timezone.utc).date()
+            # Filter session candles
+            if start_hour < end_hour:
+                mask = (df.index.date == today) & (df.index.hour >= start_hour) & (df.index.hour < end_hour)
+            else: # Crosses midnight
+                mask = ((df.index.date == today) & (df.index.hour >= start_hour)) | \
+                       ((df.index.date == today) & (df.index.hour < end_hour))
+            
+            session_df = df[mask]
+            
+            if session_df.empty:
+                # Try finding just the open price
+                open_p = self.get_price_at_hour(start_hour)
+                return open_p, open_p, open_p, open_p if open_p else (None, None, None, None)
+            
+            return (
+                float(session_df.iloc[0]["Open"]),
+                float(session_df["High"].max()),
+                float(session_df["Low"].min()),
+                float(session_df.iloc[-1]["Close"])
+            )
+        except Exception as e:
+            print(f"[ERROR] Failed to fetch session OHLC: {e}")
+        return None, None, None, None
+
+    def _reconstruct_session_history(self, current_hour):
+        """Reconstruct previous session summaries of the day if bot started late."""
+        for s_name, s_times in SESSIONS.items():
+            if s_name in self.session_history:
+                continue
+            
+            is_completed = False
+            if s_times["open"] < s_times["close"]:
+                is_completed = current_hour >= s_times["close"]
+            
+            if is_completed:
+                print(f"[SESSION] Reconstructing history for {s_name}...")
+                open_p, high_p, low_p, close_p = self.get_session_ohlc(s_times["open"], s_times["close"])
+                
+                if open_p and close_p:
+                    stats = self.tracker.get_session_stats(s_times["open"], s_times["close"])
+                    
+                    change = close_p - open_p
+                    pct = (change / open_p) * 100 if open_p else 0
+                    sign = "+" if change >= 0 else ""
+                    
+                    summary_str = (
+                        f"<b>{s_name} RECAP</b>\n"
+                        f"<pre>"
+                        f"Open:    {open_p:,.2f}\n"
+                        f"High:    {high_p:,.2f}\n"
+                        f"Low:     {low_p:,.2f}\n"
+                        f"Close:   {close_p:,.2f}\n"
+                        f"Change:  {sign}{pct:.2f}%"
+                        f"</pre>"
+                    )
+                    self.session_history[s_name] = summary_str
+                    print(f"  [OK] {s_name} history reconstructed.")
+
+    def _get_history_text(self, current_session_name, latest_price):
+        """Build a combined history string of all sessions that started before the current one."""
+        hist_items = []
+        # Define the chronological order for display
+        order = ["ASIA", "LONDON", "NY"]
+        
+        for s_name in order:
+            if s_name == current_session_name:
+                break
+                
+            # 1. If it's already closed and in history, use that
+            if s_name in self.session_history:
+                hist_items.append(self.session_history[s_name])
+            
+            # 2. If it's currently active (started before us), show Snapshot "SO FAR"
+            else:
+                today = datetime.now(timezone.utc).strftime("%d.%m.%Y")
+                session_id = f"{s_name}_{today}"
+                if session_id in self.session_data:
+                    s_data = self.session_data[session_id]
+                    o = s_data["open_price"]
+                    h = s_data.get("high", latest_price)
+                    l = s_data.get("low", latest_price)
+                    c = latest_price
+                    
+                    change = c - o
+                    pct = (change / o) * 100 if o else 0
+                    sign = "+" if change >= 0 else ""
+                    
+                    stats = self.tracker.get_session_stats(SESSIONS[s_name]["open"], SESSIONS[s_name]["close"])
+                    
+                    snap_str = (
+                        f"<b>{s_name} (SO FAR)</b>\n"
+                        f"<pre>"
+                        f"Open:    {o:,.2f}\n"
+                        f"High:    {h:,.2f}\n"
+                        f"Low:     {l:,.2f}\n"
+                        f"Now:     {c:,.2f}\n"
+                        f"Change:  {sign}{pct:.2f}%"
+                        f"</pre>"
+                    )
+                    hist_items.append(snap_str)
+                    
+        return "\n\n".join(hist_items) if hist_items else None
+
     def _tick(self):
         """One iteration of the main loop."""
         now = datetime.now(timezone.utc)
@@ -135,6 +247,10 @@ class PonchBot:
             self._send_daily_report(now)
             self.last_levels_date = today
             self.sent_signals.clear()  # Reset duplicate tracking
+            self.session_history.clear() # Reset session history for new day
+        
+        # Ensure history is present if we just started
+        self._reconstruct_session_history(now.hour)
 
         # ─── Check Funding Rate ──────────────────────────────
         if current_time - self.last_funding_check > FUNDING_CHECK_INTERVAL:
@@ -184,12 +300,16 @@ class PonchBot:
 
                 # Capture Open Price (Historical from OKX if bot starts mid-session)
                 if is_active and session_id not in self.session_data:
-                    open_p = self.get_price_at_hour(s_times["open"])
+                    open_p, high_p, low_p, _ = self.get_session_ohlc(s_times["open"], current_hour + 1)
                     if open_p is None:
-                        open_p = latest_price  # Fallback
+                        open_p = latest_price
+                    if high_p is None: high_p = latest_price
+                    if low_p is None: low_p = latest_price
                         
                     self.session_data[session_id] = {
                         "open_price": open_p,
+                        "high": high_p,
+                        "low": low_p,
                         "levels_tested": set()
                     }
                     
@@ -200,13 +320,27 @@ class PonchBot:
                     # Fetch stats so far if mid-session
                     stats = self.tracker.get_session_stats(s_times["open"], s_times["close"])
                     
+                    # Fetch stats so far if mid-session
+                    stats = self.tracker.get_session_stats(s_times["open"], s_times["close"])
+                    
+                    # Construct history string
+                    history_text = self._get_history_text(s_name, latest_price)
+
                     # Notify Telegram
                     tg.send_session_open(
                         session_name=s_name, 
                         open_price=open_p, 
                         current_price=latest_price if is_mid else None,
-                        signals_count=stats["total"] if is_mid else 0
+                        signals_count=stats["total"] if is_mid else 0,
+                        history=history_text,
+                        high=self.session_data[session_id]["high"],
+                        low=self.session_data[session_id]["low"]
                     )
+
+                # Update High/Low
+                if session_id in self.session_data:
+                    self.session_data[session_id]["high"] = max(self.session_data[session_id].get("high", 0), latest_price)
+                    self.session_data[session_id]["low"] = min(self.session_data[session_id].get("low", 999999), latest_price)
 
                 # Capture Close & Send Summary
                 if current_hour == s_times["close"]:
@@ -214,12 +348,36 @@ class PonchBot:
                     if sent_key not in self.sent_sessions:
                         self.sent_sessions.add(sent_key)
                         
-                        s_data = self.session_data.get(session_id, {"open_price": latest_price, "levels_tested": set()})
+                        s_data = self.session_data.get(session_id, {"open_price": latest_price, "levels_tested": set(), "high": latest_price, "low": latest_price})
                         open_p = s_data["open_price"]
+                        s_high = s_data.get("high", latest_price)
+                        s_low = s_data.get("low", latest_price)
                         levels = ", ".join(sorted(list(s_data["levels_tested"]))) if s_data["levels_tested"] else "None"
                         
                         stats = self.tracker.get_session_stats(s_times["open"], s_times["close"])
-                        tg.send_session_summary(s_name, open_p, latest_price, stats["total"], levels)
+                        
+                        # Construct history string
+                        history_text = self._get_history_text(s_name, latest_price)
+                        
+                        tg.send_session_summary(s_name, open_p, latest_price, stats["total"], levels, history=history_text, high=s_high, low=s_low)
+                        
+                        # Save to history for NEXT sessions
+                        change = latest_price - open_p
+                        pct = (change / open_p) * 100 if open_p else 0
+                        sign = "+" if change >= 0 else ""
+                        summary_str = (
+                            f"<b>{s_name} RECAP</b>\n"
+                            f"<pre>"
+                            f"Open:    {open_p:,.2f}\n"
+                            f"High:    {s_high:,.2f}\n"
+                            f"Low:     {s_low:,.2f}\n"
+                            f"Close:   {latest_price:,.2f}\n"
+                            f"Change:  {sign}{pct:.2f}%\n"
+                            f"Levels:  {levels}"
+                            f"</pre>"
+                        )
+                        self.session_history[s_name] = summary_str
+                        
                         print(f"[SESSION] {s_name} closed. Recap sent.")
 
         # ─── Flush Batched Alerts ────────────────────────────

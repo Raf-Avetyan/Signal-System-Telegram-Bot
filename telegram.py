@@ -221,6 +221,7 @@ def send_daily_levels(date_str, daily_open, resistance, resistance_pct,
     )
     msg = (
         f"<b>📊 {SYMBOL} DAILY LEVELS</b>\n"
+        f"\n"
         f"<blockquote>"
         f"• Date: <i>{date_str}</i>\n"
         f"• DO:   {fmt_price(daily_open)}\n"
@@ -331,7 +332,7 @@ def send_volume_spike(tf, current_vol, avg_vol, multiplier, price):
 # SESSION ALERTS
 # ═══════════════════════════════════════════════════════════════
 
-def send_session_open(session_name, open_price, current_price=None, signals_count=0):
+def send_session_open(session_name, open_price, current_price=None, signals_count=0, history=None, high=None, low=None):
     """Send alert when a session opens or bot starts mid-session."""
     is_mid = current_price is not None and abs(current_price - open_price) > 0.0001
     
@@ -341,10 +342,10 @@ def send_session_open(session_name, open_price, current_price=None, signals_coun
         change = current_price - open_price
         pct = (change / open_price) * 100 if open_price else 0
         sign = "+" if change >= 0 else ""
+        if high: lines.append(f"High:   {fmt_price(high)}")
+        if low:  lines.append(f"Low:    {fmt_price(low)}")
         lines.append(f"Now:    {fmt_price(current_price)}")
         lines.append(f"Change: {sign}{fmt_price(change)} ({sign}{pct:.2f}%)")
-        if signals_count > 0:
-            lines.append(f"Signals so far: {signals_count}")
 
     code_part = "\n".join(lines)
     
@@ -353,29 +354,39 @@ def send_session_open(session_name, open_price, current_price=None, signals_coun
         f"\n"
         f"<pre>{code_part}</pre>"
     )
+    
+    if history:
+        msg += f"\n\n<blockquote>{history}</blockquote>"
+        
     send(msg, parse_mode="HTML")
 
 
-def send_session_summary(session_name, price_open, price_close, signals_count, levels_tested):
+def send_session_summary(session_name, price_open, price_close, signals_count, levels_tested, history=None, high=None, low=None):
     """Send session recap at session close."""
     change = price_close - price_open
     change_pct = (change / price_open) * 100 if price_open else 0
     direction = "+" if change >= 0 else ""
 
-    code_part = (
-        f"Open:   {fmt_price(price_open)}\n"
-        f"Close:  {fmt_price(price_close)}\n"
-        f"Change: {direction}{fmt_price(change)} ({direction}{change_pct:.2f}%)\n"
-        f"───────────────────\n"
-        f"Signals:       {signals_count}\n"
+    lines = [
+        f"Open:   {fmt_price(price_open)}",
+        f"High:   {fmt_price(high)}" if high else None,
+        f"Low:    {fmt_price(low)}" if low else None,
+        f"Close:  {fmt_price(price_close)}",
+        f"Change: {direction}{fmt_price(change)} ({direction}{change_pct:.2f}%)",
+        f"───────────────────",
         f"Levels Tested: {levels_tested}"
-    )
+    ]
+    code_part = "\n".join([l for l in lines if l])
 
     msg = (
         f"🕐 {session_name} SESSION CLOSE\n"
         f"\n"
         f"<pre>{code_part}</pre>"
     )
+    
+    if history:
+        msg += f"\n\n<blockquote>{history}</blockquote>"
+        
     send(msg, parse_mode="HTML")
 
 

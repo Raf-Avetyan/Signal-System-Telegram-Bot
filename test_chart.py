@@ -1,46 +1,32 @@
-# ─── Chart Verification Script ───────────────────────────────
 
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from charting import generate_daily_levels_chart
-import os
 
-def test_chart():
-    print("Testing Perfectly Framed Daily Levels Chart Generation...")
-    
-    # 1. Create Mock Data (48 candles)
-    num_candles = 48
-    dates = [datetime.now() - timedelta(hours=i) for i in range(num_candles)]
-    dates.reverse()
-    
-    df = pd.DataFrame({
-        "Open": np.random.normal(71000, 100, num_candles),
-        "High": np.random.normal(71100, 100, num_candles),
-        "Low": np.random.normal(70900, 100, num_candles),
-        "Close": np.random.normal(71000, 100, num_candles),
-        "Volume": np.random.randint(100, 1000, num_candles)
-    }, index=pd.to_datetime(dates, utc=True))
-    
-    # 2. Mock Levels
-    levels = {
-        "DO": 71000.0,
-        "PDH": 71500.0,
-        "PDL": 70500.0,
-        "Pump": 72500.0,
-        "Dump": 69500.0,
-        "PumpMax": 74000.0,
-        "DumpMax": 68000.0
-    }
-    
-    # 3. Generate Chart
-    output_fn = "perfect_framed_chart.png"
-    path = generate_daily_levels_chart(df, levels, output_path=output_fn)
-    
-    if path and os.path.exists(path):
-        print(f"✅ Success! Chart saved to: {path}")
-    else:
-        print("❌ Failed to generate chart.")
+# Create mock data
+dates = [datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0) - timedelta(hours=i) for i in range(48)]
+dates.reverse()
 
-if __name__ == "__main__":
-    test_chart()
+data = {
+    "Open": np.random.uniform(70000, 72000, 48),
+    "High": np.random.uniform(71000, 73000, 48),
+    "Low": np.random.uniform(69000, 71000, 48),
+    "Close": np.random.uniform(70000, 72000, 48),
+    "Volume": np.random.uniform(100, 1000, 48)
+}
+df = pd.DataFrame(data, index=dates)
+
+levels = {
+    "DO": 71000,
+    "Pump": 72500,
+    "Dump": 69500,
+    "PumpMax": 73500,
+    "DumpMax": 68500
+}
+
+path = generate_daily_levels_chart(df, levels, output_path="test_session_chart.png")
+if path:
+    print(f"Chart generated at: {path}")
+else:
+    print("Failed to generate chart")
