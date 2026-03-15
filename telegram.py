@@ -1,4 +1,5 @@
 import requests
+import os
 from config import BOT_TOKEN, CHAT_ID, SYMBOL
 
 API_URL_MSG   = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -332,7 +333,7 @@ def send_volume_spike(tf, current_vol, avg_vol, multiplier, price):
 # SESSION ALERTS
 # ═══════════════════════════════════════════════════════════════
 
-def send_session_open(session_name, open_price, current_price=None, signals_count=0, history=None, high=None, low=None):
+def send_session_open(session_name, open_price, current_price=None, history=None, high=None, low=None, chart_path=None):
     """Send alert when a session opens or bot starts mid-session."""
     is_mid = current_price is not None and abs(current_price - open_price) > 0.0001
     
@@ -350,7 +351,7 @@ def send_session_open(session_name, open_price, current_price=None, signals_coun
     code_part = "\n".join(lines)
     
     msg = (
-        f"🕐 <b>{session_name} SESSION OPEN</b>\n"
+        f"<b>🕐 {session_name} SESSION OPENED</b>\n"
         f"\n"
         f"<pre>{code_part}</pre>"
     )
@@ -358,10 +359,13 @@ def send_session_open(session_name, open_price, current_price=None, signals_coun
     if history:
         msg += f"\n\n<blockquote>{history}</blockquote>"
         
-    send(msg, parse_mode="HTML")
+    if chart_path and os.path.exists(chart_path):
+        send_photo(chart_path, caption=msg)
+    else:
+        send(msg, parse_mode="HTML")
 
 
-def send_session_summary(session_name, price_open, price_close, signals_count, levels_tested, history=None, high=None, low=None):
+def send_session_summary(session_name, price_open, price_close, signals_count, levels_tested, history=None, high=None, low=None, chart_path=None):
     """Send session recap at session close."""
     change = price_close - price_open
     change_pct = (change / price_open) * 100 if price_open else 0
@@ -379,7 +383,7 @@ def send_session_summary(session_name, price_open, price_close, signals_count, l
     code_part = "\n".join([l for l in lines if l])
 
     msg = (
-        f"🕐 {session_name} SESSION CLOSE\n"
+        f"<b>🕐 {session_name} SESSION CLOSED</b>\n"
         f"\n"
         f"<pre>{code_part}</pre>"
     )
@@ -387,7 +391,10 @@ def send_session_summary(session_name, price_open, price_close, signals_count, l
     if history:
         msg += f"\n\n<blockquote>{history}</blockquote>"
         
-    send(msg, parse_mode="HTML")
+    if chart_path and os.path.exists(chart_path):
+        send_photo(chart_path, caption=msg)
+    else:
+        send(msg, parse_mode="HTML")
 
 
 # ═══════════════════════════════════════════════════════════════

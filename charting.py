@@ -7,7 +7,7 @@ import os
 
 from config import SESSIONS
 
-def generate_daily_levels_chart(df, levels, symbol="BTCUSDT", timeframe="1H", output_path="daily_chart.png"):
+def generate_daily_levels_chart(df, levels, symbol="BTCUSDT", timeframe="1H", output_path="daily_chart.png", show_sessions=True):
     """
     Generate a candlestick chart with daily levels as horizontal lines.
     """
@@ -115,57 +115,57 @@ def generate_daily_levels_chart(df, levels, symbol="BTCUSDT", timeframe="1H", ou
                         color=color, va='center', fontsize=9, fontweight='bold')
 
         # --- Session Vertical Lines & H/L Labels ---
-        session_colors = {
-            "ASIA": "#3d5afe",   # Blue
-            "LONDON": "#ff9100", # Orange
-            "NY": "#00e676"      # Green
-        }
-        
-        for s_name, times in SESSIONS.items():
-            s_open = times["open"]
-            s_close = times["close"]
-            color = session_colors.get(s_name, "#ffffff")
+        if show_sessions:
+            session_colors = {
+                "ASIA": "#3d5afe",   # Blue
+                "LONDON": "#ff9100", # Orange
+                "NY": "#00e676"      # Green
+            }
             
-            # Find indices for this session within the plotted DF
-            if s_open < s_close:
-                mask = (plot_df.index.hour >= s_open) & (plot_df.index.hour < s_close)
-            else: # Crosses midnight
-                mask = (plot_df.index.hour >= s_open) | (plot_df.index.hour < s_close)
-            
-            session_df = plot_df[mask]
-            
-            if not session_df.empty:
-                # 1. Vertical line at Open (if it exists in our data)
-                # First, find if the ACTUAL open hour is in our DF
-                open_candidates = plot_df.index[plot_df.index.hour == s_open]
-                if len(open_candidates) > 0:
-                    open_ts = open_candidates[0]
-                    idx_open = plot_df.index.get_loc(open_ts)
-                    ax.axvline(idx_open, color=color, linestyle='--', alpha=0.7, linewidth=1.5)
-                    
-                    # Label the session at the top
-                    ax.text(idx_open, ymax + padding_y*0.1, f" {s_name}", 
-                            color=color, fontsize=11, fontweight='bold', ha='left')
+            for s_name, times in SESSIONS.items():
+                s_open = times["open"]
+                s_close = times["close"]
+                color = session_colors.get(s_name, "#ffffff")
+                
+                # Find indices for this session within the plotted DF
+                if s_open < s_close:
+                    mask = (plot_df.index.hour >= s_open) & (plot_df.index.hour < s_close)
+                else: # Crosses midnight
+                    mask = (plot_df.index.hour >= s_open) | (plot_df.index.hour < s_close)
+                
+                all_session_candles = plot_df[mask]
+                if all_session_candles.empty:
+                    continue
 
-                # 2. Session High/Low Labels with Prices
-                s_high = session_df["High"].max()
-                s_low = session_df["Low"].min()
+                # --- FIX: Only use the MOST RECENT day's session ---
+                last_date = all_session_candles.index[-1].date()
+                session_df = all_session_candles[all_session_candles.index.date == last_date]
                 
-                ts_high = session_df["High"].idxmax()
-                ts_low = session_df["Low"].idxmin()
-                
-                idx_high = plot_df.index.get_loc(ts_high)
-                idx_low = plot_df.index.get_loc(ts_low)
-                
-                # NY(H) 72,123.4 type label
-                short_name = s_name[:2] # AS, LO, NY
-                ax.text(idx_high, s_high, f"{short_name}(H) {s_high:,.0f}", color=color, 
-                        fontsize=9, ha='center', va='bottom', fontweight='bold',
-                        bbox=dict(facecolor='#131722', alpha=0.8, pad=1, edgecolor=color, linewidth=0.5))
-                
-                ax.text(idx_low, s_low, f"{short_name}(L) {s_low:,.0f}", color=color, 
-                        fontsize=9, ha='center', va='top', fontweight='bold',
-                        bbox=dict(facecolor='#131722', alpha=0.8, pad=1, edgecolor=color, linewidth=0.5))
+                if not session_df.empty:
+                    # 1. Vertical line at Open
+                    open_ts = session_df.index[0]
+                    if open_ts.hour == s_open:
+                        idx_open = plot_df.index.get_loc(open_ts)
+                        ax.axvline(idx_open, color=color, linestyle='--', alpha=0.7, linewidth=1.5)
+                        ax.text(idx_open, ymax + padding_y*0.1, f" {s_name}", 
+                                color=color, fontsize=11, fontweight='bold', ha='left')
+
+                    # 2. Session High/Low Labels
+                    s_high = session_df["High"].max()
+                    s_low = session_df["Low"].min()
+                    ts_high = session_df["High"].idxmax()
+                    ts_low = session_df["Low"].idxmin()
+                    idx_high = plot_df.index.get_loc(ts_high)
+                    idx_low = plot_df.index.get_loc(ts_low)
+                    
+                    short_name = s_name[:2]
+                    ax.text(idx_high, s_high, f"{short_name}(H) {s_high:,.0f}", color=color, 
+                            fontsize=9, ha='center', va='bottom', fontweight='bold',
+                            bbox=dict(facecolor='#131722', alpha=0.8, pad=1, edgecolor=color, linewidth=0.5))
+                    ax.text(idx_low, s_low, f"{short_name}(L) {s_low:,.0f}", color=color, 
+                            fontsize=9, ha='center', va='top', fontweight='bold',
+                            bbox=dict(facecolor='#131722', alpha=0.8, pad=1, edgecolor=color, linewidth=0.5))
+
 
         fig.subplots_adjust(left=0.06, right=0.98)
         fig.savefig(output_path, bbox_inches='tight', pad_inches=0.1)

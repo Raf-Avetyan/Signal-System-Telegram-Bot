@@ -234,6 +234,16 @@ class PonchBot:
                     
         return "\n\n".join(hist_items) if hist_items else None
 
+    def _generate_current_chart(self, output_path="session_chart.png", show_sessions=True):
+        """Generate a fresh chart image with current levels and sessions."""
+        try:
+            chart_df = fetch_klines(interval="1h", limit=48)
+            if not chart_df.empty and self.levels:
+                return generate_daily_levels_chart(chart_df, self.levels, output_path=output_path, show_sessions=show_sessions)
+        except Exception as e:
+            print(f"[CHARTING] Failed to generate session chart: {e}")
+        return None
+
     def _tick(self):
         """One iteration of the main loop."""
         now = datetime.now(timezone.utc)
@@ -272,11 +282,19 @@ class PonchBot:
 
         # ─── Process each scalp timeframe ────────────────────
         latest_price = None
+        current_candle_high = 0
+        current_candle_low = 9999999
+        
         for tf in SCALP_TIMEFRAMES:
             df = fetch_klines(interval=tf, limit=200)
             if df.empty:
                 continue
 
+            # Update session-level H/L tracking using the current candle's wicks
+            last_c = df.iloc[-1]
+            current_candle_high = max(current_candle_high, float(last_c["High"]))
+            current_candle_low = min(current_candle_low, float(last_c["Low"]))
+            
             if latest_price is None:
                 latest_price = float(df.iloc[-1]["Close"])
 
@@ -286,7 +304,7 @@ class PonchBot:
         if latest_price is not None:
             self.tracker.check_outcomes(latest_price)
 
-            # --- Session Price Tracking ---
+            # --- Session Tracking ---
             current_hour = now.hour
             for s_name, s_times in SESSIONS.items():
                 session_id = f"{s_name}_{today}"
@@ -298,13 +316,13 @@ class PonchBot:
                 else:
                     is_active = current_hour >= s_times["open"] or current_hour < s_times["close"]
 
-                # Capture Open Price (Historical from OKX if bot starts mid-session)
+                # Capture Open & Recover H/L from OKX
                 if is_active and session_id not in self.session_data:
                     open_p, high_p, low_p, _ = self.get_session_ohlc(s_times["open"], current_hour + 1)
                     if open_p is None:
                         open_p = latest_price
-                    if high_p is None: high_p = latest_price
-                    if low_p is None: low_p = latest_price
+                    if high_p is None: high_p = current_candle_high
+                    if low_p is None: low_p = current_candle_low
                         
                     self.session_data[session_id] = {
                         "open_price": open_p,
@@ -320,27 +338,27 @@ class PonchBot:
                     # Fetch stats so far if mid-session
                     stats = self.tracker.get_session_stats(s_times["open"], s_times["close"])
                     
-                    # Fetch stats so far if mid-session
-                    stats = self.tracker.get_session_stats(s_times["open"], s_times["close"])
-                    
                     # Construct history string
                     history_text = self._get_history_text(s_name, latest_price)
+
+                    # Generate session chart
+                    chart_path = self._generate_current_chart(f"session_open_{s_name}.png")
 
                     # Notify Telegram
                     tg.send_session_open(
                         session_name=s_name, 
                         open_price=open_p, 
                         current_price=latest_price if is_mid else None,
-                        signals_count=stats["total"] if is_mid else 0,
                         history=history_text,
                         high=self.session_data[session_id]["high"],
-                        low=self.session_data[session_id]["low"]
+                        low=self.session_data[session_id]["low"],
+                        chart_path=chart_path
                     )
 
-                # Update High/Low
-                if session_id in self.session_data:
-                    self.session_data[session_id]["high"] = max(self.session_data[session_id].get("high", 0), latest_price)
-                    self.session_data[session_id]["low"] = min(self.session_data[session_id].get("low", 999999), latest_price)
+                # Update High/Low with current candle wicks
+                if is_active and session_id in self.session_data:
+                    self.session_data[session_id]["high"] = max(self.session_data[session_id]["high"], current_candle_high)
+                    self.session_data[session_id]["low"] = min(self.session_data[session_id]["low"], current_candle_low)
 
                 # Capture Close & Send Summary
                 if current_hour == s_times["close"]:
@@ -359,7 +377,10 @@ class PonchBot:
                         # Construct history string
                         history_text = self._get_history_text(s_name, latest_price)
                         
-                        tg.send_session_summary(s_name, open_p, latest_price, stats["total"], levels, history=history_text, high=s_high, low=s_low)
+                        # Generate session chart
+                        chart_path = self._generate_current_chart(f"session_close_{s_name}.png")
+
+                        tg.send_session_summary(s_name, open_p, latest_price, stats["total"], levels, history=history_text, high=s_high, low=s_low, chart_path=chart_path)
                         
                         # Save to history for NEXT sessions
                         change = latest_price - open_p
@@ -441,7 +462,7 @@ class PonchBot:
             # Fetch 1h data for charting (last 48h)
             chart_df = fetch_klines(interval="1h", limit=48)
             if not chart_df.empty:
-                chart_path = generate_daily_levels_chart(chart_df, self.levels)
+                chart_path = generate_daily_levels_chart(chart_df, self.levels, show_sessions=False)
         except Exception as e:
             print(f"[CHARTING] Failed to generate: {e}")
 
