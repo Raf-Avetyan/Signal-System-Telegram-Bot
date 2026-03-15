@@ -249,15 +249,18 @@ def send_strong(side, total_points, confirmations, indicators_list, chat_id=None
     
     ind_lines = []
     for ind in indicators_list:
-        ind_lines.append(f"• {ind['name']}: {ind['signal']} (+{ind['points']})")
+        # Clean up internal names for better look
+        name = ind['name'].replace("Ponch_", "").replace("_", " ")
+        sig = ind['signal'].replace("ENTRY ", "")
+        ind_lines.append(f"• {name}: {sig} (+{ind['points']})")
     ind_str = "\n".join(ind_lines)
 
     msg = (
-        f"<b>{emoji} STRONG {side} CONFIRMATION</b>\n"
-        f"<b>{side_emoji} {side}</b>\n\n"
-        f"<b>Confirmations:</b> {confirmations}\n"
-        f"<b>Total Points:</b>  {total_points}\n\n"
-        f"<b>Indicators:</b>\n"
+        f"<b>{emoji} STRONG {side} CONFLUENCE</b>\n"
+        f"<b>{side_emoji} Market Divergence Detected</b>\n\n"
+        f"<b>Confluence:</b> {confirmations} Systems Agree\n"
+        f"<b>Total Weight:</b> {total_points} Points\n\n"
+        f"<b>Matched Strategies:</b>\n"
         f"<pre>{ind_str}</pre>"
     )
     send(msg, parse_mode="HTML", chat_id=chat_id)
@@ -272,15 +275,18 @@ def send_extreme(side, total_points, confirmations, indicators_list, chat_id=Non
     
     ind_lines = []
     for ind in indicators_list:
-        ind_lines.append(f"• {ind['name']}: {ind['signal']} (+{ind['points']})")
+        # Clean up internal names for better look
+        name = ind['name'].replace("Ponch_", "").replace("_", " ")
+        sig = ind['signal'].replace("ENTRY ", "")
+        ind_lines.append(f"• {name}: {sig} (+{ind['points']})")
     ind_str = "\n".join(ind_lines)
 
     msg = (
-        f"<b>{emoji} EXTREME {side} CONFIRMATION</b>\n"
-        f"<b>{side_emoji} {side}</b>\n\n"
-        f"<b>Confirmations:</b> {confirmations}\n"
-        f"<b>Total Points:</b>  {total_points}\n\n"
-        f"<b>Indicators:</b>\n"
+        f"<b>{emoji} EXTREME {side} CONFLUENCE</b>\n"
+        f"<b>{side_emoji} High-Alpha Setup Identified</b>\n\n"
+        f"<b>Confluence:</b> {confirmations} Systems Agree\n"
+        f"<b>Total Weight:</b> {total_points} Points\n\n"
+        f"<b>Matched Strategies:</b>\n"
         f"<pre>{ind_str}</pre>"
     )
     send(msg, parse_mode="HTML", chat_id=chat_id)

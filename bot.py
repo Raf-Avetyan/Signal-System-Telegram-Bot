@@ -113,6 +113,8 @@ class PonchBot:
         print(f"  Symbol: {SYMBOL}")
         print(f"  Timeframes: {', '.join(SIGNAL_TIMEFRAMES)}")
         print(f"  Poll interval: {POLL_INTERVAL}s")
+        print(f"  Public Chat:  {PUBLIC_CHAT_ID}")
+        print(f"  Private Chat: {PRIVATE_CHAT_ID}")
         print(f"{'='*50}")
 
         tg.send_startup()
