@@ -1022,6 +1022,7 @@ class PonchBot:
                         total_points=ce["points"],
                         confirmations=ce["confirmations"],
                         indicators_list=ce["indicators"],
+                        price=close,
                         chat_id=PRIVATE_CHAT_ID
                     )
                     self._save_state() # Save confirmation send state
@@ -1033,6 +1034,7 @@ class PonchBot:
                         total_points=ce["points"],
                         confirmations=ce["confirmations"],
                         indicators_list=ce["indicators"],
+                        price=close,
                         chat_id=PRIVATE_CHAT_ID
                     )
                     self._save_state() # Save confirmation send state

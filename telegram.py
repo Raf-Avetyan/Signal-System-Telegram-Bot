@@ -240,7 +240,7 @@ def send_scalp_closed(timeframe, side, price, emoji="⚡️", chat_id=None):
 # CONFIRMATION AGGREGATION
 # ═══════════════════════════════════════════════════════════════
 
-def send_strong(side, total_points, confirmations, indicators_list, chat_id=None):
+def send_strong(side, total_points, confirmations, indicators_list, price=None, chat_id=None):
     """
     ✅ STRONG CONFLUENCE
     """
@@ -259,14 +259,19 @@ def send_strong(side, total_points, confirmations, indicators_list, chat_id=None
         f"<b>{emoji} STRONG {side} CONFLUENCE</b>\n"
         f"<b>{side_emoji} Market Divergence Detected</b>\n\n"
         f"<b>Confluence:</b> {confirmations} Systems Agree\n"
-        f"<b>Total Weight:</b> {total_points} Points\n\n"
-        f"<b>Matched Strategies:</b>\n"
+        f"<b>Total Weight:</b> {total_points} Points\n"
+    )
+    if price:
+        msg += f"<b>Current Price:</b> {fmt_price(price)}\n"
+    
+    msg += (
+        f"\n<b>Matched Strategies:</b>\n"
         f"<pre>{ind_str}</pre>"
     )
     send(msg, parse_mode="HTML", chat_id=chat_id)
 
 
-def send_extreme(side, total_points, confirmations, indicators_list, chat_id=None):
+def send_extreme(side, total_points, confirmations, indicators_list, price=None, chat_id=None):
     """
     🔥 EXTREME CONFLUENCE
     """
@@ -285,8 +290,13 @@ def send_extreme(side, total_points, confirmations, indicators_list, chat_id=Non
         f"<b>{emoji} EXTREME {side} CONFLUENCE</b>\n"
         f"<b>{side_emoji} High-Alpha Setup Identified</b>\n\n"
         f"<b>Confluence:</b> {confirmations} Systems Agree\n"
-        f"<b>Total Weight:</b> {total_points} Points\n\n"
-        f"<b>Matched Strategies:</b>\n"
+        f"<b>Total Weight:</b> {total_points} Points\n"
+    )
+    if price:
+        msg += f"<b>Current Price:</b> {fmt_price(price)}\n"
+        
+    msg += (
+        f"\n<b>Matched Strategies:</b>\n"
         f"<pre>{ind_str}</pre>"
     )
     send(msg, parse_mode="HTML", chat_id=chat_id)
