@@ -109,8 +109,8 @@ VOLUME_SPIKE_TIMEFRAMES = ["15m", "1h", "4h"]   # Skip 5m (too noisy)
 VOLUME_AVG_PERIOD = 20                    # 20-candle volume SMA
 
 # ─── PRICE APPROACHING ALERTS ────────────────
-APPROACH_THRESHOLD = 0.003       # 0.3% distance from level
-APPROACH_COOLDOWN = 900          # 15 min cooldown per level
+APPROACH_THRESHOLD = 0.002       # 0.2% distance from level
+APPROACH_COOLDOWN = 10800          # 3 hour cooldown per level
 APPROACH_LEVELS = ["Pump", "Dump", "PumpMax", "DumpMax"]  # Which levels to watch
 
 # ─── ADVANCED ALERTS (NEW) ───────────────────
