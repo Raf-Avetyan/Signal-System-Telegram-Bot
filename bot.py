@@ -132,6 +132,10 @@ class PonchBot:
             except Exception as e:
                 print(f"[ERROR] {e}")
                 traceback.print_exc()
+            
+            # Pulse the lock file to stay alive
+            if hasattr(self, 'heartbeat_callback'):
+                self.heartbeat_callback()
 
             time.sleep(POLL_INTERVAL)
 
@@ -1039,5 +1043,37 @@ class PonchBot:
 # ═══════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    bot = PonchBot()
-    bot.run()
+    import sys
+    import os
+
+    lock_file = "bot.lock"
+    
+    # Check if another instance is running
+    if os.path.exists(lock_file):
+        # Try to remove it. If it's locked by another process (on some OS) or exists, 
+        # we check the timestamp. If it was updated in the last 30s, we assume bot is alive.
+        import time
+        if time.time() - os.path.getmtime(lock_file) < 60:
+            print("\n[!] FATAL: Another instance of PonchBot is already running.")
+            print("[!] If you are sure it's not, delete 'bot.lock' and try again.\n")
+            sys.exit(1)
+    
+    # Create/Touch lock file
+    with open(lock_file, "w") as f:
+        f.write(str(os.getpid()))
+
+    try:
+        bot = PonchBot()
+        
+        # Periodic lock file pulse to show we are alive
+        def heartbeat():
+            with open(lock_file, "w") as f:
+                f.write(str(os.getpid()))
+        
+        bot.heartbeat_callback = heartbeat
+        bot.run()
+    except KeyboardInterrupt:
+        print("\n[!] Bot stopping...")
+    finally:
+        if os.path.exists(lock_file):
+            os.remove(lock_file)
