@@ -66,7 +66,8 @@ class PonchBot:
         state = self._load_state()
         self.daily_report_msg_id = state.get("daily_report_msg_id")
         self.session_msg_ids     = state.get("session_msg_ids", {})
-        self.session_data        = state.get("session_data", {}) # Persist session H/L and open prices
+        self.session_data        = state.get("session_data", {})
+        self.last_levels_date    = state.get("last_levels_date") # Persist to prevent duplicates
         self.last_session_update = time.time()
         self.last_daily_update   = time.time()
 
@@ -268,7 +269,8 @@ class PonchBot:
                 json.dump({
                     "daily_report_msg_id": self.daily_report_msg_id,
                     "session_msg_ids": self.session_msg_ids,
-                    "session_data": self.session_data
+                    "session_data": self.session_data,
+                    "last_levels_date": self.last_levels_date
                 }, f)
         except: pass
 
@@ -544,6 +546,7 @@ class PonchBot:
             self.sent_signals.clear()  # Reset duplicate tracking
             self.session_history.clear() # Reset session history for new day
             self.session_msg_ids.clear() # Reset message IDs for new day
+            self.session_data.clear()    # Clear old session data for new day
             self._save_state()
         
         self._reconstruct_session_history(now.hour)

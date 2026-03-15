@@ -1,6 +1,6 @@
 import requests
 import os
-from config import BOT_TOKEN, CHAT_ID
+from config import BOT_TOKEN, CHAT_ID, SYMBOL
 
 API_URL_MSG   = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 API_URL_PHOTO = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
@@ -282,7 +282,7 @@ def get_daily_levels_html(date_str, daily_open, resistance, resistance_pct,
         f"🚨 Critical Low   {fmt_price(critical_low)}"
     )
     msg = (
-        f"<b>📊 DAILY LEVELS</b>\n"
+        f"<b>📊 {SYMBOL} DAILY LEVELS</b>\n"
         f"<blockquote>"
         f"• Date: <i>{date_str}</i>\n"
         f"• DO:   {fmt_price(daily_open)}\n"
