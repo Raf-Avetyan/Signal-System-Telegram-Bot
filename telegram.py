@@ -165,8 +165,6 @@ def send_scalp_closed(timeframe, side, price, emoji="⚡️"):
     send(msg)
 
 
-
-
 # ═══════════════════════════════════════════════════════════════
 # CONFIRMATION AGGREGATION
 # ═══════════════════════════════════════════════════════════════

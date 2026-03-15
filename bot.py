@@ -176,7 +176,7 @@ class PonchBot:
             )
             for sw in sweeps:
                 # Include candle timestamp in deduplication key
-                sig_key = f"sweep_{tf}_{sw['level']}_{sw['side']}_{candle_ts}"
+                sig_key = f"sweep_{sw['level']}_{sw['side']}_{candle_ts}"
                 if sig_key not in self.sent_signals:
                     self.sent_signals.add(sig_key)
                     tg.send_liquidity_sweep(**sw)
@@ -198,7 +198,7 @@ class PonchBot:
             )
             for vt in touches:
                 # Include candle timestamp in deduplication key
-                sig_key = f"vol_{tf}_{vt['level']}_{vt['side']}_{candle_ts}"
+                sig_key = f"vol_{vt['level']}_{vt['side']}_{candle_ts}"
                 if sig_key not in self.sent_signals:
                     self.sent_signals.add(sig_key)
                     tg.send_volatility_touch(**vt)
@@ -219,7 +219,7 @@ class PonchBot:
             if sig_key not in self.sent_signals:
                 self.sent_signals.add(sig_key)
                 print(f"  [SIG] Trade Signal [{tf}] {sig['signal']} @ {sig['price']:,.2f}")
-                self.confirmations.add_signal(sig)
+                self.confirmations.adxd_signal(sig)
 
         # 2. Momentum confirmation
         mom_sigs = check_momentum_confirm(df)
