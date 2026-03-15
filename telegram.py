@@ -240,7 +240,7 @@ def send_scalp_closed(timeframe, side, price, emoji="⚡️", chat_id=None):
 # CONFIRMATION AGGREGATION
 # ═══════════════════════════════════════════════════════════════
 
-def send_strong(side, total_points, confirmations, indicators_list, price=None, chat_id=None):
+def send_strong(side, total_points, confirmations, indicators_list, price=None, sl=None, tp1=None, tp2=None, tp3=None, chat_id=None):
     """
     ✅ STRONG CONFLUENCE
     """
@@ -261,7 +261,17 @@ def send_strong(side, total_points, confirmations, indicators_list, price=None, 
         f"<b>Confluence:</b> {confirmations} Systems Agree\n"
         f"<b>Total Weight:</b> {total_points} Points\n"
     )
-    if price:
+
+    if price and sl:
+        code_part = (
+            f"Entry:  {fmt_price(price)}\n"
+            f"SL:     {fmt_price(sl)}\n"
+            f"TP1:    {fmt_price(tp1)}\n"
+            f"TP2:    {fmt_price(tp2)}\n"
+            f"TP3:    {fmt_price(tp3)}"
+        )
+        msg += f"\n<b>⚡️ TRADE LEVELS</b>\n<pre>{code_part}</pre>\n"
+    elif price:
         msg += f"<b>Current Price:</b> {fmt_price(price)}\n"
     
     msg += (
@@ -271,7 +281,7 @@ def send_strong(side, total_points, confirmations, indicators_list, price=None, 
     send(msg, parse_mode="HTML", chat_id=chat_id)
 
 
-def send_extreme(side, total_points, confirmations, indicators_list, price=None, chat_id=None):
+def send_extreme(side, total_points, confirmations, indicators_list, price=None, sl=None, tp1=None, tp2=None, tp3=None, chat_id=None):
     """
     🔥 EXTREME CONFLUENCE
     """
@@ -292,7 +302,17 @@ def send_extreme(side, total_points, confirmations, indicators_list, price=None,
         f"<b>Confluence:</b> {confirmations} Systems Agree\n"
         f"<b>Total Weight:</b> {total_points} Points\n"
     )
-    if price:
+
+    if price and sl:
+        code_part = (
+            f"Entry:  {fmt_price(price)}\n"
+            f"SL:     {fmt_price(sl)}\n"
+            f"TP1:    {fmt_price(tp1)}\n"
+            f"TP2:    {fmt_price(tp2)}\n"
+            f"TP3:    {fmt_price(tp3)}"
+        )
+        msg += f"\n<b>🔥 RECOMMENDED TARGETS</b>\n<pre>{code_part}</pre>\n"
+    elif price:
         msg += f"<b>Current Price:</b> {fmt_price(price)}\n"
         
     msg += (

@@ -1017,24 +1017,52 @@ class PonchBot:
             conf_events = self.confirmations.check_confirmations(side)
             for ce in conf_events:
                 if ce["type"] == "STRONG":
+                    # Calculate targets for confluence
+                    sl_m, tp1_m, tp2_m, tp3_m = 0.7, 0.7, 1.4, 2.1 # Standard multipliers
+                    if side == "LONG":
+                        sl_c  = close - atr_val * sl_m
+                        tp1_c = close + atr_val * tp1_m
+                        tp2_c = close + atr_val * tp2_m
+                        tp3_c = close + atr_val * tp3_m
+                    else:
+                        sl_c  = close + atr_val * sl_m
+                        tp1_c = close - atr_val * tp1_m
+                        tp2_c = close - atr_val * tp2_m
+                        tp3_c = close - atr_val * tp3_m
+
                     tg.send_strong(
                         side=ce["side"],
                         total_points=ce["points"],
                         confirmations=ce["confirmations"],
                         indicators_list=ce["indicators"],
                         price=close,
+                        sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
                         chat_id=PRIVATE_CHAT_ID
                     )
                     self._save_state() # Save confirmation send state
                     print(f"  [TG] ✅ STRONG {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
 
                 elif ce["type"] == "EXTREME":
+                    # Calculate targets for confluence
+                    sl_m, tp1_m, tp2_m, tp3_m = 0.7, 0.7, 1.4, 2.1 # Standard multipliers
+                    if side == "LONG":
+                        sl_c  = close - atr_val * sl_m
+                        tp1_c = close + atr_val * tp1_m
+                        tp2_c = close + atr_val * tp2_m
+                        tp3_c = close + atr_val * tp3_m
+                    else:
+                        sl_c  = close + atr_val * sl_m
+                        tp1_c = close - atr_val * tp1_m
+                        tp2_c = close - atr_val * tp2_m
+                        tp3_c = close - atr_val * tp3_m
+
                     tg.send_extreme(
                         side=ce["side"],
                         total_points=ce["points"],
                         confirmations=ce["confirmations"],
                         indicators_list=ce["indicators"],
                         price=close,
+                        sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
                         chat_id=PRIVATE_CHAT_ID
                     )
                     self._save_state() # Save confirmation send state
