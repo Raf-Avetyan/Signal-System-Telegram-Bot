@@ -634,7 +634,7 @@ def send_batched_alerts(alerts, chat_id=None):
     code_part = "\n".join(lines).strip()
     
     msg = (
-        f"📑 ALERT BATCH ({len(alerts)} signals)\n"
+        f"🔔 ALERT BATCH ({len(alerts)} signals)\n"
         f"\n"
         f"<pre>{code_part}</pre>"
     )
