@@ -395,116 +395,124 @@ class PonchBot:
             # --- Session Tracking ---
             today = now.strftime("%d.%m.%Y")
             current_hour = now.hour
-            for s_name, s_times in SESSIONS.items():
-                session_id = f"{s_name}_{today}"
-                
-                # Check if session is active now
-                is_active = False
-                if s_times["open"] < s_times["close"]:
-                    is_active = s_times["open"] <= current_hour < s_times["close"]
-                else:
-                    is_active = current_hour >= s_times["open"] or current_hour < s_times["close"]
+            is_weekend = now.weekday() >= 5 # 5=Sat, 6=Sun
+            
+            if not is_weekend:
+                for s_name, s_times in SESSIONS.items():
+                    session_id = f"{s_name}_{today}"
+                    
+                    # Check if session is active now
+                    is_active = False
+                    if s_times["open"] < s_times["close"]:
+                        is_active = s_times["open"] <= current_hour < s_times["close"]
+                    else:
+                        is_active = current_hour >= s_times["open"] or current_hour < s_times["close"]
 
-                # Capture Open & Recover H/L from OKX
-                if is_active and session_id not in self.session_data:
-                    open_p, high_p, low_p, _ = self.get_session_ohlc(s_times["open"], current_hour + 1)
-                    if open_p is None:
-                        open_p = latest_price
-                    if high_p is None: high_p = current_candle_high
-                    if low_p is None: low_p = current_candle_low
+                    # Capture Open & Recover H/L from OKX
+                    if is_active and session_id not in self.session_data:
+                        open_p, high_p, low_p, _ = self.get_session_ohlc(s_times["open"], current_hour + 1)
+                        if open_p is None:
+                            open_p = latest_price
+                        if high_p is None: high_p = current_candle_high
+                        if low_p is None: low_p = current_candle_low
+                            
+                        self.session_data[session_id] = {
+                            "open_price": open_p,
+                            "high": high_p,
+                            "low": low_p,
+                            "levels_tested": set()
+                        }
                         
-                    self.session_data[session_id] = {
-                        "open_price": open_p,
-                        "high": high_p,
-                        "low": low_p,
-                        "levels_tested": set()
-                    }
-                    
-                    is_mid = current_hour != s_times["open"]
-                    status = "opened" if not is_mid else "active (recovered from OKX)"
-                    print(f"[SESSION] {s_name} {status} at {open_p:,.2f}")
-                    
-                    # Fetch stats so far if mid-session
-                    stats = self.tracker.get_session_stats(s_times["open"], s_times["close"])
-                    
-                    # Construct history string
-                    history_text = self._get_history_text(s_name, latest_price)
-
-                    # Generate session chart
-                    chart_path = self._generate_current_chart(f"session_open_{s_name}.png")
-
-                    # Notify Telegram
-                    resp = tg.send_session_open(
-                        session_name=s_name, 
-                        open_price=open_p, 
-                        current_price=latest_price if is_mid else None,
-                        history=history_text,
-                        high=self.session_data[session_id]["high"],
-                        low=self.session_data[session_id]["low"],
-                        chart_path=chart_path,
-                        chat_id=PUBLIC_CHAT_ID
-                    )
-                    
-                    if resp and "response" in resp:
-                        msg_data = resp["response"]
-                        if msg_data and "result" in msg_data:
-                            msg_id = msg_data["result"]["message_id"]
-                            # Now we store metadata so we can REGENERATE the text later
-                            self.session_msg_ids[session_id] = {
-                                "msg_id": msg_id,
-                                "name": s_name,
-                                "open": open_p,
-                                "history": history_text
-                            }
-                            self.last_session_update = current_time
-                            self._save_state()
-
-                # Update High/Low with current candle wicks
-                if is_active and session_id in self.session_data:
-                    self.session_data[session_id]["high"] = max(self.session_data[session_id]["high"], current_candle_high)
-                    self.session_data[session_id]["low"] = min(self.session_data[session_id]["low"], current_candle_low)
-
-                # Capture Close & Send Summary
-                if current_hour == s_times["close"]:
-                    sent_key = f"sent_{session_id}"
-                    if sent_key not in self.sent_sessions:
-                        self.sent_sessions.add(sent_key)
+                        is_mid = current_hour != s_times["open"]
+                        status = "opened" if not is_mid else "active (recovered from OKX)"
+                        print(f"[SESSION] {s_name} {status} at {open_p:,.2f}")
                         
-                        s_data = self.session_data.get(session_id, {"open_price": latest_price, "levels_tested": set(), "high": latest_price, "low": latest_price})
-                        open_p = s_data["open_price"]
-                        s_high = s_data.get("high", latest_price)
-                        s_low = s_data.get("low", latest_price)
-                        levels = ", ".join(sorted(list(s_data["levels_tested"]))) if s_data["levels_tested"] else "None"
-                        
+                        # Fetch stats so far if mid-session
                         stats = self.tracker.get_session_stats(s_times["open"], s_times["close"])
                         
                         # Construct history string
                         history_text = self._get_history_text(s_name, latest_price)
-                        
-                        # Generate session chart
-                        chart_path = self._generate_current_chart(f"session_close_{s_name}.png")
 
-                        tg.send_session_summary(s_name, open_p, latest_price, stats["total"], levels, history=history_text, high=s_high, low=s_low, chart_path=chart_path, chat_id=PUBLIC_CHAT_ID)
-                        
-                        # Save to history for NEXT sessions
-                        change = latest_price - open_p
-                        pct = (change / open_p) * 100 if open_p else 0
-                        sign = "+" if change >= 0 else ""
-                        summary_str = (
-                            f"<b>{s_name} RECAP</b>\n"
-                            f"<pre>"
-                            f"Open:    {open_p:,.2f}\n"
-                            f"High:    {s_high:,.2f}\n"
-                            f"Low:     {s_low:,.2f}\n"
-                            f"Close:   {latest_price:,.2f}\n"
-                            f"Change:  {sign}{pct:.2f}%\n"
-                            f"Levels:  {levels}"
-                            f"</pre>"
+                        # Generate session chart
+                        chart_path = self._generate_current_chart(f"session_open_{s_name}.png")
+
+                        # Notify Telegram
+                        resp = tg.send_session_open(
+                            session_name=s_name, 
+                            open_price=open_p, 
+                            current_price=latest_price if is_mid else None,
+                            history=history_text,
+                            high=self.session_data[session_id]["high"],
+                            low=self.session_data[session_id]["low"],
+                            chart_path=chart_path,
+                            chat_id=PUBLIC_CHAT_ID
                         )
-                        self.session_history[s_name] = summary_str
-                        self._save_state() # Save summary sent state
                         
-                        print(f"[SESSION] {s_name} closed. Recap sent.")
+                        if resp and "response" in resp:
+                            msg_data = resp["response"]
+                            if msg_data and "result" in msg_data:
+                                msg_id = msg_data["result"]["message_id"]
+                                # Now we store metadata so we can REGENERATE the text later
+                                self.session_msg_ids[session_id] = {
+                                    "msg_id": msg_id,
+                                    "name": s_name,
+                                    "open": open_p,
+                                    "history": history_text
+                                }
+                                self.last_session_update = current_time
+                                self._save_state()
+
+                    # Update High/Low with current candle wicks
+                    if is_active and session_id in self.session_data:
+                        self.session_data[session_id]["high"] = max(self.session_data[session_id]["high"], current_candle_high)
+                        self.session_data[session_id]["low"] = min(self.session_data[session_id]["low"], current_candle_low)
+
+                    # Capture Close & Send Summary
+                    if current_hour == s_times["close"]:
+                        sent_key = f"sent_{session_id}"
+                        if sent_key not in self.sent_sessions:
+                            self.sent_sessions.add(sent_key)
+                            
+                            s_data = self.session_data.get(session_id, {"open_price": latest_price, "levels_tested": set(), "high": latest_price, "low": latest_price})
+                            open_p = s_data["open_price"]
+                            s_high = s_data.get("high", latest_price)
+                            s_low = s_data.get("low", latest_price)
+                            levels = ", ".join(sorted(list(s_data["levels_tested"]))) if s_data["levels_tested"] else "None"
+                            
+                            stats = self.tracker.get_session_stats(s_times["open"], s_times["close"])
+                            
+                            # Construct history string
+                            history_text = self._get_history_text(s_name, latest_price)
+                            
+                            # Generate session chart
+                            chart_path = self._generate_current_chart(f"session_close_{s_name}.png")
+
+                            tg.send_session_summary(s_name, open_p, latest_price, stats["total"], levels, history=history_text, high=s_high, low=s_low, chart_path=chart_path, chat_id=PUBLIC_CHAT_ID)
+                            
+                            # Save to history for NEXT sessions
+                            change = latest_price - open_p
+                            pct = (change / open_p) * 100 if open_p else 0
+                            sign = "+" if change >= 0 else ""
+                            summary_str = (
+                                f"<b>{s_name} RECAP</b>\n"
+                                f"<pre>"
+                                f"Open:    {open_p:,.2f}\n"
+                                f"High:    {s_high:,.2f}\n"
+                                f"Low:     {s_low:,.2f}\n"
+                                f"Close:   {latest_price:,.2f}\n"
+                                f"Change:  {sign}{pct:.2f}%\n"
+                                f"Levels:  {levels}"
+                                f"</pre>"
+                            )
+                            self.session_history[s_name] = summary_str
+                            
+                            # Stop updating the opening message once closed
+                            if session_id in self.session_msg_ids:
+                                del self.session_msg_ids[session_id]
+                                
+                            self._save_state() # Save summary sent state
+                            
+                            print(f"[SESSION] {s_name} closed. Recap sent.")
 
         # ─── Flush Batched Alerts ────────────────────────────
         if self.pending_alerts and self.batch_timer_start:
