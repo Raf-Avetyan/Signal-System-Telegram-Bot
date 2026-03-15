@@ -801,6 +801,9 @@ class PonchBot:
                 prev_high=prev_high, prev_low=prev_low
             )
             for sw in sweeps:
+                # Always record for session tracking
+                record_level(sw['level'])
+
                 # IMPORTANT: Use a TF-independent key for Global Levels 
                 # to prevent duplicates across 5m/15m/1h/4h
                 sig_key = f"sweep_{sw['level']}_{sw['side']}_{now.strftime('%Y-%m-%d')}"
@@ -809,7 +812,6 @@ class PonchBot:
                     tg.send_liquidity_sweep(**sw, chat_id=PUBLIC_CHAT_ID)
                     self._save_state() # Save immediately to avoid double sends
                     print(f"  [TG] Liquidity Sweep: {sw['level']} ({sw['side']})")
-                    record_level(sw['level'])
 
                     # Add to confirmation tracker
                     self.confirmations.add_signal({
@@ -826,6 +828,9 @@ class PonchBot:
                 prev_high=prev_high, prev_low=prev_low
             )
             for vt in touches:
+                # Always record for session tracking
+                record_level(vt['level'])
+
                 # TF-independent key for daily/weekly zones
                 sig_key = f"vol_{vt['level']}_{vt['side']}_{now.strftime('%Y-%m-%d')}"
                 if sig_key not in self.sent_signals:
@@ -833,7 +838,6 @@ class PonchBot:
                     tg.send_volatility_touch(**vt, chat_id=PRIVATE_CHAT_ID)
                     self._save_state()
                     print(f"  [TG] Vol Zone Touch: {vt['level']} ({vt['side']})")
-                    record_level(vt['level'])
 
                     # Add to confirmation tracker
                     self.confirmations.add_signal({
