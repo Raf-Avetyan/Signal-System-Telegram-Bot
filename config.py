@@ -12,8 +12,8 @@ CHAT_ID   = os.getenv("CHAT_ID", "")
 SYMBOL = "BTCUSDT"
 
 # ─── TIMEFRAMES ───────────────────────────────
-# Scalp timeframes for momentum system
-SCALP_TIMEFRAMES = ["5m", "15m", "1h"]
+# Signal timeframes for momentum system
+SIGNAL_TIMEFRAMES = ["5m", "15m", "1h", "4h"]
 # Data timeframe for levels/channels
 ANALYSIS_TIMEFRAME = "1h"
 # How much history to fetch per timeframe
@@ -21,6 +21,7 @@ KLINE_LIMITS = {
     "5m":  500,
     "15m": 500,
     "1h":  500,
+    "4h":  500,
     "1d":  120,
     "1w":  52,
     "1M":  12,
@@ -58,6 +59,7 @@ TIMEFRAME_PROFILES = {
     "5m":  {"strength": "Weak",   "emoji": "⚡️", "size": 0.5},
     "15m": {"strength": "Medium", "emoji": "⚡️", "size": 1.0},
     "1h":  {"strength": "Strong", "emoji": "🚀", "size": 2.0},
+    "4h":  {"strength": "Ultra",  "emoji": "💎", "size": 3.0},
 }
 
 # ─── SIGNAL POINTS ────────────────────────────
@@ -101,7 +103,7 @@ FUNDING_COOLDOWN = 3600          # 1 hour cooldown between alerts
 
 # ─── VOLUME SPIKE DETECTION ──────────────────
 VOLUME_SPIKE_MULT = 3.0                   # Alert when vol > 3x average
-VOLUME_SPIKE_TIMEFRAMES = ["15m", "1h"]   # Skip 5m (too noisy)
+VOLUME_SPIKE_TIMEFRAMES = ["15m", "1h", "4h"]   # Skip 5m (too noisy)
 VOLUME_AVG_PERIOD = 20                    # 20-candle volume SMA
 
 # ─── PRICE APPROACHING ALERTS ────────────────

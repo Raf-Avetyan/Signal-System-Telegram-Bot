@@ -1,6 +1,6 @@
 import requests
 import os
-from config import BOT_TOKEN, CHAT_ID, SYMBOL
+from config import BOT_TOKEN, CHAT_ID
 
 API_URL_MSG   = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 API_URL_PHOTO = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
@@ -104,7 +104,6 @@ def send_liquidity_sweep(side, level, price, points, strength, note=""):
     
     msg = (
         f"<b>🧹 Liquidity Sweep</b>\n"
-        f"<i>{SYMBOL}</i>\n"
         f"<pre>{code_part}</pre>"
     )
     send(msg, parse_mode="HTML")
@@ -129,7 +128,6 @@ def send_volatility_touch(side, level, price, points, strength, note=""):
     
     msg = (
         f"<b>📊 Volatility Zone Touch</b>\n"
-        f"<i>{SYMBOL}</i>\n"
         f"<pre>{code_part}</pre>"
     )
     send(msg, parse_mode="HTML")
@@ -143,6 +141,7 @@ def send_scalp_open(timeframe, side, price, emoji="⚡️"):
     """
     ⚡️/🚀 SCALP WINDOW OPEN [TF] 🟢/🔴 SIDE
     """
+    label = "SCALP" if timeframe.lower() in ["5m", "15m"] else "SIGNAL"
     side_emoji = "🟢" if side == "LONG" else "🔴"
     code_part = (
         f"Momentum: Zone Entry\n"
@@ -150,8 +149,8 @@ def send_scalp_open(timeframe, side, price, emoji="⚡️"):
     )
     
     msg = (
-        f"<b>{emoji} SCALP WINDOW OPEN</b> [{timeframe.upper()}] {side_emoji} <b>{side}</b>\n"
-        f"<i>{SYMBOL}</i>\n"
+        f"<b>{emoji} {label} WINDOW OPEN</b> [{timeframe.upper()}]\n"
+        f"<b>{side_emoji} {side}</b>\n"
         f"<pre>{code_part}</pre>"
     )
     send(msg, parse_mode="HTML")
@@ -163,8 +162,8 @@ def send_scalp_prepare(timeframe, side, points=None, strength=None, emoji="⚡�
     """
     side_emoji = "🟢" if side == "LONG" else "🔴"
     msg = (
-        f"⚠️ <b>PREPARE FOR ENTRY</b> [{timeframe.upper()}] {side_emoji} <b>{side}</b>\n"
-        f"<i>{SYMBOL}</i>\n"
+        f"⚠️ <b>PREPARE FOR ENTRY</b> [{timeframe.upper()}]\n"
+        f"<b>{side_emoji} {side}</b>\n"
         f"<pre>"
     )
     
@@ -186,6 +185,7 @@ def send_scalp_confirmed(timeframe, side, entry, sl, tp1, tp2, tp3,
     """
     ⚡️/🚀 SCALP ENTRY CONFIRMED [TF] 🟢/🔴 SIDE
     """
+    label = "SCALP" if timeframe.lower() in ["5m", "15m"] else "SIGNAL"
     side_emoji = "🟢" if side == "LONG" else "🔴"
     
     score_display = f"Score:    {score}/10" if score else ""
@@ -207,8 +207,8 @@ def send_scalp_confirmed(timeframe, side, entry, sl, tp1, tp2, tp3,
         code_part += f"Confluence: {confl_str}\n"
 
     msg = (
-        f"<b>{emoji} SCALP ENTRY CONFIRMED</b> [{timeframe.upper()}] {side_emoji} <b>{side}</b>\n"
-        f"<i>{SYMBOL}</i>\n"
+        f"<b>{emoji} {label} ENTRY CONFIRMED</b> [{timeframe.upper()}]\n"
+        f"<b>{side_emoji} {side}</b>\n"
         f"<pre>{code_part}</pre>"
     )
     send(msg, parse_mode="HTML")
@@ -218,6 +218,7 @@ def send_scalp_closed(timeframe, side, price, emoji="⚡️"):
     """
     ⚡️/🚀 SCALP WINDOW CLOSED [TF] 🟢/🔴 SIDE
     """
+    label = "SCALP" if timeframe.lower() in ["5m", "15m"] else "SIGNAL"
     side_emoji = "🟢" if side == "LONG" else "🔴"
     code_part = (
         f"Momentum: Zone Exit\n"
@@ -225,8 +226,8 @@ def send_scalp_closed(timeframe, side, price, emoji="⚡️"):
     )
     
     msg = (
-        f"<b>{emoji} SCALP WINDOW CLOSED</b> [{timeframe.upper()}] {side_emoji} <b>{side}</b>\n"
-        f"<i>{SYMBOL}</i>\n"
+        f"<b>{emoji} {label} WINDOW CLOSED</b> [{timeframe.upper()}]\n"
+        f"<b>{side_emoji} {side}</b>\n"
         f"<pre>{code_part}</pre>"
     )
     send(msg, parse_mode="HTML")
@@ -281,7 +282,7 @@ def get_daily_levels_html(date_str, daily_open, resistance, resistance_pct,
         f"🚨 Critical Low   {fmt_price(critical_low)}"
     )
     msg = (
-        f"<b>📊 {SYMBOL} DAILY LEVELS</b>\n"
+        f"<b>📊 DAILY LEVELS</b>\n"
         f"<blockquote>"
         f"• Date: <i>{date_str}</i>\n"
         f"• DO:   {fmt_price(daily_open)}\n"
@@ -295,7 +296,7 @@ def send_daily_levels(date_str, daily_open, resistance, resistance_pct,
                       support, support_pct, volatility, volatility_pct,
                       critical_high, critical_low, indicators=None, chart_path=None):
     """
-    📊 BTCUSDT DAILY LEVELS
+    📊 DAILY LEVELS
     """
     msg = get_daily_levels_html(
         date_str, daily_open, resistance, resistance_pct,

@@ -10,7 +10,7 @@ import traceback
 from datetime import datetime, timezone
 
 from config import (
-    SYMBOL, SCALP_TIMEFRAMES, POLL_INTERVAL,
+    SYMBOL, SIGNAL_TIMEFRAMES, POLL_INTERVAL,
     TIMEFRAME_PROFILES, FUNDING_THRESHOLD, FUNDING_CHECK_INTERVAL,
     FUNDING_COOLDOWN, VOLUME_SPIKE_MULT, VOLUME_SPIKE_TIMEFRAMES,
     VOLUME_AVG_PERIOD, APPROACH_THRESHOLD, APPROACH_COOLDOWN,
@@ -37,7 +37,7 @@ class PonchBot:
     def __init__(self):
         # Scalp trackers — one per timeframe
         self.scalp_trackers = {
-            tf: ScalpTracker(tf) for tf in SCALP_TIMEFRAMES
+            tf: ScalpTracker(tf) for tf in SIGNAL_TIMEFRAMES
         }
 
         # Confirmation aggregation
@@ -103,7 +103,7 @@ class PonchBot:
         print(f"{'='*50}")
         print(f"  Ponch Signal System (v2)")
         print(f"  Symbol: {SYMBOL}")
-        print(f"  Timeframes: {', '.join(SCALP_TIMEFRAMES)}")
+        print(f"  Timeframes: {', '.join(SIGNAL_TIMEFRAMES)}")
         print(f"  Poll interval: {POLL_INTERVAL}s")
         print(f"{'='*50}")
 
@@ -318,7 +318,7 @@ class PonchBot:
         current_candle_high = 0
         current_candle_low = 9999999
         
-        for tf in SCALP_TIMEFRAMES:
+        for tf in SIGNAL_TIMEFRAMES:
             if tf not in data: continue
             df = data[tf]
             
