@@ -1151,18 +1151,16 @@ class PonchBot:
             self.sent_signals.add(evt_key)
 
             if evt["type"] == "OPEN":
-                if not self.is_booting:
-                    tg.send_scalp_open(tf, evt["side"], evt["price"], emoji=emoji, chat_id=PRIVATE_CHAT_ID)
+                tg.send_scalp_open(tf, evt["side"], evt["price"], emoji=emoji, chat_id=PRIVATE_CHAT_ID)
                 self.sent_signals.add(evt_key)
                 self._save_state()
-                print(f"  [TG] Scalp Open [{tf}] {evt['side']} {'(Silent)' if self.is_booting else ''}")
+                print(f"  [TG] Scalp Open [{tf}] {evt['side']}")
 
             elif evt["type"] == "PREPARE":
-                if not self.is_booting:
-                    tg.send_scalp_prepare(tf, evt["side"], emoji=emoji, chat_id=PRIVATE_CHAT_ID)
+                tg.send_scalp_prepare(tf, evt["side"], emoji=emoji, chat_id=PRIVATE_CHAT_ID)
                 self.sent_signals.add(evt_key)
                 self._save_state()
-                print(f"  [TG] Prepare [{tf}] {evt['side']} {'(Silent)' if self.is_booting else ''}")
+                print(f"  [TG] Prepare [{tf}] {evt['side']}")
 
             elif evt["type"] == "CONFIRMED":
                 # --- Calculate Signal Strength Score ---
