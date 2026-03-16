@@ -77,34 +77,34 @@ c_low  = d_open - max_dump
 // RIGHT-SIDE LEVELS DISPLAY (SHORT DASHED LINES)
 // ══════════════════════════════════════════════════════════════════════
 
-f_draw_lvl(val, txt, col, style, width) =>
+f_draw_lvl(val, txt, col, style, width, x_off) =>
     var line l = na
     var label lbl = na
     if barstate.islast and not na(val)
         line.delete(l)
         label.delete(lbl)
-        l := line.new(bar_index - 10, val, bar_index + 5, val, xloc=xloc.bar_index, color=col, style=style, width=width)
-        lbl := label.new(bar_index + 6, val, txt, xloc=xloc.bar_index, color=color.new(color.black, 100), textcolor=col, style=label.style_label_left, size=size.small)
+        l := line.new(bar_index - 15, val, bar_index + 5, val, xloc=xloc.bar_index, color=col, style=style, width=width)
+        lbl := label.new(bar_index + x_off, val, txt, xloc=xloc.bar_index, color=color.new(color.black, 100), textcolor=col, style=label.style_label_left, size=size.small)
 
-// Draw Levels matching screenshots
-f_draw_lvl(pdh, "PDH", color.gray, line.style_dotted, 1)
-f_draw_lvl(pdl, "PDL", color.gray, line.style_dotted, 1)
-f_draw_lvl(d_open, "DO", color.white, line.style_dotted, 1)
+// Draw Levels with offsets to prevent overlapping
+f_draw_lvl(pdh, "PDH", color.gray, line.style_dotted, 1, 6)
+f_draw_lvl(pdl, "PDL", color.gray, line.style_dotted, 1, 6)
+f_draw_lvl(d_open, "DO", color.white, line.style_dotted, 1, 6)
 
-f_draw_lvl(pwh, "PWH", color.orange, line.style_dotted, 1)
-f_draw_lvl(pwl, "PWL", color.blue, line.style_solid, 2)
+f_draw_lvl(pwh, "PWH", color.orange, line.style_dotted, 1, 6)
+f_draw_lvl(pwl, "PWL", color.blue, line.style_solid, 2, 6)
 
-f_draw_lvl(pmh, "PMH", color.purple, line.style_dotted, 1)
-f_draw_lvl(pml, "PML", color.purple, line.style_dotted, 1)
+f_draw_lvl(pmh, "PMH", color.purple, line.style_dotted, 1, 6)
+f_draw_lvl(pml, "PML", color.purple, line.style_dotted, 1, 6)
 
-f_draw_lvl(w_open, "WO", color.fuchsia, line.style_dotted, 1)
-f_draw_lvl(m_open, "MO", color.red, line.style_dotted, 1)
+f_draw_lvl(w_open, "WO", color.fuchsia, line.style_dotted, 1, 11)   // Shifted right
+f_draw_lvl(m_open, "MO", color.red, line.style_dotted, 1, 16)       // Shifted more
 
-f_draw_lvl(d_res, "Pump", color.red, line.style_solid, 2)
-f_draw_lvl(d_sup, "Dump", color.green, line.style_solid, 2)
+f_draw_lvl(d_res, "Pump", color.red, line.style_solid, 2, 6)
+f_draw_lvl(d_sup, "Dump", color.green, line.style_solid, 2, 6)
 
-f_draw_lvl(c_high, "Pump Max", color.orange, line.style_dotted, 1)
-f_draw_lvl(c_low, "Dump Max", color.orange, line.style_dotted, 1)
+f_draw_lvl(c_high, "Pump Max", color.orange, line.style_dotted, 1, 6)
+f_draw_lvl(c_low, "Dump Max", color.orange, line.style_dotted, 1, 6)
 
 // ══════════════════════════════════════════════════════════════════════
 // EMA CHANNELS
@@ -124,12 +124,12 @@ ema3 = ta.ema(close, ema3_len)
 outer_up = ema3 + atr_val * mult_outer
 outer_dn = ema3 - atr_val * mult_outer
 
-p_up1 = plot(inner_up, "Inner Up", color=color.new(color.teal, 70))
-p_dn1 = plot(inner_dn, "Inner Dn", color=color.new(color.teal, 70))
-fill(p_up1, p_dn1, color.new(color.teal, 90), "Inner Band")
+// p_up1 = plot(inner_up, "Inner Up", color=color.new(color.teal, 70))
+// p_dn1 = plot(inner_dn, "Inner Dn", color=color.new(color.teal, 70))
+// fill(p_up1, p_dn1, color.new(color.teal, 90), "Inner Band")
 
-plot(mid_up, "Mid Up", color=color.new(color.teal, 80), linewidth=1)
-plot(mid_dn, "Mid Dn", color=color.new(color.teal, 80), linewidth=1)
+// plot(mid_up, "Mid Up", color=color.new(color.teal, 80), linewidth=1)
+// plot(mid_dn, "Mid Dn", color=color.new(color.teal, 80), linewidth=1)
 plot(outer_up, "Outer Up", color=color.new(color.teal, 60), linewidth=2)
 plot(outer_dn, "Outer Dn", color=color.new(color.teal, 60), linewidth=2)
 
@@ -162,13 +162,6 @@ else if has_s2
     sig_type := -2
 else if has_s1
     sig_type := -1
-
-plotshape(sig_type == 1, "L+", shape.labelup, location.belowbar, color.new(color.green,0), text="L+", textcolor=color.white, size=size.tiny)
-plotshape(sig_type == -1, "S+", shape.labeldown, location.abovebar, color.new(color.red,0), text="S+", textcolor=color.white, size=size.tiny)
-plotshape(sig_type == 2, "L++", shape.labelup, location.belowbar, color.new(color.green,0), text="L++", textcolor=color.white, size=size.small)
-plotshape(sig_type == -2, "S++", shape.labeldown, location.abovebar, color.new(color.red,0), text="S++", textcolor=color.white, size=size.small)
-plotshape(sig_type == 3, "L+++", shape.labelup, location.belowbar, color.new(color.green,0), text="L+++", textcolor=color.white, size=size.normal)
-plotshape(sig_type == -3, "S+++", shape.labeldown, location.abovebar, color.new(color.red,0), text="S+++", textcolor=color.white, size=size.normal)
 
 // ══════════════════════════════════════════════════════════════════════
 // LIQUIDITY SWEEPS AND VOLATILITY TOUCHES
@@ -220,6 +213,28 @@ else if scalp_state == -1
 
 plotshape(open_long, "MOM Open Long", shape.circle, location.belowbar, color.new(color.yellow, 0), size=size.tiny)
 plotshape(open_short, "MOM Open Short", shape.circle, location.abovebar, color.new(color.yellow, 0), size=size.tiny)
+
+// ─── CONFLUENCE LOGIC ───────────────────────────────────────
+// (Matches Bot: Only show signals if they have other confirmations)
+
+// 1. Volume Flow Confirm
+avg_vol = ta.sma(volume, 20)
+bool is_flow_l = close > open and volume > avg_vol * 2.0
+bool is_flow_s = close < open and volume > avg_vol * 2.0
+
+// 2. Confluence Checks (Indicators present on current bar)
+// For LONG: Channel + (Momentum Confirm OR Sweep OR Flow)
+bool conf_l = confirm_long or touch_dump or touch_dumpmax or is_flow_l
+// For SHORT: Channel + (Momentum Confirm OR Sweep OR Flow)
+bool conf_s = confirm_short or touch_pump or touch_pumpmax or is_flow_s
+
+plotshape(sig_type == 1 and conf_l, "L+", shape.labelup, location.belowbar, color.new(color.green,0), text="L+", textcolor=color.white, size=size.tiny)
+plotshape(sig_type == -1 and conf_s, "S+", shape.labeldown, location.abovebar, color.new(color.red,0), text="S+", textcolor=color.white, size=size.tiny)
+plotshape(sig_type == 2 and conf_l, "L++", shape.labelup, location.belowbar, color.new(color.green,0), text="L++", textcolor=color.white, size=size.small)
+plotshape(sig_type == -2 and conf_s, "S++", shape.labeldown, location.abovebar, color.new(color.red,0), text="S++", textcolor=color.white, size=size.small)
+plotshape(sig_type == 3 and conf_l, "L+++", shape.labelup, location.belowbar, color.new(color.green,0), text="L+++", textcolor=color.white, size=size.normal)
+plotshape(sig_type == -3 and conf_s, "S+++", shape.labeldown, location.abovebar, color.new(color.red,0), text="S+++", textcolor=color.white, size=size.normal)
+
 
 // ══════════════════════════════════════════════════════════════════════
 // LEVELS TABLE
