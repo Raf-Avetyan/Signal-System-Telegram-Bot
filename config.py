@@ -118,12 +118,33 @@ OI_CHANGE_THRESHOLD = 0.015      # 1.5% change in OI to trigger divergence check
 LIQ_SQUEEZE_THRESHOLD = 500000   # $500k in liquidations to trigger squeeze alert
 LIQ_ALERT_COOLDOWN = 600         # 10 min cooldown for squeeze alerts
 
-# ─── SESSION TIMES (UTC hours) ───────────────
 SESSIONS = {
-    "ASIA":   {"open": 0,  "close": 8},
-    "LONDON": {"open": 8,  "close": 16},
-    "NY":     {"open": 13, "close": 21},
+    "ASIA":   {"open": 0.0,  "close": 8.0},
+    "LONDON": {"open": 8.0,  "close": 16.0},
+    "NY":     {"open": 13.5, "close": 20.0}, # Stock Market: 9:30 AM - 4:00 PM ET
 }
+
+def get_adjusted_sessions(dt):
+    """Returns adjusted SESSIONS mapping for a given UTC datetime (handles NY DST)."""
+    import copy
+    from datetime import datetime
+    
+    adj = copy.deepcopy(SESSIONS)
+    
+    # DST Check for USA (Second Sunday of March to First Sunday of November)
+    try:
+        dst_start = datetime(dt.year, 3, 8 + (6 - datetime(dt.year, 3, 1).weekday() + 7) % 7)
+        dst_end = datetime(dt.year, 11, 1 + (6 - datetime(dt.year, 11, 1).weekday() + 7) % 7)
+        is_dst = dst_start <= dt.replace(tzinfo=None) < dst_end
+        
+        # NY Stock Open: 9:30 AM ET -> 13:30 (DST) or 14:30 (No DST) UTC
+        offset = -4 if is_dst else -5
+        adj["NY"]["open"] = 9.5 - offset
+        adj["NY"]["close"] = 16.0 - offset
+    except:
+        pass # Fallback to SESSIONS
+        
+    return adj
 
 # ─── TELEGRAM COMMANDS ───────────────────────
 COMMAND_POLL_INTERVAL = 5   # Seconds between getUpdates polls

@@ -14,7 +14,7 @@ from config import (
     TIMEFRAME_PROFILES, FUNDING_THRESHOLD, FUNDING_CHECK_INTERVAL,
     FUNDING_COOLDOWN, VOLUME_SPIKE_MULT, VOLUME_SPIKE_TIMEFRAMES,
     VOLUME_AVG_PERIOD, APPROACH_THRESHOLD, APPROACH_COOLDOWN,
-    APPROACH_LEVELS, SESSIONS, ALERT_BATCH_WINDOW,
+    APPROACH_LEVELS, SESSIONS, get_adjusted_sessions, ALERT_BATCH_WINDOW,
     OI_CHANGE_THRESHOLD, LIQ_SQUEEZE_THRESHOLD, LIQ_ALERT_COOLDOWN,
     PUBLIC_CHAT_ID, PRIVATE_CHAT_ID
 )
@@ -155,18 +155,20 @@ class PonchBot:
 
             time.sleep(POLL_INTERVAL)
 
+
     def get_price_at_hour(self, target_hour):
         """Fetch the exact opening price for a specific UTC hour today from OKX."""
         try:
-            # Fetch 1h klines (limit 24 is plenty for today)
-            df = fetch_klines(interval="1h", limit=48)
+            # Use 15m for precision with floats (e.g. 13.5)
+            df = fetch_klines(interval="15m", limit=96)
             if df.empty:
                 return None
             
-            # Search backwards for the MOST RECENT candle matching this hour
-            for i in range(len(df) - 1, -1, -1):
+            today = datetime.now(timezone.utc).date()
+            for i in range(len(df)):
                 idx = df.index[i]
-                if idx.hour == target_hour:
+                float_h = idx.hour + idx.minute / 60.0
+                if idx.date() == today and abs(float_h - target_hour) < 0.01:
                     return float(df.iloc[i]["Open"])
         except Exception as e:
             print(f"[ERROR] Failed to fetch price for hour {target_hour}: {e}")
@@ -175,17 +177,20 @@ class PonchBot:
     def get_session_ohlc(self, start_hour, end_hour):
         """Fetch O, H, L, C for a session period today from OKX."""
         try:
-            df = fetch_klines(interval="1h", limit=48)
+            # Use 15m for precision (e.g. session starting at 13:30)
+            df = fetch_klines(interval="15m", limit=192)
             if df.empty:
                 return None, None, None, None
             
             today = datetime.now(timezone.utc).date()
+            df["float_hour"] = df.index.hour + df.index.minute / 60.0
+
             # Filter session candles
             if start_hour < end_hour:
-                mask = (df.index.date == today) & (df.index.hour >= start_hour) & (df.index.hour < end_hour)
+                mask = (df.index.date == today) & (df["float_hour"] >= start_hour - 0.01) & (df["float_hour"] < end_hour - 0.01)
             else: # Crosses midnight
-                mask = ((df.index.date == today) & (df.index.hour >= start_hour)) | \
-                       ((df.index.date == today) & (df.index.hour < end_hour))
+                mask = ((df.index.date == today) & (df["float_hour"] >= start_hour - 0.01)) | \
+                       ((df.index.date == today) & (df["float_hour"] < end_hour - 0.01))
             
             session_df = df[mask]
             
@@ -202,30 +207,35 @@ class PonchBot:
             )
         except Exception as e:
             print(f"[ERROR] Failed to fetch session OHLC: {e}")
-        return None, None, None, None
+            return None, None, None, None
 
-    def _reconstruct_session_history(self, current_hour):
+
+    def _reconstruct_session_history(self, current_float_hour):
         """Reconstruct previous session summaries of the day if bot started late."""
-        for s_name, s_times in SESSIONS.items():
+        sessions = get_adjusted_sessions(datetime.now(timezone.utc))
+        for s_name, s_times in sessions.items():
             if s_name in self.session_history:
                 continue
             
             # Check if session is finished
             is_completed = False
-            if s_times["open"] < s_times["close"]:
+            s_open = s_times["open"]
+            s_close = s_times["close"]
+
+            if s_open < s_close:
                 # Normal: open at 8, close at 16. Finished if current hour >= 16.
-                is_completed = current_hour >= s_times["close"]
+                is_completed = current_float_hour >= s_close - 0.01
             else:
                 # Cross Midnight: open at 22, close at 6. 
                 # Finished if current hour is between 6 and 22.
-                is_completed = s_times["close"] <= current_hour < s_times["open"]
+                is_completed = s_close <= current_float_hour < s_open
             
             if is_completed:
                 print(f"[SESSION] Reconstructing history for {s_name}...")
-                open_p, high_p, low_p, close_p = self.get_session_ohlc(s_times["open"], s_times["close"])
+                open_p, high_p, low_p, close_p = self.get_session_ohlc(s_open, s_close)
                 
                 if open_p and close_p:
-                    stats = self.tracker.get_session_stats(s_times["open"], s_times["close"])
+                    stats = self.tracker.get_session_stats(s_open, s_close)
                     
                     change = close_p - open_p
                     pct = (change / open_p) * 100 if open_p else 0
@@ -246,6 +256,10 @@ class PonchBot:
 
     def _get_history_text(self, current_session_name, latest_price):
         """Build a combined history string of all sessions that started before the current one."""
+        now = datetime.now(timezone.utc)
+        today = now.strftime("%d.%m.%Y")
+        sessions = get_adjusted_sessions(now)
+        
         hist_items = []
         # Define the chronological order for display
         order = ["ASIA", "LONDON", "NY"]
@@ -260,7 +274,6 @@ class PonchBot:
             
             # 2. If it's currently active (started before us), show Snapshot "YET"
             else:
-                today = datetime.now(timezone.utc).strftime("%d.%m.%Y")
                 session_id = f"{s_name}_{today}"
                 if session_id in self.session_data:
                     s_data = self.session_data[session_id]
@@ -273,7 +286,7 @@ class PonchBot:
                     pct = (change / o) * 100 if o else 0
                     sign = "+" if change >= 0 else ""
                     
-                    stats = self.tracker.get_session_stats(SESSIONS[s_name]["open"], SESSIONS[s_name]["close"])
+                    stats = self.tracker.get_session_stats(sessions[s_name]["open"], sessions[s_name]["close"])
                     
                     snap_str = (
                         f"<b>{s_name} SESSION</b>\n"
@@ -591,23 +604,29 @@ class PonchBot:
 
             # --- Session Tracking ---
             today = now.strftime("%d.%m.%Y")
-            current_hour = now.hour
+            current_float_hour = now.hour + now.minute / 60.0
             is_weekend = now.weekday() >= 5 # 5=Sat, 6=Sun
             
+            # Dynamic session times (handles DST and fractional hours)
+            sessions = get_adjusted_sessions(now)
+
             if not is_weekend:
-                for s_name, s_times in SESSIONS.items():
+                for s_name, s_times in sessions.items():
                     session_id = f"{s_name}_{today}"
                     
                     # Check if session is active now
                     is_active = False
-                    if s_times["open"] < s_times["close"]:
-                        is_active = s_times["open"] <= current_hour < s_times["close"]
-                    else:
-                        is_active = current_hour >= s_times["open"] or current_hour < s_times["close"]
+                    s_open = s_times["open"]
+                    s_close = s_times["close"]
+
+                    if s_open < s_close:
+                        is_active = s_open <= current_float_hour < s_close
+                    else: # Crosses midnight
+                        is_active = current_float_hour >= s_open or current_float_hour < s_close
 
                     # Capture Open & Recover H/L from OKX
                     if is_active and session_id not in self.session_data:
-                        open_p, high_p, low_p, _ = self.get_session_ohlc(s_times["open"], current_hour + 1)
+                        open_p, high_p, low_p, _ = self.get_session_ohlc(s_open, current_float_hour + 0.5)
                         if open_p is None:
                             open_p = latest_price
                         if high_p is None: high_p = latest_price
@@ -620,12 +639,13 @@ class PonchBot:
                             "levels_tested": set()
                         }
                         
-                        is_mid = current_hour != s_times["open"]
+                        # Use a small tolerance for "exactly at open"
+                        is_mid = abs(current_float_hour - s_open) > 0.08 # > 5 mins
                         status = "opened" if not is_mid else "active (recovered from OKX)"
                         print(f"[SESSION] {s_name} {status} at {open_p:,.2f}")
                         
                         # Fetch stats so far if mid-session
-                        stats = self.tracker.get_session_stats(s_times["open"], s_times["close"])
+                        stats = self.tracker.get_session_stats(s_open, s_close)
                         
                         # Construct history string
                         history_text = self._get_history_text(s_name, latest_price)
@@ -667,7 +687,13 @@ class PonchBot:
                         self.session_data[session_id]["low"] = min(self.session_data[session_id]["low"], current_candle_low)
 
                     # Capture Close & Send Summary
-                    if current_hour == s_times["close"]:
+                    is_closing = False
+                    if s_open < s_close:
+                        is_closing = current_float_hour >= s_close
+                    else: # Crosses midnight
+                        is_closing = s_close <= current_float_hour < s_open
+                    
+                    if is_closing:
                         sent_key = f"sent_{session_id}"
                         if sent_key not in self.sent_sessions:
                             self.sent_sessions.add(sent_key)
@@ -678,7 +704,7 @@ class PonchBot:
                             s_low = s_data.get("low", latest_price)
                             levels = ", ".join(sorted(list(s_data["levels_tested"]))) if s_data["levels_tested"] else "None"
                             
-                            stats = self.tracker.get_session_stats(s_times["open"], s_times["close"])
+                            stats = self.tracker.get_session_stats(s_open, s_close)
                             
                             # Construct history string
                             history_text = self._get_history_text(s_name, latest_price)
@@ -974,14 +1000,20 @@ class PonchBot:
         def record_level(lvl):
             # Use now from outer scope
             today = now.strftime("%d.%m.%Y")
-            current_hour = now.hour
-            for s_name, s_times in SESSIONS.items():
-                # Check if session is currently active
+            current_float_hour = now.hour + now.minute / 60.0
+            
+            # Use adjusted sessions
+            sessions = get_adjusted_sessions(now)
+            
+            for s_name, s_times in sessions.items():
                 is_active = False
-                if s_times["open"] < s_times["close"]:
-                    is_active = s_times["open"] <= current_hour < s_times["close"]
+                s_open = s_times["open"]
+                s_close = s_times["close"]
+
+                if s_open < s_close:
+                    is_active = s_open <= current_float_hour < s_close
                 else: # Crosses midnight
-                    is_active = current_hour >= s_times["open"] or current_hour < s_times["close"]
+                    is_active = current_float_hour >= s_open or current_float_hour < s_close
                 
                 if is_active:
                     session_id = f"{s_name}_{today}"

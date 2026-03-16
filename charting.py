@@ -5,7 +5,7 @@ import mplfinance as mpf
 import matplotlib.pyplot as plt
 import os
 
-from config import SESSIONS
+from config import SESSIONS, get_adjusted_sessions
 
 def generate_daily_levels_chart(df, levels, symbol="BTCUSDT", timeframe="1H", output_path="daily_chart.png", show_sessions=True):
     """
@@ -122,16 +122,21 @@ def generate_daily_levels_chart(df, levels, symbol="BTCUSDT", timeframe="1H", ou
                 "NY": "#00e676"      # Green
             }
             
-            for s_name, times in SESSIONS.items():
+            # Get adjusted sessions for the date of the last candle
+            last_ts = plot_df.index[-1]
+            sessions = get_adjusted_sessions(last_ts)
+            plot_df["float_hour"] = plot_df.index.hour + plot_df.index.minute / 60.0
+
+            for s_name, times in sessions.items():
                 s_open = times["open"]
                 s_close = times["close"]
                 color = session_colors.get(s_name, "#ffffff")
                 
                 # Find indices for this session within the plotted DF
                 if s_open < s_close:
-                    mask = (plot_df.index.hour >= s_open) & (plot_df.index.hour < s_close)
+                    mask = (plot_df["float_hour"] >= s_open - 0.01) & (plot_df["float_hour"] < s_close - 0.01)
                 else: # Crosses midnight
-                    mask = (plot_df.index.hour >= s_open) | (plot_df.index.hour < s_close)
+                    mask = (plot_df["float_hour"] >= s_open - 0.01) | (plot_df["float_hour"] < s_close - 0.01)
                 
                 all_session_candles = plot_df[mask]
                 if all_session_candles.empty:
@@ -144,7 +149,9 @@ def generate_daily_levels_chart(df, levels, symbol="BTCUSDT", timeframe="1H", ou
                 if not session_df.empty:
                     # 1. Vertical line at Open
                     open_ts = session_df.index[0]
-                    if open_ts.hour == s_open:
+                    # Check if this candle is the exact open
+                    candle_f_h = open_ts.hour + open_ts.minute / 60.0
+                    if abs(candle_f_h - s_open) < 0.01:
                         idx_open = plot_df.index.get_loc(open_ts)
                         ax.axvline(idx_open, color=color, linestyle='--', alpha=0.7, linewidth=1.5)
                         ax.text(idx_open, ymax + padding_y*0.1, f" {s_name}", 
