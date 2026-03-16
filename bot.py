@@ -146,6 +146,11 @@ class PonchBot:
             if hasattr(self, 'heartbeat_callback'):
                 self.heartbeat_callback()
 
+            # End of first tick
+            if self.is_booting:
+                self.is_booting = False
+                print("[SYSTEM] Silent startup finished. Alerts active.")
+
             time.sleep(POLL_INTERVAL)
 
     def get_price_at_hour(self, target_hour):
@@ -395,8 +400,11 @@ class PonchBot:
                 if abs(rate) >= FUNDING_THRESHOLD:
                     if current_time - self.last_funding_alert > FUNDING_COOLDOWN:
                         direction = "POSITIVE" if rate > 0 else "NEGATIVE"
-                        tg.send_funding_alert(rate, direction, chat_id=PUBLIC_CHAT_ID)
+                        if not self.is_booting:
+                            tg.send_funding_alert(rate, direction, chat_id=PUBLIC_CHAT_ID)
                         self.last_funding_alert = current_time
+                        print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Funding Alert: {direction} {rate:.4f}")
+
 
         # 6. Process each scalp timeframe
         latest_price = None
@@ -419,27 +427,55 @@ class PonchBot:
 
         # ─── Update Performance Tracker & Success Teasers ────
         if latest_price is not None:
-            # 1. Success Teasers
+            # 1. Success Teasers (Public Marketing FOMO)
             trade_events = self.tracker.check_outcomes(latest_price)
+            today_str = now.strftime("%Y-%m-%d")
+
             for event in trade_events:
                 sig = event["sig"]
                 evt_type = event["type"] # "TP1", "TP2", "TP3"
                 
-                # Check if this specific TP level has already been teased for this trade
+                # --- SPAM OPTIMIZATION ---
+                # A. Only show successes for signals opened TODAY
+                sig_date = sig.get("timestamp", "").split(" ")[0]
+                if sig_date != today_str:
+                    continue
+
+                # B. Determine Strategy Type
+                is_confluence = (sig.get("tf", "").lower() == "confluence")
+                
+                # C. Selective TP levels to reduce noise
+                should_tease = False
+                if is_confluence:
+                    # High-value trades: show TP2 and TP3
+                    if evt_type in ["TP2", "TP3"]:
+                        should_tease = True
+                else:
+                    # Regular scalps: ONLY show TP2 (the solid win)
+                    if evt_type == "TP2":
+                        should_tease = True
+                
+                if not should_tease:
+                    continue
+
+                # D. Send Teaser if not already sent for this level
                 teaser_key = f"teaser_{evt_type}"
                 if not sig.get(teaser_key):
                     sig[teaser_key] = True
                     # Calculate profit %
                     profit = abs(latest_price - sig["entry"]) / sig["entry"] * 100
-                    tg.send_success_teaser(sig["side"], sig["tf"], profit, level=evt_type, chat_id=PUBLIC_CHAT_ID)
+                    if not self.is_booting:
+                        tg.send_success_teaser(sig["side"], sig["tf"], profit, level=evt_type, chat_id=PUBLIC_CHAT_ID)
                     self.tracker._save()
-            
+                    print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Success Teaser: {evt_type} for {sig['side']} {sig['tf']}")
+
             # 2. Liquidation Squeezes
             if self.last_liqs >= LIQ_SQUEEZE_THRESHOLD:
                 if current_time - self.last_liq_alert_time > LIQ_ALERT_COOLDOWN:
-                    tg.send_squeeze_alert(self.last_liqs, latest_price, chat_id=PRIVATE_CHAT_ID)
+                    if not self.is_booting:
+                        tg.send_squeeze_alert(self.last_liqs, latest_price, chat_id=PRIVATE_CHAT_ID)
                     self.last_liq_alert_time = current_time
-                    print(f"  [TG] 🚨 Liquidation Squeeze: ${self.last_liqs/1e6:.1f}M")
+                    print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} 🚨 Liquidation Squeeze: ${self.last_liqs/1e6:.1f}M")
 
             # 3. OI Divergence
             if self.last_oi and self.last_oi_price:
@@ -460,9 +496,10 @@ class PonchBot:
                         sig_key = f"oi_div_{now.strftime('%Y-%m-%d_%H')}" # Max 1 per hour
                         if sig_key not in self.sent_signals:
                             self.sent_signals.add(sig_key)
-                            tg.send_oi_divergence(price_chg*100, oi_chg*100, note, chat_id=PRIVATE_CHAT_ID)
+                            if not self.is_booting:
+                                tg.send_oi_divergence(price_chg*100, oi_chg*100, note, chat_id=PRIVATE_CHAT_ID)
                             self._save_state()
-                            print(f"  [TG] ⚠️ OI Divergence: {note}")
+                            print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} ⚠️ OI Divergence: {note}")
 
             # Update baselines for next tick comparison
             self.last_oi_price = latest_price
@@ -512,31 +549,34 @@ class PonchBot:
                         # Generate session chart
                         chart_path = self._generate_current_chart(f"session_open_{s_name}.png")
 
-                        # Notify Telegram
-                        resp = tg.send_session_open(
-                            session_name=s_name, 
-                            open_price=open_p, 
-                            current_price=latest_price if is_mid else None,
-                            history=history_text,
-                            high=self.session_data[session_id]["high"],
-                            low=self.session_data[session_id]["low"],
-                            chart_path=chart_path,
-                            chat_id=PUBLIC_CHAT_ID
-                        )
-                        
-                        if resp and "response" in resp:
-                            msg_data = resp["response"]
-                            if msg_data and "result" in msg_data:
-                                msg_id = msg_data["result"]["message_id"]
-                                # Now we store metadata so we can REGENERATE the text later
-                                self.session_msg_ids[session_id] = {
-                                    "msg_id": msg_id,
-                                    "name": s_name,
-                                    "open": open_p,
-                                    "history": history_text
-                                }
-                                self.last_session_update = current_time
-                                self._save_state()
+                        if not self.is_booting:
+                            resp = tg.send_session_open(
+                                session_name=s_name, 
+                                open_price=open_p, 
+                                current_price=latest_price if is_mid else None,
+                                history=history_text,
+                                high=self.session_data[session_id]["high"],
+                                low=self.session_data[session_id]["low"],
+                                chart_path=chart_path,
+                                chat_id=PUBLIC_CHAT_ID
+                            )
+                            
+                            if resp and "response" in resp:
+                                msg_data = resp["response"]
+                                if msg_data and "result" in msg_data:
+                                    msg_id = msg_data["result"]["message_id"]
+                                    # Now we store metadata so we can REGENERATE the text later
+                                    self.session_msg_ids[session_id] = {
+                                        "msg_id": msg_id,
+                                        "name": s_name,
+                                        "open": open_p,
+                                        "history": history_text
+                                    }
+                                    self.last_session_update = current_time
+                                    self._save_state()
+                        else:
+                            print(f"  [TG] Skipped sending session open for {s_name} (booting)")
+
 
                     # Update High/Low with current candle wicks
                     if is_active and session_id in self.session_data:
@@ -563,7 +603,8 @@ class PonchBot:
                             # Generate session chart
                             chart_path = self._generate_current_chart(f"session_close_{s_name}.png")
 
-                            tg.send_session_summary(s_name, open_p, latest_price, stats["total"], levels, history=history_text, high=s_high, low=s_low, chart_path=chart_path, chat_id=PUBLIC_CHAT_ID)
+                            if not self.is_booting:
+                                tg.send_session_summary(s_name, open_p, latest_price, stats["total"], levels, history=history_text, high=s_high, low=s_low, chart_path=chart_path, chat_id=PUBLIC_CHAT_ID)
                             
                             # Save to history for NEXT sessions
                             change = latest_price - open_p
@@ -588,7 +629,7 @@ class PonchBot:
                                 
                             self._save_state() # Save summary sent state
                             
-                            print(f"[SESSION] {s_name} closed. Recap sent.")
+                            print(f"[SESSION] {s_name} closed. {'Skipped sending recap' if self.is_booting else 'Recap sent'}.")
 
         # ─── Flush Batched Alerts ────────────────────────────
         if self.pending_alerts and self.batch_timer_start:
@@ -605,16 +646,18 @@ class PonchBot:
                     if len(alerts) > 1:
                         # Send as batch
                         batch_data = [a["data"] for a in alerts]
-                        tg.send_batched_alerts(batch_data, chat_id=cid)
-                        print(f"[TG] Sent batch of {len(batch_data)} alerts to {cid}")
+                        if not self.is_booting:
+                            tg.send_batched_alerts(batch_data, chat_id=cid)
+                        print(f"[TG] {'Skipped' if self.is_booting else 'Sent'} batch of {len(batch_data)} alerts to {cid}")
                     elif len(alerts) == 1:
                         # Send as individual alert
                         alert = alerts[0]
                         if alert["callback"]:
                             # All tg functions now accept chat_id
                             kwargs = {"chat_id": cid}
-                            alert["callback"](*alert["args"], **kwargs)
-                            print(f"[TG] Sent individual alert: {alert['data']['type']} to {cid}")
+                            if not self.is_booting:
+                                alert["callback"](*alert["args"], **kwargs)
+                            print(f"[TG] {'Skipped' if self.is_booting else 'Sent'} individual alert: {alert['data']['type']} to {cid}")
                 
                 self.pending_alerts = []
                 self.batch_timer_start = None
@@ -637,10 +680,13 @@ class PonchBot:
                             high=s_data.get("high"),
                             low=s_data.get("low")
                         )
-                        res = tg.edit_message_media(info["msg_id"], chart_path, caption=new_html, chat_id=PUBLIC_CHAT_ID)
-                        if res == "DELETED":
-                            del self.session_msg_ids[s_id]
-                            self._save_state()
+                        if not self.is_booting:
+                            res = tg.edit_message_media(info["msg_id"], chart_path, caption=new_html, chat_id=PUBLIC_CHAT_ID)
+                            if res == "DELETED":
+                                del self.session_msg_ids[s_id]
+                                self._save_state()
+                        else:
+                            print(f"  [TG] Skipped editing session message for {info['name']} (booting)")
                     
                     try:
                         import os
@@ -675,7 +721,10 @@ class PonchBot:
                             critical_high=d_data["high"], critical_low=d_data["low"],
                             indicators=new_inds
                         )
-                        tg.edit_message_media(d_msg_id, chart_path, caption=new_html)
+                        if not self.is_booting:
+                            tg.edit_message_media(d_msg_id, chart_path, caption=new_html)
+                        else:
+                            print(f"  [TG] Skipped editing daily report (booting)")
 
                     try:
                         import os
@@ -730,7 +779,10 @@ class PonchBot:
         try:
             stats = self.tracker.get_daily_summary()
             if stats:
-                tg.send_performance_summary(stats, chat_id=PUBLIC_CHAT_ID)
+                if not self.is_booting:
+                    tg.send_performance_summary(stats, chat_id=PUBLIC_CHAT_ID)
+                else:
+                    print(f"  [TG] Skipped sending performance summary (booting)")
             self.tracker.cleanup_old(7)
         except Exception as e:
             print(f"[TRACKER ERROR] {e}")
@@ -751,21 +803,25 @@ class PonchBot:
         # Fetch indicators
         indicators = fetch_global_indicators()
 
-        resp_data = tg.send_daily_levels(
-            date_str=date_str,
-            daily_open=do,
-            resistance=self.levels.get("Pump", 0),
-            resistance_pct=self.levels.get("ResistancePct", 0),
-            support=self.levels.get("Dump", 0),
-            support_pct=self.levels.get("SupportPct", 0),
-            volatility=self.levels.get("Volatility", 0),
-            volatility_pct=self.levels.get("VolatilityPct", 0),
-            critical_high=self.levels.get("PumpMax", 0),
-            critical_low=self.levels.get("DumpMax", 0),
-            indicators=indicators,
-            chart_path=chart_path,
-            chat_id=PUBLIC_CHAT_ID
-        )
+        resp_data = None
+        if not self.is_booting:
+            resp_data = tg.send_daily_levels(
+                date_str=date_str,
+                daily_open=do,
+                resistance=self.levels.get("Pump", 0),
+                resistance_pct=self.levels.get("ResistancePct", 0),
+                support=self.levels.get("Dump", 0),
+                support_pct=self.levels.get("SupportPct", 0),
+                volatility=self.levels.get("Volatility", 0),
+                volatility_pct=self.levels.get("VolatilityPct", 0),
+                critical_high=self.levels.get("PumpMax", 0),
+                critical_low=self.levels.get("DumpMax", 0),
+                indicators=indicators,
+                chart_path=chart_path,
+                chat_id=PUBLIC_CHAT_ID
+            )
+        else:
+            print(f"  [TG] Skipped sending daily levels report (booting)")
         
         if resp_data and "response" in resp_data:
             msg_data = resp_data["response"]
@@ -783,7 +839,7 @@ class PonchBot:
                 self._save_state()
                 self.last_daily_update = time.time()
         
-        print("[TG] Daily levels report sent")
+        print(f"[TG] Daily levels report {'skipped' if self.is_booting else 'sent'}")
 
     def _process_timeframe(self, tf, df, now):
         """Process one timeframe: channels, momentum, signals."""
@@ -839,6 +895,7 @@ class PonchBot:
                 sig_key = f"volspike_{tf}_{candle_ts}"
                 if sig_key not in self.sent_signals:
                     self.sent_signals.add(sig_key)
+                    # queue_alert already handles the is_booting check implicitly via the batching logic
                     self.queue_alert(
                         alert_dict={
                             "type": "VOLUME SPIKE",
@@ -850,6 +907,8 @@ class PonchBot:
                         args=(tf, current_vol, avg_vol, current_vol/avg_vol, close),
                         chat_id=PRIVATE_CHAT_ID
                     )
+                    print(f"  [SIG] Volume Spike [{tf}] {current_vol/avg_vol:.1f}x avg vol")
+
 
         # ─── Price Approaching Key Levels ────────────────
         if tf == "1h" and self.levels:
@@ -860,6 +919,7 @@ class PonchBot:
                     if dist_pct <= APPROACH_THRESHOLD:
                         last_alert = self.approach_alerts.get(lvl_name, 0)
                         if current_time - last_alert > APPROACH_COOLDOWN:
+                            # queue_alert already handles the is_booting check implicitly via the batching logic
                             self.queue_alert(
                                 alert_dict={
                                     "type": "APPROACHING LEVEL",
@@ -871,6 +931,8 @@ class PonchBot:
                             )
                             self.approach_alerts[lvl_name] = current_time
                             self._save_state() # Save approach timestamp
+                            print(f"  [SIG] Approaching Level: {lvl_name} ({dist_pct*100:.2f}%)")
+
 
         # ─── Liquidity Sweeps ────────────────────────────
         if self.levels:
@@ -887,9 +949,10 @@ class PonchBot:
                 sig_key = f"sweep_{sw['level']}_{sw['side']}_{now.strftime('%Y-%m-%d')}"
                 if sig_key not in self.sent_signals:
                     self.sent_signals.add(sig_key)
-                    tg.send_liquidity_sweep(**sw, chat_id=PUBLIC_CHAT_ID)
+                    if not self.is_booting:
+                        tg.send_liquidity_sweep(**sw, chat_id=PUBLIC_CHAT_ID)
                     self._save_state() # Save immediately to avoid double sends
-                    print(f"  [TG] Liquidity Sweep: {sw['level']} ({sw['side']})")
+                    print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Liquidity Sweep: {sw['level']} ({sw['side']})")
 
                     # Add to confirmation tracker
                     self.confirmations.add_signal({
@@ -913,9 +976,12 @@ class PonchBot:
                 sig_key = f"vol_{vt['level']}_{vt['side']}_{now.strftime('%Y-%m-%d')}"
                 if sig_key not in self.sent_signals:
                     self.sent_signals.add(sig_key)
-                    tg.send_volatility_touch(**vt, chat_id=PRIVATE_CHAT_ID)
-                    self._save_state()
-                    print(f"  [TG] Vol Zone Touch: {vt['level']} ({vt['side']})")
+                    
+                    if not self.is_booting:
+                        tg.send_volatility_touch(**vt, chat_id=PRIVATE_CHAT_ID)
+                        self._save_state()
+                    
+                    print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Vol Zone Touch: {vt['level']} ({vt['side']})")
 
                     # Add to confirmation tracker
                     self.confirmations.add_signal({
@@ -975,14 +1041,18 @@ class PonchBot:
             self.sent_signals.add(evt_key)
 
             if evt["type"] == "OPEN":
-                tg.send_scalp_open(tf, evt["side"], evt["price"], emoji=emoji, chat_id=PRIVATE_CHAT_ID)
+                if not self.is_booting:
+                    tg.send_scalp_open(tf, evt["side"], evt["price"], emoji=emoji, chat_id=PRIVATE_CHAT_ID)
+                self.sent_signals.add(evt_key)
                 self._save_state()
-                print(f"  [TG] Scalp Open [{tf}] {evt['side']}")
+                print(f"  [TG] Scalp Open [{tf}] {evt['side']} {'(Silent)' if self.is_booting else ''}")
 
             elif evt["type"] == "PREPARE":
-                tg.send_scalp_prepare(tf, evt["side"], emoji=emoji, chat_id=PRIVATE_CHAT_ID)
+                if not self.is_booting:
+                    tg.send_scalp_prepare(tf, evt["side"], emoji=emoji, chat_id=PRIVATE_CHAT_ID)
+                self.sent_signals.add(evt_key)
                 self._save_state()
-                print(f"  [TG] Prepare [{tf}] {evt['side']}")
+                print(f"  [TG] Prepare [{tf}] {evt['side']} {'(Silent)' if self.is_booting else ''}")
 
             elif evt["type"] == "CONFIRMED":
                 # --- Calculate Signal Strength Score ---
