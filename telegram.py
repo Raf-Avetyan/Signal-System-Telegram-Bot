@@ -1,5 +1,6 @@
-import requests
 import os
+import json
+import requests
 from config import BOT_TOKEN, CHAT_ID, SYMBOL, PUBLIC_CHAT_ID, PRIVATE_CHAT_ID
 
 API_URL_MSG   = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -7,7 +8,7 @@ API_URL_PHOTO = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
 API_URL_EDIT_MEDIA = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageMedia"
 
 
-def send(text, parse_mode=None, chat_id=None):
+def send(text, parse_mode=None, chat_id=None, reply_markup=None):
     """Send a message via Telegram Bot API."""
     target_chat = chat_id if chat_id else CHAT_ID
     try:
@@ -17,6 +18,9 @@ def send(text, parse_mode=None, chat_id=None):
         }
         if parse_mode:
             payload["parse_mode"] = parse_mode
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+            
         resp = requests.post(API_URL_MSG, data=payload)
         if not resp.ok:
             print(f"[TG ERROR] {resp.status_code}: {resp.text}")
@@ -52,7 +56,6 @@ def edit_message_media(message_id, photo_path, caption=None, chat_id=None):
     """Edit the photo of an existing message."""
     target_chat = chat_id if chat_id else CHAT_ID
     try:
-        import json
         with open(photo_path, 'rb') as f:
             media = {
                 "type": "photo",
@@ -486,7 +489,15 @@ def send_success_teaser(side, tf, profit_pct, level="TP1", chat_id=None):
         f"\n"
         f"🔒 <i>Full setup logic and real-time confluences are exclusive to the Private Channel.</i>"
     )
-    send(msg, parse_mode="HTML", chat_id=chat_id)
+    
+    # Add subscription button
+    reply_markup = json.dumps({
+        "inline_keyboard": [[
+            {"text": "🚀 Get Access to Private Channel", "url": "https://t.me/tribute/app?startapp=ep_8xkUUixQtUTQRp5pGzmwipznnPELc2qGWKl8rUZfC0GbAX3o8b"}
+        ]]
+    })
+    
+    send(msg, parse_mode="HTML", chat_id=chat_id, reply_markup=reply_markup)
 
 def send_oi_divergence(price_change, oi_change, note, chat_id=None):
     """⚠️ OI DIVERGENCE (Private)"""

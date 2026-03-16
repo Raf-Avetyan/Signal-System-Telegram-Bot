@@ -83,47 +83,51 @@ from config import PRIVATE_CHAT_ID
 #     chart_path=chart_path
 # )
 
-print("Sending Scalp Open...")
-tg.send_scalp_open("15m", "LONG", 70800.00, emoji="🚀", chat_id=PRIVATE_CHAT_ID)
+# print("Sending Scalp Open...")
+# tg.send_scalp_open("15m", "LONG", 70800.00, emoji="🚀", chat_id=PRIVATE_CHAT_ID)
 
-print("Sending Scalp Prepare...")
-tg.send_scalp_prepare("15m", "LONG", points=3, strength="Strong", emoji="🚀", chat_id=PRIVATE_CHAT_ID)
+# print("Sending Scalp Prepare...")
+# tg.send_scalp_prepare("15m", "LONG", points=3, strength="Strong", emoji="🚀", chat_id=PRIVATE_CHAT_ID)
 
-print("2. Sending Extreme Scalp Signal (Calculated Score)...")
-# Mocking an 'Extreme' 9/10 signal
-tg.send_scalp_confirmed(
-    timeframe="15m", 
-    side="LONG", 
-    entry=70850.00, 
-    sl=70600.00, 
-    tp1=70950.00, tp2=71200.00, tp3=71500.00,
-    strength="Extreme", 
-    size=2.0, 
-    score=9, 
-    trend="Trending Bullish", 
-    reasons=["Near DO", "Extreme Channel", "Volume Spike", "Trend Aligned", "High Liquidations ($150k)"],
-    emoji="🚀",
-    chat_id=PRIVATE_CHAT_ID
-)
+# print("2. Sending Extreme Scalp Signal (Calculated Score)...")
+# # Mocking an 'Extreme' 9/10 signal
+# tg.send_scalp_confirmed(
+#     timeframe="15m", 
+#     side="LONG", 
+#     entry=70850.00, 
+#     sl=70600.00, 
+#     tp1=70950.00, tp2=71200.00, tp3=71500.00,
+#     strength="Extreme", 
+#     size=2.0, 
+#     score=9, 
+#     trend="Trending Bullish", 
+#     reasons=["Near DO", "Extreme Channel", "Volume Spike", "Trend Aligned", "High Liquidations ($150k)"],
+#     emoji="🚀",
+#     chat_id=PRIVATE_CHAT_ID
+# )
 
-print("3. Sending Counter-Trend Scalp Signal (Low Score)...")
-# Mocking a weak signal
-tg.send_scalp_confirmed(
-    timeframe="5m", 
-    side="SHORT", 
-    entry=71500.00, 
-    sl=71800.00, 
-    tp1=71300.00, tp2=71100.00, tp3=70800.00,
-    strength="Weak", 
-    size=1.0, 
-    score=3, 
-    trend="Trending Bullish", 
-    reasons=["Outer Channel", "Counter-trend"],
-    emoji="⚡️",
-    chat_id=PRIVATE_CHAT_ID
-)
+# print("3. Sending Counter-Trend Scalp Signal (Low Score)...")
+# # Mocking a weak signal
+# tg.send_scalp_confirmed(
+#     timeframe="5m", 
+#     side="SHORT", 
+#     entry=71500.00, 
+#     sl=71800.00, 
+#     tp1=71300.00, tp2=71100.00, tp3=70800.00,
+#     strength="Weak", 
+#     size=1.0, 
+#     score=3, 
+#     trend="Trending Bullish", 
+#     reasons=["Outer Channel", "Counter-trend"],
+#     emoji="⚡️",
+#     chat_id=PRIVATE_CHAT_ID
+# )
 
-print("Sending Scalp Closed...")
-tg.send_scalp_closed("15m", "LONG", 71000.00, emoji="🚀", chat_id=PRIVATE_CHAT_ID)
+# print("Sending Scalp Closed...")
+# tg.send_scalp_closed("15m", "LONG", 71000.00, emoji="🚀", chat_id=PRIVATE_CHAT_ID)
 
-# print("\n[OK] Test messages sent to Telegram! Check your bot.")
+from config import PUBLIC_CHAT_ID
+print("Sending Strategy Success Teaser with Button...")
+tg.send_success_teaser(side="LONG", tf="15m", profit_pct=4.25, level="TP2", chat_id=PUBLIC_CHAT_ID)
+
+print("\n[OK] Test success teaser sent to Telegram! Check your public channel.")
