@@ -879,13 +879,10 @@ class PonchBot:
         self.levels = calculate_levels(daily_df, weekly_df, monthly_df)
 
         if self.levels:
-            do = self.levels.get("DO", 0)
-            print(f"  DO: {do:,.2f}")
-            print(f"  PDH: {self.levels.get('PDH', 0):,.2f}  PDL: {self.levels.get('PDL', 0):,.2f}")
-            print(f"  PWH: {self.levels.get('PWH', 0):,.2f}  PWL: {self.levels.get('PWL', 0):,.2f}")
-            print(f"  PMH: {self.levels.get('PMH', 0):,.2f}  PML: {self.levels.get('PML', 0):,.2f}")
-            print(f"  Pump: {self.levels.get('Pump', 0):,.2f}  Dump: {self.levels.get('Dump', 0):,.2f}")
-            print(f"  PumpMax: {self.levels.get('PumpMax', 0):,.2f}  DumpMax: {self.levels.get('DumpMax', 0):,.2f}")
+            print(f"  [LEVELS] Updated for {now.strftime('%d.%m.%Y')}:")
+            for k in ["DO", "PDH", "PDL", "PWH", "PWL", "PMH", "PML", "Pump", "Dump"]:
+                val = self.levels.get(k)
+                if val: print(f"    - {k}: {val:,.2f}")
 
     def _send_daily_report(self, now):
         """Send daily levels report to Telegram."""
@@ -1065,8 +1062,10 @@ class PonchBot:
                         triggered_levels.append((dist_pct, importance, lvl_name, lvl_price))
 
             if triggered_levels:
-                # Sort by distance (closest first), then by importance (list order)
-                triggered_levels.sort()
+                # Sort primarily by importance (list order), then by distance.
+                # This ensures we report "PDH" instead of "Pump" if we are near both.
+                triggered_levels.sort(key=lambda x: (x[1], x[0]))
+                
                 closest_dist, importance, lvl_name, lvl_price = triggered_levels[0]
                 
                 # 2. Check cooldown and threshold crossings
