@@ -126,13 +126,13 @@ class SignalTracker:
         
         return events
 
-    def get_daily_summary(self):
-        """Get performance stats for today's signals."""
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    def get_daily_summary(self, date_str=None):
+        """Get performance stats for signals on a specific date (YYYY-MM-DD)."""
+        target_date = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
         today_signals = [
             s for s in self.signals
-            if s["logged_at"].startswith(today)
+            if s["logged_at"].startswith(target_date)
         ]
 
         total = len(today_signals)

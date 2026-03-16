@@ -641,6 +641,27 @@ def send_batched_alerts(alerts, chat_id=None):
 
     send(msg, parse_mode="HTML", chat_id=chat_id)
 
+def send_performance_summary(stats, chat_id=None):
+    """📢 DAILY PERFORMANCE SUMMARY (Public)"""
+    score_emoji = "🏆" if stats["win_rate"] >= 70 else "📈"
+    
+    code_part = (
+        f"Total Signals: {stats['total']}\n"
+        f"TP1 Hits:      {stats['tp1_hits']}\n"
+        f"TP2 Hits:      {stats['tp2_hits']}\n"
+        f"TP3 Hits:      {stats['tp3_hits']}\n"
+        f"SL Hits:       {stats['sl_hits']}\n"
+        f"Win Rate:      {stats['win_rate']:.1f}%"
+    )
+    
+    msg = (
+        f"{score_emoji} <b>DAILY PERFORMANCE RECAP</b>\n"
+        f"\n"
+        f"<pre>{code_part}</pre>\n"
+        f"\n"
+        f"🔒 <i>All real-time setups and VVIP confluences are exclusive to the Private Channel.</i>"
+    )
+    send(msg, parse_mode="HTML", chat_id=chat_id)
 
 # ═══════════════════════════════════════════════════════════════
 # STARTUP / DEBUG

@@ -7,7 +7,7 @@ detects signals, and sends formatted Telegram alerts.
 
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from config import (
     SYMBOL, SIGNAL_TIMEFRAMES, POLL_INTERVAL,
@@ -73,7 +73,8 @@ class PonchBot:
         self.sent_signals        = set(state.get("sent_signals", []))
         self.sent_sessions       = set(state.get("sent_sessions", [])) # New: Persist session summaries
         self.approach_alerts     = state.get("approach_alerts", {})    # New: Persist approaching level cooldowns
-        self.last_funding_alert  = state.get("last_funding_alert", 0)   # New: Persist funding alert cooldown
+        self.last_funding_alert  = state.get("last_funding_alert", 0)   
+        self.last_summary_date   = state.get("last_summary_date")      # New: Track summary schedule
         self.last_session_update = time.time()
         self.last_daily_update   = time.time()
 
@@ -83,6 +84,7 @@ class PonchBot:
         self.last_liqs = 0
         self.last_oi_price = 0
         self.last_liq_alert_time = 0
+        self.is_booting = True         # Start in quiet mode for first check
 
         # Alert Batching
         self.pending_alerts = []
@@ -338,6 +340,7 @@ class PonchBot:
                 "sent_sessions": list(self.sent_sessions),
                 "approach_alerts": self.approach_alerts,
                 "last_funding_alert": self.last_funding_alert,
+                "last_summary_date": self.last_summary_date,
                 "scalp_trackers": {tf: tracker.to_dict() for tf, tracker in self.scalp_trackers.items()}
             }
 
@@ -378,6 +381,16 @@ class PonchBot:
 
         # 1. Update Levels if new day
         self._update_levels_if_needed(now)
+
+        # 1.5 Scheduled Daily Summary (12:00 PM Local / 08:00 UTC)
+        if now.hour == 8 and now.minute == 0:
+            today_str = now.strftime("%d.%m.%Y")
+            if self.last_summary_date != today_str:
+                # Send summary for the previous day recap
+                yesterday = now - timedelta(days=1)
+                self._send_performance_summary(yesterday.strftime("%Y-%m-%d"))
+                self.last_summary_date = today_str
+                self._save_state()
 
         # 2. Fetch Global context
         self.last_oi = fetch_open_interest()
@@ -736,7 +749,9 @@ class PonchBot:
         today = now.strftime("%d.%m.%Y")
         if today != self.last_levels_date:
             print(f"\n[SYSTEM] New day detected ({today}). Resetting data...")
-            self.daily_report_msg_id = None # Clear OLD one before sending NEW one
+            
+            # 1. Reset everything for the new day
+            self.daily_report_msg_id = None 
             self._update_levels()
             self._send_daily_report(now)
             
@@ -840,6 +855,23 @@ class PonchBot:
                 self.last_daily_update = time.time()
         
         print(f"[TG] Daily levels report {'skipped' if self.is_booting else 'sent'}")
+    def _send_performance_summary(self, target_date_str=None):
+        """Fetch and send the performance summary for a specific date."""
+        try:
+            stats = self.tracker.get_daily_summary(target_date_str)
+            if stats:
+                if not self.is_booting:
+                    tg.send_performance_summary(stats, chat_id=PUBLIC_CHAT_ID)
+                else:
+                    print(f"  [TG] Skipped sending performance summary (booting)")
+            else:
+                print(f"  [TRACKER] No signals found for {target_date_str or 'today'}. Skipping summary.")
+            
+            # Clean up old signals (keep 7 days)
+            self.tracker.cleanup_old(7)
+        except Exception as e:
+            print(f"[TRACKER ERROR] Failed to send performance summary: {e}")
+
 
     def _process_timeframe(self, tf, df, now):
         """Process one timeframe: channels, momentum, signals."""
