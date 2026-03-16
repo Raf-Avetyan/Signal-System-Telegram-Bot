@@ -95,7 +95,7 @@ STRONG_THRESHOLD  = 2    # 2 confirmations = STRONG
 EXTREME_THRESHOLD = 3    # 3+ confirmations = EXTREME
 
 # ─── TIMING ──────────────────────────────────
-POLL_INTERVAL = 10       # Seconds between data fetches
+POLL_INTERVAL = 5       # Seconds between data fetches
 CONFIRMATION_WINDOW = 300  # 5 min window to aggregate signals
 
 # ─── FUNDING RATE ALERTS ─────────────────────
