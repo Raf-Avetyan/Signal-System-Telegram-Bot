@@ -6,6 +6,7 @@ from config import BOT_TOKEN, CHAT_ID, SYMBOL, PUBLIC_CHAT_ID, PRIVATE_CHAT_ID
 API_URL_MSG   = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 API_URL_PHOTO = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
 API_URL_EDIT_MEDIA = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageMedia"
+API_URL_EDIT_TEXT  = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
 
 
 def send(text, parse_mode=None, chat_id=None, reply_markup=None):
@@ -28,6 +29,28 @@ def send(text, parse_mode=None, chat_id=None, reply_markup=None):
         return resp.json()
     except Exception as e:
         print(f"[TG ERROR] {e}")
+        return None
+
+def edit_message_text(message_id, text, chat_id=None, parse_mode="HTML"):
+    """Edit an existing text message."""
+    target_chat = chat_id if chat_id else CHAT_ID
+    try:
+        payload = {
+            "chat_id": target_chat,
+            "message_id": message_id,
+            "text": text,
+            "parse_mode": parse_mode
+        }
+        resp = requests.post(API_URL_EDIT_TEXT, data=payload)
+        if not resp.ok:
+            # If message not modified, ignore
+            if "message is not modified" in resp.text:
+                return None
+            print(f"[TG ERROR] Edit Text {resp.status_code}: {resp.text}")
+            return None
+        return resp.json()
+    except Exception as e:
+        print(f"[TG ERROR] Edit Text: {e}")
         return None
 
 
@@ -186,153 +209,159 @@ def send_scalp_prepare(timeframe, side, points=None, strength=None, emoji="⚡�
     send(msg, parse_mode="HTML", chat_id=chat_id)
 
 
+# ─── Formatting Helpers ─────────────────────────────────────
+def fmt_hit(is_hit):
+    """Return a checkmark if level was hit."""
+    return " ✅" if is_hit else ""
+
+def get_signal_levels_code(entry, sl, tp1, tp2, tp3, status="OPEN", tp1_h=False, tp2_h=False, tp3_h=False, sl_h=False):
+    """Format the levels block with hit markers."""
+    # Symbols based on state
+    sl_mark = " ❌" if sl_h else ""
+    tp1_mark = fmt_hit(tp1_h)
+    tp2_mark = fmt_hit(tp2_h)
+    tp3_mark = fmt_hit(tp3_h)
+    
+    lines = [
+        f"Entry:  {fmt_price(entry)}",
+        f"SL:     {fmt_price(sl)}{sl_mark}",
+        f"",
+        f"TP1:    {fmt_price(tp1)}{tp1_mark}",
+        f"TP2:    {fmt_price(tp2)}{tp2_mark}",
+        f"TP3:    {fmt_price(tp3)}{tp3_mark}"
+    ]
+    
+    # Add status banner at the end of the code block if closed
+    if status == "TP3":
+        lines.append(f"\n")
+        lines.append(f"💰 ALL TARGETS HIT")
+    elif status == "SL":
+        lines.append(f"\n")
+        lines.append(f"❌ STOP LOSS HIT")
+    elif status == "CLOSED":
+        lines.append(f"\n")
+        lines.append(f"🛡 CLOSED AFTER TP")
+
+    return "\n".join(lines)
+
+def get_signal_html(signal_type, side, timeframe, entry, sl, tp1, tp2, tp3, 
+                    status="OPEN", tp1_h=False, tp2_h=False, tp3_h=False, sl_h=False,
+                    score=None, trend=None, indicators=None, reasons=None):
+    """Generate HTML for Scalp, Strong, or Extreme signals."""
+    side_emoji = "🟢" if side == "LONG" else "🔴"
+    
+    # 1. Header
+    if signal_type == "SCALP":
+        emoji = "🚀" if timeframe.lower() in ["1h", "4h"] else "⚡️"
+        label = "SCALP" if timeframe.lower() in ["5m", "15m"] else "SIGNAL"
+        header = f"<b>{emoji} {label} ENTRY CONFIRMED</b> [{timeframe.upper()}]\n"
+        header += f"<b>{side_emoji} {side}</b>\n"
+        header += f"\n"
+    elif signal_type == "STRONG":
+        emoji = "✅"
+        header = f"<b>{emoji} STRONG {side} CONFLUENCE</b>\n"
+        header += f"<b>{side_emoji} Market Divergence Detected [{timeframe}]</b>\n\n"
+    elif signal_type == "EXTREME":
+        emoji = "🔥"
+        header = f"<b>{emoji} EXTREME {side} CONFLUENCE</b>\n"
+        header += f"<b>{side_emoji} High-Alpha Setup Identified [{timeframe}]</b>\n\n"
+    else:
+        header = f"<b>🔔 {signal_type} {side}</b>\n"
+
+    # 2. Score/Trend (for Scalps) or Confluence Details (for Strong/Extreme)
+    details = ""
+    if signal_type == "SCALP":
+        score_display = f"Score:   {score}/10\n" if score else ""
+        trend_display = f"Trend:   {trend}\n" if trend else ""
+        reasons_display = f"Confl:   {', '.join(reasons)}\n" if reasons else ""
+        details = f"<pre>Trigger: Momentum Exit\n{score_display}{trend_display}{reasons_display}</pre>\n"
+    else:
+        # Strong/Extreme
+        num_systems = len(indicators) if indicators else 0
+        total_points = sum(ind['points'] for ind in indicators) if indicators else 0
+        details = (
+            f"<b>Confluence:</b> {num_systems} Systems Agree\n"
+            f"<b>Total Weight:</b> {total_points} Points\n"
+        )
+
+    # 3. Levels
+    levels_code = get_signal_levels_code(entry, sl, tp1, tp2, tp3, status, tp1_h, tp2_h, tp3_h, sl_h)
+    
+    msg = header + details + f"\n" + f"<b>⚡️ TRADE LEVELS</b>\n<pre>{levels_code}</pre>"
+
+    # 4. Matched Strategies (for Strong/Extreme)
+    if (signal_type in ["STRONG", "EXTREME"]) and indicators:
+        ind_lines = []
+        for ind in indicators:
+            name = ind['name'].replace("Ponch_", "").replace("_", " ")
+            sig = ind['signal'].replace("ENTRY ", "")
+            ind_lines.append(f"• {name}: {sig} (+{ind['points']})")
+        
+        msg += f"\n\n<b>Matched Strategies:</b>\n<pre>" + "\n".join(ind_lines) + "</pre>"
+
+    return msg
+
+
 def send_scalp_confirmed(timeframe, side, entry, sl, tp1, tp2, tp3,
-                         strength, size, score=None, trend=None, reasons=None, emoji="⚡️", chat_id=None):
-    """
-    ⚡️/🚀 SCALP ENTRY CONFIRMED [TF] 🟢/🔴 SIDE
-    """
-    label = "SCALP" if timeframe.lower() in ["5m", "15m"] else "SIGNAL"
-    side_emoji = "🟢" if side == "LONG" else "🔴"
-    
-    score_display = f"Score:    {score}/10" if score else ""
-    trend_display = f"Trend:    {trend}" if trend else ""
-    
-    code_part = (
-        f"Trigger:  Momentum Exit\n"
-        f"Entry:    {fmt_price(entry)}\n"
-        f"SL:       {fmt_price(sl)}\n\n"
-        f"TP1:      {fmt_price(tp1)} (30%)\n"
-        f"TP2:      {fmt_price(tp2)} (40%)\n"
-        f"TP3:      {fmt_price(tp3)} (30%)\n"
-        f"──────────\n"
-        f"{score_display}\n"
-        f"{trend_display}\n"
-    )
-    if reasons:
-        confl_str = ", ".join(reasons)
-        code_part += f"Confluence: {confl_str}\n"
+                         strength, size, score=None, trend=None, reasons=None, chat_id=None):
+    """⚡️/🚀 SCALP ENTRY CONFIRMED"""
+    html = get_signal_html("SCALP", side, timeframe, entry, sl, tp1, tp2, tp3, 
+                           score=score, trend=trend, reasons=reasons)
+    return send(html, parse_mode="HTML", chat_id=chat_id)
 
-    msg = (
-        f"<b>{emoji} {label} ENTRY CONFIRMED</b> [{timeframe.upper()}]\n"
-        f"<b>{side_emoji} {side}</b>\n"
-        f"<pre>{code_part}</pre>"
-    )
-    send(msg, parse_mode="HTML", chat_id=chat_id)
-
-
-def send_scalp_closed(timeframe, side, price, emoji="⚡️", chat_id=None):
-    """
-    ⚡️/🚀 SCALP WINDOW CLOSED [TF] 🟢/🔴 SIDE
-    """
-    label = "SCALP" if timeframe.lower() in ["5m", "15m"] else "SIGNAL"
-    side_emoji = "🟢" if side == "LONG" else "🔴"
-    code_part = (
-        f"Momentum: Zone Exit\n"
-        f"Price:    {fmt_price(price)}"
-    )
-    
-    msg = (
-        f"<b>{emoji} {label} WINDOW CLOSED</b> [{timeframe.upper()}]\n"
-        f"<b>{side_emoji} {side}</b>\n"
-        f"<pre>{code_part}</pre>"
-    )
-    send(msg, parse_mode="HTML", chat_id=chat_id)
-
-
-# ═══════════════════════════════════════════════════════════════
-# CONFIRMATION AGGREGATION
-# ═══════════════════════════════════════════════════════════════
 
 def send_strong(side, total_points, confirmations, indicators_list, price=None, sl=None, tp1=None, tp2=None, tp3=None, chat_id=None):
-    """
-    ✅ STRONG CONFLUENCE
-    """
-    emoji = "✅"
-    side_emoji = "🟢" if side == "LONG" else "🔴"
+    """✅ STRONG CONFLUENCE"""
+    tfs = sorted(list(set(ind.get('tf', 'N/A') for ind in indicators_list)))
+    tf_summary = ", ".join(tfs)
     
-    ind_lines = []
-    tfs = set()
-    for ind in indicators_list:
-        # Clean up internal names for better look
-        name = ind['name'].replace("Ponch_", "").replace("_", " ")
-        sig = ind['signal'].replace("ENTRY ", "")
-        tf_val = ind.get('tf', 'N/A')
-        ind_lines.append(f"• {name}: {sig} (+{ind['points']})")
-        tfs.add(tf_val)
-    
-    ind_str = "\n".join(ind_lines)
-    tf_summary = ", ".join(sorted(list(tfs)))
-
-    msg = (
-        f"<b>{emoji} STRONG {side} CONFLUENCE</b>\n"
-        f"<b>{side_emoji} Market Divergence Detected [{tf_summary}]</b>\n\n"
-        f"<b>Confluence:</b> {confirmations} Systems Agree\n"
-        f"<b>Total Weight:</b> {total_points} Points\n"
-    )
-
-    if price and sl:
-        code_part = (
-            f"Entry:  {fmt_price(price)}\n"
-            f"SL:     {fmt_price(sl)}\n"
-            f"TP1:    {fmt_price(tp1)}\n"
-            f"TP2:    {fmt_price(tp2)}\n"
-            f"TP3:    {fmt_price(tp3)}"
-        )
-        msg += f"\n<b>⚡️ TRADE LEVELS</b>\n<pre>{code_part}</pre>\n"
-    elif price:
-        msg += f"<b>Current Price:</b> {fmt_price(price)}\n"
-    
-    msg += (
-        f"\n<b>Matched Strategies:</b>\n"
-        f"<pre>{ind_str}</pre>"
-    )
-    send(msg, parse_mode="HTML", chat_id=chat_id)
+    html = get_signal_html("STRONG", side, tf_summary, price, sl, tp1, tp2, tp3,
+                           indicators=indicators_list)
+    return send(html, parse_mode="HTML", chat_id=chat_id)
 
 
 def send_extreme(side, total_points, confirmations, indicators_list, price=None, sl=None, tp1=None, tp2=None, tp3=None, chat_id=None):
-    """
-    🔥 EXTREME CONFLUENCE
-    """
-    emoji = "🔥"
-    side_emoji = "🟢" if side == "LONG" else "🔴"
-    
-    ind_lines = []
-    tfs = set()
-    for ind in indicators_list:
-        # Clean up internal names for better look
-        name = ind['name'].replace("Ponch_", "").replace("_", " ")
-        sig = ind['signal'].replace("ENTRY ", "")
-        tf_val = ind.get('tf', 'N/A')
-        ind_lines.append(f"• {name}: {sig} (+{ind['points']})")
-        tfs.add(tf_val)
-    
-    ind_str = "\n".join(ind_lines)
-    tf_summary = ", ".join(sorted(list(tfs)))
+    """🔥 EXTREME CONFLUENCE"""
+    tfs = sorted(list(set(ind.get('tf', 'N/A') for ind in indicators_list)))
+    tf_summary = ", ".join(tfs)
 
-    msg = (
-        f"<b>{emoji} EXTREME {side} CONFLUENCE</b>\n"
-        f"<b>{side_emoji} High-Alpha Setup Identified [{tf_summary}]</b>\n\n"
-        f"<b>Confluence:</b> {confirmations} Systems Agree\n"
-        f"<b>Total Weight:</b> {total_points} Points\n"
-    )
+    html = get_signal_html("EXTREME", side, tf_summary, price, sl, tp1, tp2, tp3,
+                           indicators=indicators_list)
+    return send(html, parse_mode="HTML", chat_id=chat_id)
 
-    if price and sl:
-        code_part = (
-            f"Entry:  {fmt_price(price)}\n"
-            f"SL:     {fmt_price(sl)}\n"
-            f"TP1:    {fmt_price(tp1)}\n"
-            f"TP2:    {fmt_price(tp2)}\n"
-            f"TP3:    {fmt_price(tp3)}"
-        )
-        msg += f"\n<b>🔥 RECOMMENDED TARGETS</b>\n<pre>{code_part}</pre>\n"
-    elif price:
-        msg += f"<b>Current Price:</b> {fmt_price(price)}\n"
-        
-    msg += (
-        f"\n<b>Matched Strategies:</b>\n"
-        f"<pre>{ind_str}</pre>"
+
+def update_signal_message(chat_id, msg_id, sig_data):
+    """Edit the original signal message with updated hit markers."""
+    # 'meta' contains original info like indicators or reasons
+    meta = sig_data.get("meta", {})
+    
+    # Reconstruct timeframe summary for confluence signals
+    tf_val = sig_data["tf"]
+    indicators = meta.get("indicators")
+    if tf_val == "Confluence" and indicators:
+        tfs = sorted(list(set(ind.get('tf', 'N/A') for ind in indicators)))
+        tf_val = ", ".join(tfs)
+
+    html = get_signal_html(
+        signal_type=sig_data.get("type", "SCALP"),
+        side=sig_data["side"],
+        timeframe=tf_val,
+        entry=sig_data["entry"],
+        sl=sig_data["sl"],
+        tp1=sig_data["tp1"],
+        tp2=sig_data["tp2"],
+        tp3=sig_data["tp3"],
+        status=sig_data["status"],
+        tp1_h=sig_data["tp1_hit"],
+        tp2_h=sig_data["tp2_hit"],
+        tp3_h=sig_data["tp3_hit"],
+        sl_h=sig_data["sl_hit"],
+        score=meta.get("score"),
+        trend=meta.get("trend"),
+        indicators=indicators,
+        reasons=meta.get("reasons")
     )
-    send(msg, parse_mode="HTML", chat_id=chat_id)
+    return edit_message_text(msg_id, html, chat_id=chat_id)
 
 
 # ═══════════════════════════════════════════════════════════════

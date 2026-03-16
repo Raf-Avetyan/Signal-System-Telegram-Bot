@@ -1,133 +1,123 @@
 # test_messages.py
+import time
 import telegram as tg
-
 from config import PRIVATE_CHAT_ID
 
-# print("Fetching dummy chart data for test...")
-# df = fetch_klines(interval="1h", limit=48)
-# levels_dict = {
-#     "Pump": 72000, "ResistancePct": 1.4,
-#     "Dump": 70500, "SupportPct": -0.7,
-#     "Volatility": 73000, "VolatilityPct": 2.8,
-#     "PumpMax": 74000, "DumpMax": 68000,
-#     "DO": 71000
-# }
-# chart_path = generate_daily_levels_chart(df, levels_dict)
+def test_live_updates():
+    print("🚀 Starting Live Message Update Test...")
+    
+    # 1. TEST SCALP SIGNAL (Success Path: TP1 -> TP2 -> TP3)
+    print("\n1. Testing Scalp Signal (TP1 -> TP2 -> TP3)...")
+    entry, sl = 73500.0, 73000.0
+    tp1, tp2, tp3 = 73800.0, 74200.0, 74800.0
+    
+    resp = tg.send_scalp_confirmed(
+        timeframe="15m", side="LONG",
+        entry=entry, sl=sl, tp1=tp1, tp2=tp2, tp3=tp3,
+        strength="Strong", size=1.0, score=8, trend="Bullish",
+        reasons=["RSI Entry", "Near DO"],
+        chat_id=PRIVATE_CHAT_ID
+    )
+    
+    if not resp:
+        print("❌ Failed to send initial scalp message.")
+        return
 
-# print("Sending Daily Levels with Chart...")
-# tg.send_daily_levels(
-#     "15.03.2024", 71000.00, 
-#     72000.00, 1.4, 70500.00, -0.7, 
-#     73000.00, 2.8, 74000.00, 68000.00,
-#     chart_path=chart_path
-# )
+    msg_id = resp["result"]["message_id"]
+    sig_data = {
+        "type": "SCALP", "side": "LONG", "tf": "15m",
+        "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3,
+        "status": "OPEN", "tp1_hit": False, "tp2_hit": False, "tp3_hit": False, "sl_hit": False,
+        "meta": {"score": 8, "trend": "Bullish", "reasons": ["RSI Entry", "Near DO"]}
+    }
 
-# print("Sending Liquidity Sweep...")
-# tg.send_liquidity_sweep("LONG", "PDL", 70500.00, 2, "Medium", "Swept yesterday's low")
+    time.sleep(3)
+    print("   -> Simulating TP1 Hit...")
+    sig_data["tp1_hit"] = True
+    sig_data["status"] = "TP1"
+    tg.update_signal_message(PRIVATE_CHAT_ID, msg_id, sig_data)
 
-# print("Sending Volatility Touch...")
-# tg.send_volatility_touch("SHORT", "Pump", 72500.00, 1, "Low", "Touched main pump zone")
+    time.sleep(3)
+    print("   -> Simulating TP2 Hit...")
+    sig_data["tp2_hit"] = True
+    sig_data["status"] = "TP2"
+    tg.update_signal_message(PRIVATE_CHAT_ID, msg_id, sig_data)
 
-# print("Sending Performance Summary...")
-# tg.send_performance_summary({
-#     "total": 10,
-#     "tp1_hits": 6,
-#     "tp2_hits": 3,
-#     "tp3_hits": 1,
-#     "sl_hits": 2,
-#     "still_open": 2,
-#     "win_rate": 60.0
-# })
+    time.sleep(3)
+    print("   -> Simulating TP3 Hit (ALL TARGETS)...")
+    sig_data["tp3_hit"] = True
+    sig_data["status"] = "TP3"
+    tg.update_signal_message(PRIVATE_CHAT_ID, msg_id, sig_data)
 
-# print("Sending Price Approaching Level...")
-# tg.send_approaching_level("Pump", 72500.00, 72400.00, 0.13)
 
-# print("Sending Funding Alert...")
-# tg.send_funding_alert(0.00065, "POSITIVE")
+    # 2. TEST STRONG CONFLUENCE (Failure Path: SL Hit)
+    print("\n2. Testing Strong Confluence (SL Hit)...")
+    entry_s, sl_s = 74500.0, 75000.0
+    tp1_s, tp2_s, tp3_s = 74000.0, 73500.0, 72500.0
+    indicators = [
+        {"name": "Ponch_Trader", "signal": "S+", "points": 2, "tf": "1h"},
+        {"name": "Ponch_Momentum_Confirm", "signal": "S", "points": 1, "tf": "15m"}
+    ]
 
-# print("Sending Volume Spike...")
-# tg.send_volume_spike("1h", 50000, 15000, 3.3, 71200.00)
+    resp_s = tg.send_strong(
+        side="SHORT", total_points=3, confirmations=2,
+        indicators_list=indicators,
+        price=entry_s, sl=sl_s, tp1=tp1_s, tp2=tp2_s, tp3=tp3_s,
+        chat_id=PRIVATE_CHAT_ID
+    )
+    
+    if resp_s:
+        msg_id_s = resp_s["result"]["message_id"]
+        sig_data_s = {
+            "type": "STRONG", "side": "SHORT", "tf": "1h, 15m",
+            "entry": entry_s, "sl": sl_s, "tp1": tp1_s, "tp2": tp2_s, "tp3": tp3_s,
+            "status": "OPEN", "tp1_hit": False, "tp2_hit": False, "tp3_hit": False, "sl_hit": False,
+            "meta": {"indicators": indicators}
+        }
+        
+        time.sleep(3)
+        print("   -> Simulating SL Hit...")
+        sig_data_s["sl_hit"] = True
+        sig_data_s["status"] = "SL"
+        tg.update_signal_message(PRIVATE_CHAT_ID, msg_id_s, sig_data_s)
 
-# print("Sending Session Summary...")
-# tg.send_session_summary("LONDON", 70500.00, 71200.00, 4, "PDH, Pump")
 
-# print("Sending Batched Alerts...")
-# tg.send_batched_alerts([
-#     {"type": "VOLUME SPIKE", "tf": "15m", "price": 71200.00, "note": "3.3x average volume"},
-#     {"type": "FUNDING ALERT", "note": "POSITIVE Funding Rate: 0.0650%"}
-# ])
+    # 3. TEST EXTREME CONFLUENCE (Protected Path: TP1 -> SL)
+    print("\n3. Testing Extreme Confluence (TP1 then SL)...")
+    indicators_e = [
+        {"name": "Ponch_Trader", "signal": "L++", "points": 3, "tf": "4h"},
+        {"name": "Ponch_Flow_Confirm", "signal": "L", "points": 1, "tf": "5m"},
+        {"name": "Ponch_Range_Confirm", "signal": "L+", "points": 2, "tf": "1h"}
+    ]
+    
+    resp_e = tg.send_extreme(
+        side="LONG", total_points=6, confirmations=3,
+        indicators_list=indicators_e,
+        price=72400.0, sl=72000.0, tp1=72800.0, tp2=73500.0, tp3=74500.0,
+        chat_id=PRIVATE_CHAT_ID
+    )
+    
+    if resp_e:
+        msg_id_e = resp_e["result"]["message_id"]
+        sig_data_e = {
+            "type": "EXTREME", "side": "LONG", "tf": "5m, 1h, 4h",
+            "entry": 72400.0, "sl": 72000.0, "tp1": 72800.0, "tp2": 73500.0, "tp3": 74500.0,
+            "status": "OPEN", "tp1_hit": False, "tp2_hit": False, "tp3_hit": False, "sl_hit": False,
+            "meta": {"indicators": indicators_e}
+        }
+        
+        time.sleep(3)
+        print("   -> Simulating TP1 Hit...")
+        sig_data_e["tp1_hit"] = True
+        sig_data_e["status"] = "TP1"
+        tg.update_signal_message(PRIVATE_CHAT_ID, msg_id_e, sig_data_e)
+        
+        time.sleep(3)
+        print("   -> Simulating Price returning to SL after TP1 (CLOSED)...")
+        sig_data_e["status"] = "CLOSED" # Logic from tracker: TP1 hit then SL = CLOSED
+        tg.update_signal_message(PRIVATE_CHAT_ID, msg_id_e, sig_data_e)
 
-# # print("Test messages sent to Telegram!")
+    print("\n✅ Live Update Tests Finished! Check Telegram.")
 
-# print("1. Sending Daily Levels with Global Context...")
-# indicators = fetch_global_indicators() # Get real live proxy values
-# # Mock some data for the chart
-# try:
-#     df = fetch_klines(interval="1h", limit=48)
-#     levels_dict = {
-#         "Pump": 72000, "ResistancePct": 1.4,
-#         "Dump": 70500, "SupportPct": -0.7,
-#         "Volatility": 71200, "VolatilityPct": 0.5,
-#         "PumpMax": 74000, "DumpMax": 68000,
-#         "DO": 71000
-#     }
-#     chart_path = generate_daily_levels_chart(df, levels_dict)
-# except:
-#     chart_path = None
-
-# tg.send_daily_levels(
-#     "15.03.2024", 71000.00, 
-#     72000.00, 1.4, 70500.00, -0.7, 
-#     71200.00, 0.5, 74000.00, 68000.00,
-#     indicators=indicators,
-#     chart_path=chart_path
-# )
-
-# print("Sending Scalp Open...")
-# tg.send_scalp_open("15m", "LONG", 70800.00, emoji="🚀", chat_id=PRIVATE_CHAT_ID)
-
-# print("Sending Scalp Prepare...")
-# tg.send_scalp_prepare("15m", "LONG", points=3, strength="Strong", emoji="🚀", chat_id=PRIVATE_CHAT_ID)
-
-# print("2. Sending Extreme Scalp Signal (Calculated Score)...")
-# # Mocking an 'Extreme' 9/10 signal
-# tg.send_scalp_confirmed(
-#     timeframe="15m", 
-#     side="LONG", 
-#     entry=70850.00, 
-#     sl=70600.00, 
-#     tp1=70950.00, tp2=71200.00, tp3=71500.00,
-#     strength="Extreme", 
-#     size=2.0, 
-#     score=9, 
-#     trend="Trending Bullish", 
-#     reasons=["Near DO", "Extreme Channel", "Volume Spike", "Trend Aligned", "High Liquidations ($150k)"],
-#     emoji="🚀",
-#     chat_id=PRIVATE_CHAT_ID
-# )
-
-# print("3. Sending Counter-Trend Scalp Signal (Low Score)...")
-# # Mocking a weak signal
-# tg.send_scalp_confirmed(
-#     timeframe="5m", 
-#     side="SHORT", 
-#     entry=71500.00, 
-#     sl=71800.00, 
-#     tp1=71300.00, tp2=71100.00, tp3=70800.00,
-#     strength="Weak", 
-#     size=1.0, 
-#     score=3, 
-#     trend="Trending Bullish", 
-#     reasons=["Outer Channel", "Counter-trend"],
-#     emoji="⚡️",
-#     chat_id=PRIVATE_CHAT_ID
-# )
-
-# print("Sending Scalp Closed...")
-# tg.send_scalp_closed("15m", "LONG", 71000.00, emoji="🚀", chat_id=PRIVATE_CHAT_ID)
-
-from config import PUBLIC_CHAT_ID
-print("Sending Strategy Success Teaser with Button...")
-tg.send_success_teaser(side="LONG", tf="15m", profit_pct=4.25, level="TP2", chat_id=PUBLIC_CHAT_ID)
-
-print("\n[OK] Test success teaser sent to Telegram! Check your public channel.")
+if __name__ == "__main__":
+    test_live_updates()

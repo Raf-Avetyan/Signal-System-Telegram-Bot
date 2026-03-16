@@ -36,9 +36,10 @@ class SignalTracker:
         except Exception as e:
             print(f"[TRACKER ERROR] Save failed: {e}")
 
-    def log_signal(self, side, entry, sl, tp1, tp2, tp3, tf, timestamp):
-        """Log a new CONFIRMED scalp signal."""
+    def log_signal(self, side, entry, sl, tp1, tp2, tp3, tf, timestamp, msg_id=None, chat_id=None, signal_type="SCALP", meta=None):
+        """Log a new CONFIRMED scalp or confluence signal with TG data."""
         signal = {
+            "type": signal_type,
             "side": side,
             "entry": entry,
             "sl": sl,
@@ -48,17 +49,20 @@ class SignalTracker:
             "tf": tf,
             "timestamp": timestamp,
             "logged_at": datetime.now(timezone.utc).isoformat(),
-            "status": "OPEN",       # OPEN, TP1, TP2, TP3, SL
+            "status": "OPEN",       # OPEN, TP1, TP2, TP3, SL, CLOSED
             "tp1_hit": False,
             "tp2_hit": False,
             "tp3_hit": False,
             "sl_hit": False,
+            "msg_id": msg_id,
+            "chat_id": chat_id,
+            "meta": meta or {},
             "teaser_sent": False,
             "closed_at": None,
         }
         self.signals.append(signal)
         self._save()
-        print(f"  [TRACKER] Logged {side} @ {entry:,.2f} [{tf}]")
+        print(f"  [TRACKER] Logged {signal_type} {side} @ {entry:,.2f} [{tf}] (Msg: {msg_id})")
 
     def check_outcomes(self, current_price):
         """Check all OPEN signals against current price."""
