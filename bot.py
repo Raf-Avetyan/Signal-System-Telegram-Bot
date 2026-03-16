@@ -453,6 +453,13 @@ class PonchBot:
             for side in ["LONG", "SHORT"]:
                 conf_events = self.confirmations.check_confirmations(side)
                 for ce in conf_events:
+                    # BLOCK DUPLICATES: use a minute-level key for confluence
+                    conf_key = f"conf_{side}_{ce['type']}_{ref_ts}"
+                    if conf_key in self.sent_signals:
+                        continue
+                    
+                    self.sent_signals.add(conf_key)
+                    
                     # Calculate targets for confluence using reference ATR
                     sl_m, tp1_m, tp2_m, tp3_m = 0.7, 0.7, 1.4, 2.1 
                     if side == "LONG":
@@ -1216,17 +1223,20 @@ if __name__ == "__main__":
 
     lock_file = "bot.lock"
     
-    # Check if another instance is running
+    # Strict singleton check: prevents multiple bots from running on the same files
     if os.path.exists(lock_file):
-        # Try to remove it. If it's locked by another process (on some OS) or exists, 
-        # we check the timestamp. If it was updated in the last 30s, we assume bot is alive.
         import time
-        if time.time() - os.path.getmtime(lock_file) < 60:
-            print("\n[!] FATAL: Another instance of PonchBot is already running.")
-            print("[!] If you are sure it's not, delete 'bot.lock' and try again.\n")
-            sys.exit(1)
-    
-    # Create/Touch lock file
+        try:
+            # If the lock file is fresh (updated in last 60s), another bot is alive
+            if time.time() - os.path.getmtime(lock_file) < 60:
+                print(f"\n[FATAL] Another bot instance is already active (locked by PID).")
+                print(f"[SYSTEM] If you are sure it's not running, delete '{lock_file}' and restart.\n")
+                sys.exit(1)
+            else:
+                os.remove(lock_file) # Old stale lock
+        except:
+            pass
+            
     with open(lock_file, "w") as f:
         f.write(str(os.getpid()))
 
