@@ -1053,14 +1053,16 @@ class PonchBot:
                 # Always record for session tracking
                 record_level(sw['level'])
 
-                # IMPORTANT: Use a TF-independent key for Global Levels 
-                # to prevent duplicates across 5m/15m/1h/4h
-                sig_key = f"sweep_{sw['level']}_{sw['side']}_{now.strftime('%Y-%m-%d')}"
-                if sig_key not in self.sent_signals:
-                    self.sent_signals.add(sig_key)
+                # Use a very specific key for the individual sweep event
+                sweep_key = f"sweep_{sw['level']}_{sw['side']}_{now.strftime('%Y-%m-%d')}"
+                if sweep_key not in self.sent_signals:
+                    self.sent_signals.add(sweep_key)
+                    # Force save state immediately before sending to ensure persistence
+                    self._save_state()
+                    
                     if not self.is_booting:
                         tg.send_liquidity_sweep(**sw, chat_id=PUBLIC_CHAT_ID)
-                    self._save_state() # Save immediately to avoid double sends
+                    
                     print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Liquidity Sweep: {sw['level']} ({sw['side']})")
 
                     # Add to confirmation tracker
@@ -1223,19 +1225,35 @@ if __name__ == "__main__":
 
     lock_file = "bot.lock"
     
-    # Strict singleton check: prevents multiple bots from running on the same files
+    # Strict singleton check with PID awareness
     if os.path.exists(lock_file):
         import time
         try:
-            # If the lock file is fresh (updated in last 60s), another bot is alive
-            if time.time() - os.path.getmtime(lock_file) < 60:
-                print(f"\n[FATAL] Another bot instance is already active (locked by PID).")
-                print(f"[SYSTEM] If you are sure it's not running, delete '{lock_file}' and restart.\n")
+            with open(lock_file, "r") as f:
+                old_pid = int(f.read().strip())
+            
+            # Check if that PID is actually running (Unix/Linux check)
+            try:
+                os.kill(old_pid, 0)
+                is_running = True
+            except (OSError, ProcessLookupError, ValueError):
+                is_running = False
+
+            # If it's running AND it's a recent update (heartbeat)
+            if is_running and (time.time() - os.path.getmtime(lock_file) < 60):
+                print(f"\n[FATAL] Another instance (PID {old_pid}) is already running.")
                 sys.exit(1)
             else:
-                os.remove(lock_file) # Old stale lock
-        except:
-            pass
+                # Process is dead OR lock is stale
+                os.remove(lock_file)
+        except Exception:
+            # Fallback if file is corrupted or OS doesn't support os.kill
+            if time.time() - os.getmtime(lock_file) < 60:
+                print(f"\n[FATAL] Stale lock detected, but it's too fresh. Exiting.")
+                sys.exit(1)
+            else:
+                try: os.remove(lock_file)
+                except: pass
             
     with open(lock_file, "w") as f:
         f.write(str(os.getpid()))
