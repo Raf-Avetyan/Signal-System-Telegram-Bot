@@ -410,8 +410,8 @@ class PonchBot:
         self.last_oi = fetch_open_interest()
         self.last_liqs = fetch_liquidations()
 
-        # 3. Fetch all timeframes
-        data = fetch_all_timeframes()
+        # 3. Fetch all timeframes (only Signal TFs to avoid lag)
+        data = fetch_all_timeframes(timeframes=SIGNAL_TIMEFRAMES)
         if not data: return
 
         # 4. Update Macro Trend (1h baseline)
@@ -440,7 +440,8 @@ class PonchBot:
         
         # Track reference values for confluence alerts
         ref_atr = 0
-        ref_ts  = now.strftime("%Y-%m-%d %H:%M")
+        conf_ts = now.strftime("%Y-%m-%d %H:%M")  # Minute-level key for alerts
+        ref_ts  = conf_ts 
         
         for tf in SIGNAL_TIMEFRAMES:
             if tf not in data: continue
@@ -469,7 +470,7 @@ class PonchBot:
                 conf_events = self.confirmations.check_confirmations(side)
                 for ce in conf_events:
                     # BLOCK DUPLICATES: use a minute-level key for confluence
-                    conf_key = f"conf_{side}_{ce['type']}_{ref_ts}"
+                    conf_key = f"conf_{side}_{ce['type']}_{conf_ts}"
                     if conf_key in self.sent_signals:
                         continue
                     
@@ -803,6 +804,11 @@ class PonchBot:
                     except: pass
 
         # 2. Daily Levels Update (600s)
+        # ─── End of Tick ─────────────────────────────────────
+        tick_duration = time.time() - current_time
+        if tick_duration > 2.0:
+            print(f"[PERF] Tick took {tick_duration:.1f}s (Threshold: 2.0s)")
+        
         if current_time - self.last_daily_update > 600:
             self.last_daily_update = current_time
             if self.daily_report_msg_id:

@@ -87,20 +87,30 @@ def fetch_klines(symbol=SYMBOL, interval="1h", limit=None):
 
 def fetch_all_timeframes(symbol=SYMBOL, timeframes=None):
     """
-    Fetch klines for multiple timeframes.
+    Fetch klines for multiple timeframes in parallel.
     Returns dict: {timeframe: DataFrame}
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     if timeframes is None:
         timeframes = list(KLINE_LIMITS.keys())
 
     data = {}
-    for tf in timeframes:
-        df = fetch_klines(symbol=symbol, interval=tf)
-        if not df.empty:
-            data[tf] = df
-            print(f"  ✓ {tf}: {len(df)} candles")
-        else:
-            print(f"  ✗ {tf}: FAILED")
+    
+    # OKX Public API is quite generous, parallesim should be fine
+    with ThreadPoolExecutor(max_workers=len(timeframes)) as executor:
+        future_to_tf = {executor.submit(fetch_klines, symbol, tf): tf for tf in timeframes}
+        for future in as_completed(future_to_tf):
+            tf = future_to_tf[future]
+            try:
+                df = future.result()
+                if not df.empty:
+                    data[tf] = df
+                    # print(f"  ✓ {tf}: {len(df)} candles")
+                else:
+                    print(f"  ✗ {tf}: FAILED (Empty)")
+            except Exception as e:
+                print(f"  ✗ {tf}: EXCEPTION {e}")
 
     return data
 

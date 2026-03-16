@@ -96,7 +96,7 @@ EXTREME_THRESHOLD = 3    # 3+ confirmations = EXTREME
 
 # ─── TIMING ──────────────────────────────────
 POLL_INTERVAL = 5       # Seconds between data fetches
-CONFIRMATION_WINDOW = 300  # 5 min window to aggregate signals
+CONFIRMATION_WINDOW = 1800  # 30 min window to aggregate signals
 
 # ─── FUNDING RATE ALERTS ─────────────────────
 FUNDING_THRESHOLD = 0.0005       # 0.05% — trigger alert above this
