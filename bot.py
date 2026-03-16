@@ -5,11 +5,8 @@ Main entry point. Monitors BTCUSDT across multiple timeframes,
 detects signals, and sends formatted Telegram alerts.
 """
 
-import os
 import time
 import traceback
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timezone, timedelta
 
 from config import (
@@ -35,18 +32,6 @@ from data import (
 from tracker import SignalTracker
 import telegram as tg
 
-
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    """Simple HTTP server to respond to health checks / pings."""
-    def do_GET(self):
-        print(f"[SYSTEM] Health check ping received from {self.address_string()}")
-        self.send_response(200)
-        self.send_header('Content-type', 'text/html')
-        self.end_headers()
-        self.wfile.write(b"OK - PonchBot is alive!")
-
-    def log_message(self, format, *args):
-        return # Silence logs to avoid spamming console
 
 class PonchBot:
     """Main Ponch Signal System bot."""
@@ -135,11 +120,7 @@ class PonchBot:
         print(f"  Poll interval: {POLL_INTERVAL}s")
         print(f"  Public Chat:  {PUBLIC_CHAT_ID}")
         print(f"  Private Chat: {PRIVATE_CHAT_ID}")
-        print(f"  Keep-Alive:  Port 8080 (Health Check)")
         print(f"{'='*50}")
-
-        # Start Health Check Server (Keep-Alive)
-        self._start_health_check_server()
 
         tg.send_startup()
         print("[OK] Startup message sent to Telegram\n")
@@ -382,19 +363,6 @@ class PonchBot:
             import traceback
             traceback.print_exc()
 
-    def _start_health_check_server(self):
-        """Starts a background HTTP server to keep the service alive."""
-        port = int(os.environ.get("PORT", 8080))
-        def run_server():
-            try:
-                server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-                print(f"[SYSTEM] Keep-Alive server started on port {port}")
-                server.serve_forever()
-            except Exception as e:
-                print(f"[SYSTEM ERROR] Health check server failed: {e}")
-
-        thread = threading.Thread(target=run_server, daemon=True)
-        thread.start()
 
     def _generate_current_chart(self, output_path="session_chart.png", show_sessions=True):
         """Generate a fresh chart image with current levels and sessions."""
