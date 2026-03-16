@@ -879,6 +879,7 @@ class PonchBot:
         self.levels = calculate_levels(daily_df, weekly_df, monthly_df)
 
         if self.levels:
+            now = datetime.now(timezone.utc)
             print(f"  [LEVELS] Updated for {now.strftime('%d.%m.%Y')}:")
             for k in ["DO", "PDH", "PDL", "PWH", "PWL", "PMH", "PML", "Pump", "Dump"]:
                 val = self.levels.get(k)
