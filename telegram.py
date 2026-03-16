@@ -231,17 +231,6 @@ def get_signal_levels_code(entry, sl, tp1, tp2, tp3, status="OPEN", tp1_h=False,
         f"TP3:    {fmt_price(tp3)}{tp3_mark}"
     ]
     
-    # Add status banner at the end of the code block if closed
-    if status == "TP3":
-        lines.append(f"\n")
-        lines.append(f"💰 ALL TARGETS HIT")
-    elif status == "SL":
-        lines.append(f"\n")
-        lines.append(f"❌ STOP LOSS HIT")
-    elif status == "CLOSED":
-        lines.append(f"\n")
-        lines.append(f"🛡 CLOSED AFTER TP")
-
     return "\n".join(lines)
 
 def get_signal_html(signal_type, side, timeframe, entry, sl, tp1, tp2, tp3, 
@@ -287,7 +276,21 @@ def get_signal_html(signal_type, side, timeframe, entry, sl, tp1, tp2, tp3,
     # 3. Levels
     levels_code = get_signal_levels_code(entry, sl, tp1, tp2, tp3, status, tp1_h, tp2_h, tp3_h, sl_h)
     
-    msg = header + details + f"\n" + f"<b>⚡️ TRADE LEVELS</b>\n<pre>{levels_code}</pre>"
+    msg = header + details + f"\n<b>⚡️ TRADE LEVELS</b>\n<pre>{levels_code}</pre>\n"
+
+    # 3b. Status Banner (Bold & Outside <pre>)
+    if status == "OPEN":
+        msg += f"\n<b>🔵 ACTIVE POSITION</b>"
+    elif status == "TP1":
+        msg += f"\n<b>🔵 ACTIVE POSITION (TP1 ✅)</b>"
+    elif status == "TP2":
+        msg += f"\n<b>🔵 ACTIVE POSITION (TP2 ✅)</b>"
+    elif status == "TP3":
+        msg += f"\n<b>💰 ALL TARGETS HIT</b>"
+    elif status == "SL":
+        msg += f"\n<b>❌ STOP LOSS HIT</b>"
+    elif status == "CLOSED":
+        msg += f"\n<b>🛡 CLOSED AFTER TP</b>"
 
     # 4. Matched Strategies (for Strong/Extreme)
     if (signal_type in ["STRONG", "EXTREME"]) and indicators:
