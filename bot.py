@@ -39,6 +39,7 @@ import telegram as tg
 class HealthCheckHandler(BaseHTTPRequestHandler):
     """Simple HTTP server to respond to health checks / pings."""
     def do_GET(self):
+        print(f"[SYSTEM] Health check ping received from {self.address_string()}")
         self.send_response(200)
         self.send_header('Content-type', 'text/html')
         self.end_headers()
