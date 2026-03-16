@@ -91,8 +91,8 @@ VOL_ZONE_POINTS = {
 VOL_ZONE_STRENGTH = {1: "Low", 3: "Strong"}
 
 # ─── CONFIRMATION THRESHOLDS ─────────────────
-STRONG_THRESHOLD  = 2    # 2 confirmations = STRONG
-EXTREME_THRESHOLD = 3    # 3+ confirmations = EXTREME
+STRONG_THRESHOLD  = 3    # Confirmed Confluence (3+ systems)
+EXTREME_THRESHOLD = 4    # High-Alpha Confluence (4+ systems)
 
 # ─── TIMING ──────────────────────────────────
 POLL_INTERVAL = 5       # Seconds between data fetches

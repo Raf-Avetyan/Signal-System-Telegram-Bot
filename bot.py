@@ -492,8 +492,40 @@ class PonchBot:
                     
                     self.sent_signals.add(conf_key)
                     
-                    # Calculate targets for confluence using reference ATR
-                    sl_m, tp1_m, tp2_m, tp3_m = 0.7, 0.7, 1.4, 2.1 
+                    # --- CONFLUENCE FILTERS & QUALITY CONTROL ---
+                    # 1. Trend Alignment: Confluence must match the macro trend
+                    trend_ok = False
+                    if side == "LONG" and self.macro_trend in ["Bullish", "Trending Bullish", "Strong Bullish"]: trend_ok = True
+                    if side == "SHORT" and self.macro_trend in ["Bearish", "Trending Bearish", "Strong Bearish"]: trend_ok = True
+                    
+                    if not trend_ok:
+                        print(f"  [CONFLUENCE] Blocked {side} {ce['type']}: Against Macro Trend ({self.macro_trend})")
+                        continue
+
+                    # 2. Proximity Protection: Don't enter Long near levels, etc.
+                    proximity_blocked = False
+                    block_threshold = 0.002 # 0.2%
+                    if side == "LONG":
+                        # Block if near major resistance
+                        for l_key in ["PDH", "PWH", "PMH", "PumpMax"]:
+                            lv = self.levels.get(l_key)
+                            if lv and (lv > latest_price) and ((lv - latest_price)/latest_price < block_threshold):
+                                proximity_blocked = True
+                                print(f"  [CONFLUENCE] Blocked LONG: Too close to {l_key}")
+                                break
+                    else:
+                        # Block if near major support
+                        for l_key in ["PDL", "PWL", "PML", "DumpMax"]:
+                            lv = self.levels.get(l_key)
+                            if lv and (lv < latest_price) and ((latest_price - lv)/latest_price < block_threshold):
+                                proximity_blocked = True
+                                print(f"  [CONFLUENCE] Blocked SHORT: Too close to {l_key}")
+                                break
+                    
+                    if proximity_blocked: continue
+
+                    # 3. Calculate targets (Wider 1.0 ATR for confluence breathing room)
+                    sl_m, tp1_m, tp2_m, tp3_m = 1.0, 0.8, 1.6, 2.4 
                     if side == "LONG":
                         sl_c  = latest_price - ref_atr * sl_m
                         tp1_c = latest_price + ref_atr * tp1_m
