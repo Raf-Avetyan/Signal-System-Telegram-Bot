@@ -1050,36 +1050,45 @@ class PonchBot:
                     print(f"  [SIG] Volume Spike [{tf}] {current_vol/avg_vol:.1f}x avg vol")
 
 
-        # ─── Price Approaching Key Levels ────────────────
         if tf == "5m" and self.levels and not self.is_booting:
             prev_close = float(prev["Close"])
+            
+            # 1. Identify all levels within threshold
+            triggered_levels = []
             for lvl_name in APPROACH_LEVELS:
                 lvl_price = self.levels.get(lvl_name)
                 if lvl_price:
                     dist_pct = abs(close - lvl_price) / lvl_price
-                    prev_dist = abs(prev_close - lvl_price) / lvl_price
-                    
-                    # Alert if price JUST ENTERED the proximity zone (cross)
-                    # OR if it's already inside and cooldown has passed
-                    is_new_proximity = (prev_dist > APPROACH_THRESHOLD) and (dist_pct <= APPROACH_THRESHOLD)
-                    
                     if dist_pct <= APPROACH_THRESHOLD:
-                        last_alert = self.approach_alerts.get(lvl_name, 0)
-                        if (is_new_proximity or (current_time - last_alert > APPROACH_COOLDOWN)):
-                            # Safety throttle: never more than once per 10 mins for the SAME level
-                            if current_time - last_alert > 600:
-                                self.queue_alert(
-                                    alert_dict={
-                                        "type": "APPROACHING LEVEL",
-                                        "note": f"Approaching {lvl_name} ({dist_pct*100:.2f}%)"
-                                    },
-                                    callback=tg.send_approaching_level,
-                                    args=(lvl_name, lvl_price, close, dist_pct * 100),
-                                    chat_id=PUBLIC_CHAT_ID
-                                )
-                                self.approach_alerts[lvl_name] = current_time
-                                self._save_state()
-                                print(f"  [SIG] Approaching Level Triggered: {lvl_name} ({dist_pct*100:.2f}%)")
+                        # Tie-breaker logic: order in APPROACH_LEVELS matters (PDH/PDL higher)
+                        importance = APPROACH_LEVELS.index(lvl_name)
+                        triggered_levels.append((dist_pct, importance, lvl_name, lvl_price))
+
+            if triggered_levels:
+                # Sort by distance (closest first), then by importance (list order)
+                triggered_levels.sort()
+                closest_dist, importance, lvl_name, lvl_price = triggered_levels[0]
+                
+                # 2. Check cooldown and threshold crossings
+                prev_dist = abs(prev_close - lvl_price) / lvl_price
+                is_new_proximity = (prev_dist > APPROACH_THRESHOLD) and (closest_dist <= APPROACH_THRESHOLD)
+                
+                last_alert = self.approach_alerts.get(lvl_name, 0)
+                if (is_new_proximity or (current_time - last_alert > APPROACH_COOLDOWN)):
+                    # Safety throttle: never more than once per 10 mins for the SAME level
+                    if current_time - last_alert > 600:
+                        self.queue_alert(
+                            alert_dict={
+                                "type": "APPROACHING LEVEL",
+                                "note": f"Approaching {lvl_name} ({closest_dist*100:.2f}%)"
+                            },
+                            callback=tg.send_approaching_level,
+                            args=(lvl_name, lvl_price, close, closest_dist * 100),
+                            chat_id=PUBLIC_CHAT_ID
+                        )
+                        self.approach_alerts[lvl_name] = current_time
+                        self._save_state()
+                        print(f"  [SIG] Approaching Level Triggered: {lvl_name} ({closest_dist*100:.2f}%)")
 
 
         # ─── Liquidity Sweeps ────────────────────────────
