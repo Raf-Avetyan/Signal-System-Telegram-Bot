@@ -631,33 +631,32 @@ class PonchBot:
                         # Generate session chart
                         chart_path = self._generate_current_chart(f"session_open_{s_name}.png")
 
-                        if not self.is_booting:
-                            resp = tg.send_session_open(
-                                session_name=s_name, 
-                                open_price=open_p, 
-                                current_price=latest_price if is_mid else None,
-                                history=history_text,
-                                high=self.session_data[session_id]["high"],
-                                low=self.session_data[session_id]["low"],
-                                chart_path=chart_path,
-                                chat_id=PUBLIC_CHAT_ID
-                            )
-                            
-                            if resp and "response" in resp:
-                                msg_data = resp["response"]
-                                if msg_data and "result" in msg_data:
-                                    msg_id = msg_data["result"]["message_id"]
-                                    # Now we store metadata so we can REGENERATE the text later
-                                    self.session_msg_ids[session_id] = {
-                                        "msg_id": msg_id,
-                                        "name": s_name,
-                                        "open": open_p,
-                                        "history": history_text
-                                    }
-                                    self.last_session_update = current_time
-                                    self._save_state()
-                        else:
-                            print(f"  [TG] Skipped sending session open for {s_name} (booting)")
+                        # Always send session status on discovery (even during boot) 
+                        # so the user knows the bot is actively tracking the current session.
+                        resp = tg.send_session_open(
+                            session_name=s_name, 
+                            open_price=open_p, 
+                            current_price=latest_price if is_mid else None,
+                            history=history_text,
+                            high=self.session_data[session_id]["high"],
+                            low=self.session_data[session_id]["low"],
+                            chart_path=chart_path,
+                            chat_id=PUBLIC_CHAT_ID
+                        )
+                        
+                        if resp and "response" in resp:
+                            msg_data = resp["response"]
+                            if msg_data and "result" in msg_data:
+                                msg_id = msg_data["result"]["message_id"]
+                                # Now we store metadata so we can REGENERATE the text later
+                                self.session_msg_ids[session_id] = {
+                                    "msg_id": msg_id,
+                                    "name": s_name,
+                                    "open": open_p,
+                                    "history": history_text
+                                }
+                                self.last_session_update = current_time
+                                self._save_state()
 
 
                     # Update High/Low with current candle wicks
