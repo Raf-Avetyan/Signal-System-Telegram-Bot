@@ -251,16 +251,21 @@ def send_strong(side, total_points, confirmations, indicators_list, price=None, 
     side_emoji = "🟢" if side == "LONG" else "🔴"
     
     ind_lines = []
+    tfs = set()
     for ind in indicators_list:
         # Clean up internal names for better look
         name = ind['name'].replace("Ponch_", "").replace("_", " ")
         sig = ind['signal'].replace("ENTRY ", "")
+        tf_val = ind.get('tf', 'N/A')
         ind_lines.append(f"• {name}: {sig} (+{ind['points']})")
+        tfs.add(tf_val)
+    
     ind_str = "\n".join(ind_lines)
+    tf_summary = ", ".join(sorted(list(tfs)))
 
     msg = (
         f"<b>{emoji} STRONG {side} CONFLUENCE</b>\n"
-        f"<b>{side_emoji} Market Divergence Detected</b>\n\n"
+        f"<b>{side_emoji} Market Divergence Detected [{tf_summary}]</b>\n\n"
         f"<b>Confluence:</b> {confirmations} Systems Agree\n"
         f"<b>Total Weight:</b> {total_points} Points\n"
     )
@@ -292,16 +297,21 @@ def send_extreme(side, total_points, confirmations, indicators_list, price=None,
     side_emoji = "🟢" if side == "LONG" else "🔴"
     
     ind_lines = []
+    tfs = set()
     for ind in indicators_list:
         # Clean up internal names for better look
         name = ind['name'].replace("Ponch_", "").replace("_", " ")
         sig = ind['signal'].replace("ENTRY ", "")
+        tf_val = ind.get('tf', 'N/A')
         ind_lines.append(f"• {name}: {sig} (+{ind['points']})")
+        tfs.add(tf_val)
+    
     ind_str = "\n".join(ind_lines)
+    tf_summary = ", ".join(sorted(list(tfs)))
 
     msg = (
         f"<b>{emoji} EXTREME {side} CONFLUENCE</b>\n"
-        f"<b>{side_emoji} High-Alpha Setup Identified</b>\n\n"
+        f"<b>{side_emoji} High-Alpha Setup Identified [{tf_summary}]</b>\n\n"
         f"<b>Confluence:</b> {confirmations} Systems Agree\n"
         f"<b>Total Weight:</b> {total_points} Points\n"
     )

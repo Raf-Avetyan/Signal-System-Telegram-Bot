@@ -89,16 +89,43 @@ f_draw_lvl(val, txt, col, style, width, x_off) =>
 // Draw Levels with offsets to prevent overlapping
 f_draw_lvl(pdh, "PDH", color.gray, line.style_dotted, 1, 6)
 f_draw_lvl(pdl, "PDL", color.gray, line.style_dotted, 1, 6)
-f_draw_lvl(d_open, "DO", color.white, line.style_dotted, 1, 6)
+// --- Combined Open Levels Logic ---
+string txt_open = "DO"
+color col_open = color.white
+bool skip_wo = false
+bool skip_mo = false
+
+if d_open == w_open and d_open == m_open
+    txt_open := "DO+WO+MO"
+    col_open := color.yellow
+    skip_wo := true
+    skip_mo := true
+else if d_open == w_open
+    txt_open := "DO+WO"
+    col_open := color.fuchsia
+    skip_wo := true
+else if d_open == m_open
+    txt_open := "DO+MO"
+    col_open := color.red
+    skip_mo := true
+
+f_draw_lvl(d_open, txt_open, col_open, line.style_dotted, 1, 6)
+
+if not skip_wo
+    if w_open == m_open
+        f_draw_lvl(w_open, "WO+MO", color.purple, line.style_dotted, 1, 6)
+        skip_mo := true
+    else
+        f_draw_lvl(w_open, "WO", color.fuchsia, line.style_dotted, 1, 6)
+
+if not skip_mo
+    f_draw_lvl(m_open, "MO", color.red, line.style_dotted, 1, 6)
 
 f_draw_lvl(pwh, "PWH", color.orange, line.style_dotted, 1, 6)
 f_draw_lvl(pwl, "PWL", color.blue, line.style_solid, 2, 6)
 
 f_draw_lvl(pmh, "PMH", color.purple, line.style_dotted, 1, 6)
 f_draw_lvl(pml, "PML", color.purple, line.style_dotted, 1, 6)
-
-f_draw_lvl(w_open, "WO", color.fuchsia, line.style_dotted, 1, 11)   // Shifted right
-f_draw_lvl(m_open, "MO", color.red, line.style_dotted, 1, 16)       // Shifted more
 
 f_draw_lvl(d_res, "Pump", color.red, line.style_solid, 2, 6)
 f_draw_lvl(d_sup, "Dump", color.green, line.style_solid, 2, 6)

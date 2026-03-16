@@ -73,6 +73,7 @@ class ConfirmationTracker:
                 "name":   sig["indicator"],
                 "signal": f"ENTRY {sig['signal']}" if not sig["signal"].startswith("ENTRY") else sig["signal"],
                 "points": sig["points"],
+                "tf":     sig.get("tf", "N/A"),
             }
             for sig in by_indicator.values()
         ]

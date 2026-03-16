@@ -1101,6 +1101,7 @@ class PonchBot:
                         "indicator": f"Ponch_RangeTrader_VolZone_{vt['level']}",
                         "signal":    f"VOL ZONE TOUCH: {vt['level']}",
                         "points":    vt["points"],
+                        "tf":        tf
                     })
 
         # ─── Trade Signals (Channels) ────────────────────
@@ -1109,7 +1110,7 @@ class PonchBot:
             sig_key = f"tr_sig_{tf}_{sig['signal']}_{candle_ts}"
             if sig_key not in self.sent_signals:
                 self.sent_signals.add(sig_key)
-                print(f"  [SIG] Trade Signal [{tf}] {sig['signal']} @ {sig['price']:,.2f}")
+                sig["tf"] = tf
                 self.confirmations.add_signal(sig)
 
         # 2. Momentum confirmation
@@ -1118,6 +1119,7 @@ class PonchBot:
             sig_key = f"mom_sig_{tf}_{sig['side']}_{candle_ts}"
             if sig_key not in self.sent_signals:
                 self.sent_signals.add(sig_key)
+                sig["tf"] = tf
                 self.confirmations.add_signal(sig)
 
         # 3. Range trader confirmation
@@ -1126,6 +1128,7 @@ class PonchBot:
             sig_key = f"rng_sig_{tf}_{sig['signal']}_{candle_ts}"
             if sig_key not in self.sent_signals:
                 self.sent_signals.add(sig_key)
+                sig["tf"] = tf
                 self.confirmations.add_signal(sig)
 
         # 4. Flow confirmation
@@ -1134,6 +1137,7 @@ class PonchBot:
             sig_key = f"flow_sig_{tf}_{sig['side']}_{candle_ts}"
             if sig_key not in self.sent_signals:
                 self.sent_signals.add(sig_key)
+                sig["tf"] = tf
                 self.confirmations.add_signal(sig)
 
         # ─── Scalp Momentum System ───────────────────────
