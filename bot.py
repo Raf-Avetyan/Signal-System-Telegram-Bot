@@ -1079,23 +1079,35 @@ class PonchBot:
         if tf == "5m" and self.levels and not self.is_booting:
             prev_close = float(prev["Close"])
             
-            # 1. Identify all levels within threshold
+            # 1. Identify all levels with directional momentum
             triggered_levels = []
             for lvl_name in APPROACH_LEVELS:
                 lvl_price = self.levels.get(lvl_name)
-                if lvl_price:
-                    dist_pct = abs(close - lvl_price) / lvl_price
-                    if dist_pct <= APPROACH_THRESHOLD:
-                        # Tie-breaker logic: order in APPROACH_LEVELS matters (PDH/PDL higher)
-                        importance = APPROACH_LEVELS.index(lvl_name)
-                        triggered_levels.append((dist_pct, importance, lvl_name, lvl_price))
+                if not lvl_price: continue
+                
+                dist_pct = abs(close - lvl_price) / lvl_price
+                prev_dist = abs(prev_close - lvl_price) / lvl_price
+                # Velocity > 0 means we are getting closer
+                velocity = prev_dist - dist_pct
+
+                # ALERT LOGIC:
+                # A. Extremely Close: Within 0.1%, alert regardless of motion
+                is_urgent = (dist_pct <= 0.001)
+                # B. Approach Momentum: Within 0.4%, but must be moving DECISIVELY towards it
+                # (velocity > 0.0002 means price moved 0.02% towards level in 5 minutes)
+                is_approaching = (dist_pct <= 0.004) and (velocity >= 0.0002)
+
+                if is_urgent or is_approaching:
+                    importance = APPROACH_LEVELS.index(lvl_name)
+                    # We store (distance, importance, name, price, is_urgent)
+                    triggered_levels.append((dist_pct, importance, lvl_name, lvl_price, is_urgent))
 
             if triggered_levels:
-                # Sort primarily by importance (list order), then by distance.
-                # This ensures we report "PDH" instead of "Pump" if we are near both.
-                triggered_levels.sort(key=lambda x: (x[1], x[0]))
+                # 2. Sort primarily by CLOSENESS (dist_pct), then by importance.
+                # This fixes "PDH showing instead of PWH" when both are near.
+                triggered_levels.sort(key=lambda x: (x[0], x[1]))
                 
-                closest_dist, importance, lvl_name, lvl_price = triggered_levels[0]
+                closest_dist, importance, lvl_name, lvl_price, is_urgent = triggered_levels[0]
                 
                 # 2. Check cooldown and threshold crossings
                 prev_dist = abs(prev_close - lvl_price) / lvl_price
