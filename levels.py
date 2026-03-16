@@ -2,6 +2,7 @@
 
 import pandas as pd
 import numpy as np
+from datetime import datetime, timezone, timedelta
 from config import ADR_LEN, SWEEP_POINTS, SWEEP_STRENGTH, VOL_ZONE_POINTS, VOL_ZONE_STRENGTH
 
 
@@ -19,47 +20,75 @@ def calculate_levels(daily_df, weekly_df=None, monthly_df=None):
     if daily_df.empty:
         return levels
 
-    # ─── Daily Open (today's open) ────────────────────
-    levels["DO"] = float(daily_df["Open"].iloc[-1])
+    # Get current UTC date to anchor "Today" vs "Yesterday"
+    now_utc = datetime.now(timezone.utc).date()
 
-    # ─── Previous Day High / Low ──────────────────────
-    if len(daily_df) >= 2:
-        levels["PDH"] = float(daily_df["High"].iloc[-2])
-        levels["PDL"] = float(daily_df["Low"].iloc[-2])
-    else:
-        levels["PDH"] = levels["PDL"] = levels["DO"]
-
-    # ─── Previous Week High / Low ─────────────────────
-    if weekly_df is not None and len(weekly_df) >= 2:
-        levels["PWH"] = float(weekly_df["High"].iloc[-2])
-        levels["PWL"] = float(weekly_df["Low"].iloc[-2])
-        levels["WO"]  = float(weekly_df["Open"].iloc[-1])
-    else:
-        # Approximate from daily data
-        if len(daily_df) >= 7:
-            last_week = daily_df.iloc[-7:-1]
-            levels["PWH"] = float(last_week["High"].max())
-            levels["PWL"] = float(last_week["Low"].min())
+    # 1. DAILY LEVELS (DO, PDH, PDL)
+    # Find today's candle
+    today_df = daily_df[daily_df.index.date == now_utc]
+    if not today_df.empty:
+        # Today exists in data
+        levels["DO"] = float(today_df["Open"].iloc[0])
+        # History is everything BEFORE today
+        history = daily_df[daily_df.index.date < now_utc]
+        if not history.empty:
+            prev_day = history.iloc[-1]
+            levels["PDH"] = float(prev_day["High"])
+            levels["PDL"] = float(prev_day["Low"])
+            levels["PD_Date"] = prev_day.name.strftime("%d.%m.%Y")
         else:
-            levels["PWH"] = levels.get("PDH", levels["DO"])
-            levels["PWL"] = levels.get("PDL", levels["DO"])
+            levels["PDH"] = levels["PDL"] = levels["DO"]
+    else:
+        # Fallback to simple iloc if today's candle is not yet started or missing
+        levels["DO"] = float(daily_df["Open"].iloc[-1])
+        if len(daily_df) >= 2:
+            levels["PDH"] = float(daily_df["High"].iloc[-2])
+            levels["PDL"] = float(daily_df["Low"].iloc[-2])
+        else:
+            levels["PDH"] = levels["PDL"] = levels["DO"]
+
+    # 2. WEEKLY LEVELS (WO, PWH, PWL)
+    if weekly_df is not None and not weekly_df.empty:
+        # Start of current week (last row usually)
+        levels["WO"] = float(weekly_df["Open"].iloc[-1])
+        # Previous Week
+        if len(weekly_df) >= 2:
+            prev_week = weekly_df.iloc[-2]
+            levels["PWH"] = float(prev_week["High"])
+            levels["PWL"] = float(prev_week["Low"])
+        else:
+            levels["PWH"] = levels["PWL"] = levels["WO"]
+    else:
+        # Approximate from daily
         levels["WO"] = levels["DO"]
-
-    # ─── Previous Month High / Low ────────────────────
-    if monthly_df is not None and len(monthly_df) >= 2:
-        levels["PMH"] = float(monthly_df["High"].iloc[-2])
-        levels["PML"] = float(monthly_df["Low"].iloc[-2])
-        levels["MO"]  = float(monthly_df["Open"].iloc[-1])
-    else:
-        # Approximate from daily data
-        if len(daily_df) >= 30:
-            last_month = daily_df.iloc[-30:-1]
-            levels["PMH"] = float(last_month["High"].max())
-            levels["PML"] = float(last_month["Low"].min())
+        history = daily_df[daily_df.index.date < now_utc]
+        if len(history) >= 7:
+            last_7 = history.iloc[-7:]
+            levels["PWH"] = float(last_7["High"].max())
+            levels["PWL"] = float(last_7["Low"].min())
         else:
-            levels["PMH"] = levels.get("PWH", levels["DO"])
-            levels["PML"] = levels.get("PWL", levels["DO"])
+            levels["PWH"] = levels["PDH"]
+            levels["PWL"] = levels["PDL"]
+
+    # 3. MONTHLY LEVELS (MO, PMH, PML)
+    if monthly_df is not None and not monthly_df.empty:
+        levels["MO"] = float(monthly_df["Open"].iloc[-1])
+        if len(monthly_df) >= 2:
+            prev_month = monthly_df.iloc[-2]
+            levels["PMH"] = float(prev_month["High"])
+            levels["PML"] = float(prev_month["Low"])
+        else:
+            levels["PMH"] = levels["PML"] = levels["MO"]
+    else:
         levels["MO"] = levels["DO"]
+        history = daily_df[daily_df.index.date < now_utc]
+        if len(history) >= 30:
+            last_30 = history.iloc[-30:]
+            levels["PMH"] = float(last_30["High"].max())
+            levels["PML"] = float(last_30["Low"].min())
+        else:
+            levels["PMH"] = levels["PWH"]
+            levels["PML"] = levels["PWL"]
 
     # Volatility Zones (ADR-based) - EXCLUDE today's live candle to match Pine Script [1] logic
     lookback = min(ADR_LEN, len(daily_df) - 1)

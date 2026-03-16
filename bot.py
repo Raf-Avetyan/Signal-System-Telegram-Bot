@@ -891,7 +891,8 @@ class PonchBot:
 
         if self.levels:     
             now = datetime.now(timezone.utc)
-            print(f"  [LEVELS] Updated for {now.strftime('%d.%m.%Y')}:")
+            pd_date = self.levels.get("PD_Date", "N/A")
+            print(f"  [LEVELS] Updated for {now.strftime('%d.%m.%Y')} (PD: {pd_date}):")
             for k in ["DO", "PDH", "PDL", "PWH", "PWL", "PMH", "PML", "Pump", "Dump"]:
                 val = self.levels.get(k)
                 if val: print(f"    - {k}: {val:,.2f}")
