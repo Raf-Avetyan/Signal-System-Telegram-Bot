@@ -1072,6 +1072,7 @@ class PonchBot:
                         "indicator": f"Ponch_RangeTrader_Sweep_{sw['level']}",
                         "signal":    f"LIQUIDITY SWEEP: {sw['level']}",
                         "points":    sw["points"],
+                        "tf":        tf
                     })
 
         # ─── Volatility Zone Touches ─────────────────────
