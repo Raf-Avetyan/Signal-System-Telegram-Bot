@@ -123,8 +123,17 @@ class PonchBot:
         tg.send_startup()
         print("[OK] Startup message sent to Telegram\n")
 
-        # Initial data load
-        self._update_levels()
+        # Smart initial data load: only update if needed/missing
+        now = datetime.now(timezone.utc)
+        today = now.strftime("%d.%m.%Y")
+        
+        if not self.levels or today != self.last_levels_date:
+            print("[STARTUP] Levels missing or outdated. Updating...")
+            self._update_levels()
+            self.last_levels_date = today
+            self._save_state()
+        else:
+            print(f"[STARTUP] Levels for {today} already loaded. Skipping recalculation.")
 
         while True:
             try:
@@ -677,6 +686,7 @@ class PonchBot:
         """Update levels at the start of a new day."""
         today = now.strftime("%d.%m.%Y")
         if today != self.last_levels_date:
+            print(f"\n[SYSTEM] New day detected ({today}). Resetting data...")
             self.daily_report_msg_id = None # Clear OLD one before sending NEW one
             self._update_levels()
             self._send_daily_report(now)
@@ -685,9 +695,9 @@ class PonchBot:
             self.sent_signals.clear()  # Reset duplicate tracking
             self.session_history.clear() # Reset session history for new day
             self.session_msg_ids.clear() # Reset message IDs for new day
-            self.session_data.clear()    # Clear old session data for new day
-            self.sent_sessions.clear()   # New: Reset session recap tracking
-            self.approach_alerts.clear() # New: Reset level approach tracking
+            self.session_data.clear()   # Actually clear old sessions data
+            self.sent_sessions.clear()   # Reset session recap tracking
+            self.approach_alerts.clear() # Reset level approach tracking
             self._save_state()
         
         self._reconstruct_session_history(now.hour)

@@ -108,9 +108,6 @@ class ScalpTracker:
 
             if zone == "NEUTRAL":
                 # Zone exit → CONFIRMED
-                self.last_side = self.side # Store for RESTING logic
-                self.state = "RESTING"    # Move to RESTING instead of IDLE
-                self.last_processed_ts = candle_ts # Update cooldown timestamp
                 entry = close
                 calc = self._calc_sl_tp(entry, atr_value, self.side)
                 events.append({
@@ -119,32 +116,35 @@ class ScalpTracker:
                     "entry":    entry,
                     **calc,
                 })
+                
+                self.last_side = self.side # Store for RESTING logic
+                self.state = "RESTING"    # Move to RESTING to prevent immediate re-entry
+                self.last_processed_ts = candle_ts # Update cooldown timestamp
                 self.side = None
                 self.entry_price = None
 
             elif zone == opposite_zone:
                 # Crossed directly to opposite zone → CLOSED without confirmation
-                self.last_side = self.side
-                self.state = "RESTING" 
-                self.last_processed_ts = candle_ts # Update cooldown timestamp
                 events.append({
                     "type":  "CLOSED",
                     "side":  self.side,
                     "price": close,
                 })
                 
-                # Cooldown check before switching
-                if candle_ts and candle_ts == self.last_processed_ts:
-                    self.side = None
-                    self.entry_price = None
-                else:
-                    # Switch directly to the new zone's entry
-                    self.last_side = self.side # Remember for buffer
+                self.last_side = self.side
+                self.state = "RESTING" 
+                self.last_processed_ts = candle_ts # Update cooldown timestamp
+                
+                # Switch directly to the new zone's entry if no cooldown on same candle
+                if not (candle_ts and candle_ts == self.last_processed_ts):
                     self.side = "SHORT" if opposite_zone == "OB" else "LONG"
                     self.entry_price = close
                     self.state = "ZONE_ENTRY"
                     events.append({"type": "OPEN", "side": self.side, "price": close})
                     events.append({"type": "PREPARE", "side": self.side, "price": close})
+                else:
+                    self.side = None
+                    self.entry_price = None
 
         elif self.state == "RESTING":
             # Buffer check: wait for RSI to move away from the edge
