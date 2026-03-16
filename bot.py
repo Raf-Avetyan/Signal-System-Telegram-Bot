@@ -608,8 +608,8 @@ class PonchBot:
                         open_p, high_p, low_p, _ = self.get_session_ohlc(s_times["open"], current_hour + 1)
                         if open_p is None:
                             open_p = latest_price
-                        if high_p is None: high_p = current_candle_high
-                        if low_p is None: low_p = current_candle_low
+                        if high_p is None: high_p = latest_price
+                        if low_p is None: low_p = latest_price
                             
                         self.session_data[session_id] = {
                             "open_price": open_p,
