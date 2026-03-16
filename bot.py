@@ -380,9 +380,25 @@ class PonchBot:
     def _generate_current_chart(self, output_path="session_chart.png", show_sessions=True):
         """Generate a fresh chart image with current levels and sessions."""
         try:
+            # Prepare session stats for visual sync (High/Low)
+            stats_map = {}
+            if self.session_data:
+                for sid, data in self.session_data.items():
+                    # sid is "ASIA_15.03.2024", we need "ASIA"
+                    s_name = sid.split("_")[0]
+                    stats_map[s_name] = {
+                        "high": data.get("high"),
+                        "low": data.get("low")
+                    }
+
             chart_df = fetch_klines(interval="1h", limit=48)
             if not chart_df.empty and self.levels:
-                return generate_daily_levels_chart(chart_df, self.levels, output_path=output_path, show_sessions=show_sessions)
+                return generate_daily_levels_chart(
+                    chart_df, self.levels, 
+                    output_path=output_path, 
+                    show_sessions=show_sessions,
+                    session_stats=stats_map
+                )
         except Exception as e:
             print(f"[CHARTING] Failed to generate session chart: {e}")
         return None

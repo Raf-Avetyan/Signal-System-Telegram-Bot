@@ -7,15 +7,19 @@ import os
 
 from config import SESSIONS, get_adjusted_sessions
 
-def generate_daily_levels_chart(df, levels, symbol="BTCUSDT", timeframe="1H", output_path="daily_chart.png", show_sessions=True):
+def generate_daily_levels_chart(df, levels, symbol="BTCUSDT", timeframe="1H", output_path="daily_chart.png", show_sessions=True, session_stats=None):
     """
     Generate a candlestick chart with daily levels as horizontal lines.
+    session_stats: { session_name: {"high": float, "low": float} or {"high": float, "low": float, "id": str} }
     """
     if df.empty or not levels:
         return None
 
     # Filter to last 48 candles (original resolution)
     plot_df = df.tail(48).copy()
+    
+    # ... (skipping unchanged code for brevity in instruction, but I'll provide full block)
+    # Actually I should provide the full modified block to avoid errors.
 
     hlines = []
     hcolors = []
@@ -158,18 +162,31 @@ def generate_daily_levels_chart(df, levels, symbol="BTCUSDT", timeframe="1H", ou
                                 color=color, fontsize=11, fontweight='bold', ha='left')
 
                     # 2. Session High/Low Labels
+                    # Priority: Use provided session_stats (live 5s tracking) if available
+                    # otherwise fallback to candle-based max/min
                     s_high = session_df["High"].max()
                     s_low = session_df["Low"].min()
                     ts_high = session_df["High"].idxmax()
                     ts_low = session_df["Low"].idxmin()
+                    
+                    if session_stats and s_name in session_stats:
+                        live_high = session_stats[s_name].get("high")
+                        live_low = session_stats[s_name].get("low")
+                        if live_high: s_high = max(s_high, live_high)
+                        if live_low: s_low = min(s_low, live_low)
+
                     idx_high = plot_df.index.get_loc(ts_high)
                     idx_low = plot_df.index.get_loc(ts_low)
                     
                     short_name = s_name[:2]
-                    ax.text(idx_high, s_high, f"{short_name}(H) {s_high:,.0f}", color=color, 
+                    # Use :,.2f if there are decimals or just :,.0f if clean
+                    h_fmt = f"{s_high:,.2f}" if s_high % 1 != 0 else f"{s_high:,.0f}"
+                    l_fmt = f"{s_low:,.2f}" if s_low % 1 != 0 else f"{s_low:,.0f}"
+                    
+                    ax.text(idx_high, s_high, f"{short_name}(H) {h_fmt}", color=color, 
                             fontsize=9, ha='center', va='bottom', fontweight='bold',
                             bbox=dict(facecolor='#131722', alpha=0.8, pad=1, edgecolor=color, linewidth=0.5))
-                    ax.text(idx_low, s_low, f"{short_name}(L) {s_low:,.0f}", color=color, 
+                    ax.text(idx_low, s_low, f"{short_name}(L) {l_fmt}", color=color, 
                             fontsize=9, ha='center', va='top', fontweight='bold',
                             bbox=dict(facecolor='#131722', alpha=0.8, pad=1, edgecolor=color, linewidth=0.5))
 
