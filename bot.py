@@ -1013,7 +1013,7 @@ class PonchBot:
 
 
         # ─── Price Approaching Key Levels ────────────────
-        if tf == "1h" and self.levels and not self.is_booting:
+        if tf == "5m" and self.levels and not self.is_booting:
             prev_close = float(prev["Close"])
             for lvl_name in APPROACH_LEVELS:
                 lvl_price = self.levels.get(lvl_name)

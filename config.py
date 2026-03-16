@@ -111,7 +111,7 @@ VOLUME_AVG_PERIOD = 20                    # 20-candle volume SMA
 # ─── PRICE APPROACHING ALERTS ────────────────
 APPROACH_THRESHOLD = 0.002       # 0.2% distance from level
 APPROACH_COOLDOWN = 10800          # 3 hour cooldown per level
-APPROACH_LEVELS = ["Pump", "Dump", "PumpMax", "DumpMax", "DO", "PDH", "PDL", "PWH", "PWL"]  # Which levels to watch
+APPROACH_LEVELS = ["Pump", "Dump", "PumpMax", "DumpMax", "DO", "PDH", "PDL", "PWH", "PWL", "PMH", "PML"]  # Which levels to watch
 
 # ─── ADVANCED ALERTS (NEW) ───────────────────
 OI_CHANGE_THRESHOLD = 0.015      # 1.5% change in OI to trigger divergence check
