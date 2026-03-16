@@ -3,106 +3,50 @@
    "session_msg_ids": {},
    "confirmations": {
       "signals": {
-         "LONG": [
-            {
-               "side": "LONG",
-               "signal": "L",
-               "points": 1,
-               "strength": "Low",
-               "price": 73941.0,
-               "indicator": "Ponch_Flow_Confirm",
-               "note": "Confirm",
-               "tf": "5m",
-               "timestamp": 1773683325.0120335
-            },
-            {
-               "side": "LONG",
-               "signal": "L",
-               "points": 1,
-               "strength": "Low",
-               "price": 74159.7,
-               "indicator": "Ponch_Flow_Confirm",
-               "note": "Confirm",
-               "tf": "5m",
-               "timestamp": 1773684525.9104173
-            }
-         ],
+         "LONG": [],
          "SHORT": [
             {
                "side": "SHORT",
                "signal": "S+",
                "points": 2,
                "strength": "Medium",
-               "price": 73986.5,
-               "indicator": "Ponch_Trader",
-               "note": "S+ confirmation",
-               "tf": "4h",
-               "timestamp": 1773683269.5152931
-            },
-            {
-               "side": "SHORT",
-               "signal": "S+",
-               "points": 2,
-               "strength": "Medium",
-               "price": 74000.2,
+               "price": 74323.8,
                "indicator": "Ponch_Trader",
                "note": "S+ confirmation",
                "tf": "5m",
-               "timestamp": 1773683277.511005
+               "timestamp": 1773686062.7070305
             },
             {
                "side": "SHORT",
                "signal": "S+",
                "points": 2,
                "strength": "Medium",
-               "price": 74082.1,
-               "indicator": "Ponch_Trader",
-               "note": "S+ confirmation",
-               "tf": "5m",
-               "timestamp": 1773684502.1095946
-            },
-            {
-               "side": "SHORT",
-               "signal": "S+",
-               "points": 2,
-               "strength": "Medium",
-               "price": 74191.9,
+               "price": 74319.1,
                "indicator": "Ponch_Trader",
                "note": "S+ confirmation",
                "tf": "15m",
-               "timestamp": 1773684526.007689
-            },
-            {
-               "side": "SHORT",
-               "signal": "S++",
-               "points": 3,
-               "strength": "Strong",
-               "price": 74287.9,
-               "indicator": "Ponch_Trader",
-               "note": "S++ confirmation",
-               "tf": "5m",
-               "timestamp": 1773684590.7126265
+               "timestamp": 1773686062.7153742
             },
             {
                "side": "SHORT",
                "signal": "S",
                "points": 1,
                "strength": "Low",
-               "price": 74233.2,
-               "indicator": "Ponch_Momentum_Confirm",
+               "price": 74061.4,
+               "indicator": "Ponch_Flow_Confirm",
                "note": "Confirm",
                "tf": "5m",
-               "timestamp": 1773684630.3081825
+               "timestamp": 1773686373.8158638
             }
          ]
       },
       "last_strong_count": {
          "LONG": 0,
-         "SHORT": 2
+         "SHORT": 3
       },
       "last_extreme_count": {
          "LONG": 0,
-         "SHORT": 0
+         "SHORT": 3
       }
    },
    "session_data": {
@@ -129,6 +73,7 @@
       "flow_sig_5m_LONG_2026-03-16 18:05",
       "tr_sig_5m_S+_2026-03-16 18:05",
       "tr_sig_5m_S++_2026-03-16 18:05",
+      "tr_sig_5m_S+_2026-03-16 18:30",
       "tr_sig_5m_L+_2026-03-16 15:50",
       "flow_sig_15m_SHORT_2026-03-16 14:30",
       "flow_sig_4h_LONG_2026-03-16 12:00",
@@ -143,10 +88,13 @@
       "conf_SHORT_STRONG_2026-03-16 18:10",
       "flow_sig_1h_SHORT_2026-03-16 14:00",
       "tr_sig_4h_S+_2026-03-16 12:00",
+      "tr_sig_15m_S+_2026-03-16 18:30",
       "volspike_15m_2026-03-16 14:30",
       "conf_SHORT_EXTREME_2026-03-16 14:00",
+      "tr_sig_5m_S+_2026-03-16 18:15",
       "flow_sig_4h_SHORT_2026-03-16 12:00",
       "rng_sig_15m_S++_2026-03-16 16:00",
+      "flow_sig_5m_SHORT_2026-03-16 18:35",
       "tr_sig_5m_S+_2026-03-16 17:45",
       "tr_sig_5m_S+_2026-03-16 16:45",
       "flow_sig_5m_LONG_2026-03-16 17:45",
@@ -157,6 +105,7 @@
       "tr_sig_5m_L+_2026-03-16 15:55",
       "tr_sig_4h_S+_2026-03-16 16:00",
       "rng_sig_5m_L++_2026-03-16 16:05",
+      "conf_SHORT_EXTREME_2026-03-16 18:39",
       "tr_sig_5m_S+_2026-03-16 17:00",
       "conf_LONG_STRONG_2026-03-16 16:07"
    ],
@@ -166,7 +115,7 @@
    ],
    "approach_alerts": {
       "Pump": 1773676640.1090038,
-      "PWH": 1773682264.4090729,
+      "PWH": 1773687055.2109716,
       "DO": 1773678009.1036253
    },
    "last_funding_alert": 0,
