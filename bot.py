@@ -1086,8 +1086,8 @@ class PonchBot:
                 
                 last_alert = self.approach_alerts.get(lvl_name, 0)
                 if (is_new_proximity or (current_time - last_alert > APPROACH_COOLDOWN)):
-                    # Safety throttle: never more than once per 10 mins for the SAME level
-                    if current_time - last_alert > 600:
+                    # Safety throttle: never more than once per HOUR for the SAME level
+                    if current_time - last_alert > 3600:
                         self.queue_alert(
                             alert_dict={
                                 "type": "APPROACHING LEVEL",
