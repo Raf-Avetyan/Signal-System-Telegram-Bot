@@ -441,12 +441,14 @@ class PonchBot:
             if latest_price is None:
                 latest_price = float(df.iloc[-1]["Close"])
 
+            # Process timeframe and capture ATR/TS for confluence reference
+            tf_atr, tf_ts = self._process_timeframe(tf, df, now)
+            
             # Use 1h ATR for confluence targets if available, otherwise fallback
-            if tf == "1h" or (ref_atr == 0 and "ATR" in last_c):
-                ref_atr = float(last_c["ATR"]) if "ATR" in last_c else 0
-                ref_ts  = last_c.name.strftime("%Y-%m-%d %H:%M") if hasattr(last_c.name, 'strftime') else str(last_c.name)
-
-            self._process_timeframe(tf, df, now)
+            if tf == "1h" or ref_atr == 0:
+                if tf_atr > 0:
+                    ref_atr = tf_atr
+                    ref_ts  = tf_ts
 
         # ─── Check Confirmation Aggregation (Once per Tick) ──────
         if latest_price is not None:
@@ -949,7 +951,7 @@ class PonchBot:
         df = calculate_momentum(df)
 
         if df.empty or len(df) < 2:
-            return
+            return 0, ""
 
         curr = df.iloc[-1]
         prev = df.iloc[-2]
@@ -1210,6 +1212,8 @@ class PonchBot:
             "High": price_high,
             "Low":  price_low,
         }
+
+        return atr_val, candle_ts
 
 
 # ═══════════════════════════════════════════════════════════════
