@@ -78,12 +78,14 @@ class SignalTracker:
                 sig["closed_at"] = datetime.now(timezone.utc).isoformat()
                 changed = True
                 events.append({"type": "SL", "sig": sig})
+                continue
             elif not is_long and current_price >= sig["sl"]:
                 sig["sl_hit"] = True
                 sig["status"] = "SL"
                 sig["closed_at"] = datetime.now(timezone.utc).isoformat()
                 changed = True
                 events.append({"type": "SL", "sig": sig})
+                continue
 
             # Check TPs (progressive)
             if is_long:
