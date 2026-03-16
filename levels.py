@@ -61,18 +61,22 @@ def calculate_levels(daily_df, weekly_df=None, monthly_df=None):
             levels["PML"] = levels.get("PWL", levels["DO"])
         levels["MO"] = levels["DO"]
 
-    # ─── Volatility Zones (ADR-based) ─────────────────
-    lookback = min(ADR_LEN, len(daily_df))
-    recent = daily_df.iloc[-lookback:]
+    # Volatility Zones (ADR-based) - EXCLUDE today's live candle to match Pine Script [1] logic
+    lookback = min(ADR_LEN, len(daily_df) - 1)
+    if lookback < 1:
+        avg_pump = avg_dump = max_pump = max_dump = 0
+    else:
+        # Use only completed candles for the average (excluding today)
+        recent = daily_df.iloc[-lookback-1:-1]
 
-    # Average pump/dump
-    pumps = recent["High"] - recent["Open"]
-    dumps = recent["Open"] - recent["Low"]
+        # Average pump/dump
+        pumps = recent["High"] - recent["Open"]
+        dumps = recent["Open"] - recent["Low"]
 
-    avg_pump = float(pumps.mean())
-    avg_dump = float(dumps.mean())
-    max_pump = float(pumps.max())
-    max_dump = float(dumps.max())
+        avg_pump = float(pumps.mean())
+        avg_dump = float(dumps.mean())
+        max_pump = float(pumps.max())
+        max_dump = float(dumps.max())
 
     do = levels["DO"]
 
