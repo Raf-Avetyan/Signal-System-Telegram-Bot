@@ -425,6 +425,10 @@ class PonchBot:
         current_candle_high = 0
         current_candle_low = 9999999
         
+        # Track reference values for confluence alerts
+        ref_atr = 0
+        ref_ts  = now.strftime("%Y-%m-%d %H:%M")
+        
         for tf in SIGNAL_TIMEFRAMES:
             if tf not in data: continue
             df = data[tf]
@@ -437,7 +441,64 @@ class PonchBot:
             if latest_price is None:
                 latest_price = float(df.iloc[-1]["Close"])
 
+            # Use 1h ATR for confluence targets if available, otherwise fallback
+            if tf == "1h" or (ref_atr == 0 and "ATR" in last_c):
+                ref_atr = float(last_c["ATR"]) if "ATR" in last_c else 0
+                ref_ts  = last_c.name.strftime("%Y-%m-%d %H:%M") if hasattr(last_c.name, 'strftime') else str(last_c.name)
+
             self._process_timeframe(tf, df, now)
+
+        # ─── Check Confirmation Aggregation (Once per Tick) ──────
+        if latest_price is not None:
+            for side in ["LONG", "SHORT"]:
+                conf_events = self.confirmations.check_confirmations(side)
+                for ce in conf_events:
+                    # Calculate targets for confluence using reference ATR
+                    sl_m, tp1_m, tp2_m, tp3_m = 0.7, 0.7, 1.4, 2.1 
+                    if side == "LONG":
+                        sl_c  = latest_price - ref_atr * sl_m
+                        tp1_c = latest_price + ref_atr * tp1_m
+                        tp2_c = latest_price + ref_atr * tp2_m
+                        tp3_c = latest_price + ref_atr * tp3_m
+                    else:
+                        sl_c  = latest_price + ref_atr * sl_m
+                        tp1_c = latest_price - ref_atr * tp1_m
+                        tp2_c = latest_price - ref_atr * tp2_m
+                        tp3_c = latest_price - ref_atr * tp3_m
+
+                    if ce["type"] == "STRONG":
+                        tg.send_strong(
+                            side=ce["side"],
+                            total_points=ce["points"],
+                            confirmations=ce["confirmations"],
+                            indicators_list=ce["indicators"],
+                            price=latest_price,
+                            sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
+                            chat_id=PRIVATE_CHAT_ID
+                        )
+                        self.tracker.log_signal(
+                            side=ce["side"], entry=latest_price, sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
+                            tf="Confluence", timestamp=ref_ts
+                        )
+                        self._save_state()
+                        print(f"  [CONFLUENCE] ✅ STRONG {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
+
+                    elif ce["type"] == "EXTREME":
+                        tg.send_extreme(
+                            side=ce["side"],
+                            total_points=ce["points"],
+                            confirmations=ce["confirmations"],
+                            indicators_list=ce["indicators"],
+                            price=latest_price,
+                            sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
+                            chat_id=PRIVATE_CHAT_ID
+                        )
+                        self.tracker.log_signal(
+                            side=ce["side"], entry=latest_price, sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
+                            tf="Confluence", timestamp=ref_ts
+                        )
+                        self._save_state()
+                        print(f"  [CONFLUENCE] 🔥 EXTREME {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
 
         # ─── Update Performance Tracker & Success Teasers ────
         if latest_price is not None:
@@ -1137,71 +1198,6 @@ class PonchBot:
                 self._save_state()
                 print(f"  [TG] Scalp Closed [{tf}] {evt['side']}")
 
-        # ─── Check Confirmation Aggregation ──────────────
-        for side in ["LONG", "SHORT"]:
-            conf_events = self.confirmations.check_confirmations(side)
-            for ce in conf_events:
-                if ce["type"] == "STRONG":
-                    # Calculate targets for confluence
-                    sl_m, tp1_m, tp2_m, tp3_m = 0.7, 0.7, 1.4, 2.1 # Standard multipliers
-                    if side == "LONG":
-                        sl_c  = close - atr_val * sl_m
-                        tp1_c = close + atr_val * tp1_m
-                        tp2_c = close + atr_val * tp2_m
-                        tp3_c = close + atr_val * tp3_m
-                    else:
-                        sl_c  = close + atr_val * sl_m
-                        tp1_c = close - atr_val * tp1_m
-                        tp2_c = close - atr_val * tp2_m
-                        tp3_c = close - atr_val * tp3_m
-
-                    tg.send_strong(
-                        side=ce["side"],
-                        total_points=ce["points"],
-                        confirmations=ce["confirmations"],
-                        indicators_list=ce["indicators"],
-                        price=close,
-                        sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
-                        chat_id=PRIVATE_CHAT_ID
-                    )
-                    # Log for performance tracking
-                    self.tracker.log_signal(
-                        side=ce["side"], entry=close, sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
-                        tf="Confluence", timestamp=candle_ts
-                    )
-                    self._save_state() # Save confirmation send state
-                    print(f"  [TG] ✅ STRONG {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
-
-                elif ce["type"] == "EXTREME":
-                    # Calculate targets for confluence
-                    sl_m, tp1_m, tp2_m, tp3_m = 0.7, 0.7, 1.4, 2.1 # Standard multipliers
-                    if side == "LONG":
-                        sl_c  = close - atr_val * sl_m
-                        tp1_c = close + atr_val * tp1_m
-                        tp2_c = close + atr_val * tp2_m
-                        tp3_c = close + atr_val * tp3_m
-                    else:
-                        sl_c  = close + atr_val * sl_m
-                        tp1_c = close - atr_val * tp1_m
-                        tp2_c = close - atr_val * tp2_m
-                        tp3_c = close - atr_val * tp3_m
-
-                    tg.send_extreme(
-                        side=ce["side"],
-                        total_points=ce["points"],
-                        confirmations=ce["confirmations"],
-                        indicators_list=ce["indicators"],
-                        price=close,
-                        sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
-                        chat_id=PRIVATE_CHAT_ID
-                    )
-                    # Log for performance tracking
-                    self.tracker.log_signal(
-                        side=ce["side"], entry=close, sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
-                        tf="Confluence", timestamp=candle_ts
-                    )
-                    self._save_state() # Save confirmation send state
-                    print(f"  [TG] 🔥 EXTREME {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
 
         # ─── Store prev candle data ──────────────────────
         self.prev_candles[tf] = {
