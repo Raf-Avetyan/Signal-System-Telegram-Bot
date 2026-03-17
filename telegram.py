@@ -554,9 +554,7 @@ def send_market_alert(pct_change, duration_hours, start_price, end_price, chat_i
         f"🚨 <b>MARKET ALERT</b>\n"
         f"\n"
         f"• BTC just moved {direction} {abs(pct_change):.1f}% in the last {duration_hours} hours {emoji}\n"
-        f"Price went from ${fmt_price(start_price)} to ${fmt_price(end_price)}.\n"
-        f"\n"
-        f"VVIP members got the warning. 👉 @mrponchvvip_bot"
+        f"Price went from ${fmt_price(start_price)} to ${fmt_price(end_price)}."
     )
     send(msg, parse_mode="HTML", chat_id=chat_id)
 
