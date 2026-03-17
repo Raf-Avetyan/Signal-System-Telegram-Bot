@@ -15,8 +15,7 @@ from config import (
     FUNDING_COOLDOWN, VOLUME_SPIKE_MULT, VOLUME_SPIKE_TIMEFRAMES,
     VOLUME_AVG_PERIOD, APPROACH_THRESHOLD, APPROACH_COOLDOWN,
     APPROACH_LEVELS, SESSIONS, get_adjusted_sessions, ALERT_BATCH_WINDOW,
-    OI_CHANGE_THRESHOLD, LIQ_SQUEEZE_THRESHOLD, LIQ_ALERT_COOLDOWN,
-    PUBLIC_CHAT_ID, PRIVATE_CHAT_ID
+    OI_CHANGE_THRESHOLD, LIQ_SQUEEZE_THRESHOLD, LIQ_ALERT_COOLDOWN, PRIVATE_CHAT_ID
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
@@ -118,7 +117,6 @@ class PonchBot:
         print(f"  Symbol: {SYMBOL}")
         print(f"  Timeframes: {', '.join(SIGNAL_TIMEFRAMES)}")
         print(f"  Poll interval: {POLL_INTERVAL}s")
-        print(f"  Public Chat:  {PUBLIC_CHAT_ID}")
         print(f"  Private Chat: {PRIVATE_CHAT_ID}")
         print(f"{'='*50}")
 
@@ -850,7 +848,7 @@ class PonchBot:
                             low=s_data.get("low")
                         )
                         if not self.is_booting:
-                            res = tg.edit_message_media(info["msg_id"], chart_path, caption=new_html, chat_id=PUBLIC_CHAT_ID)
+                            res = tg.edit_message_media(info["msg_id"], chart_path, caption=new_html, chat_id=PRIVATE_CHAT_ID)
                             if res == "DELETED":
                                 del self.session_msg_ids[s_id]
                                 self._save_state()

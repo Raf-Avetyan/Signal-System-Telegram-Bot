@@ -1,7 +1,7 @@
 import os
 import json
 import requests
-from config import BOT_TOKEN, CHAT_ID, SYMBOL, PUBLIC_CHAT_ID, PRIVATE_CHAT_ID
+from config import BOT_TOKEN, CHAT_ID, SYMBOL, PRIVATE_CHAT_ID
 
 API_URL_MSG   = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 API_URL_PHOTO = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
