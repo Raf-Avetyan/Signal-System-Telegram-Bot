@@ -44,7 +44,7 @@ ADR_LEN = 14       # Average Daily Range lookback
 
 # ─── MOMENTUM ────────────────────────────────
 MOMENTUM_RSI_LEN  = 14    # RSI length for momentum
-MOMENTUM_SMOOTH   = 5     # Smoothing EMA for momentum
+MOMENTUM_SMOOTH   = 3     # Smoothing EMA for momentum (Fast)
 MOMENTUM_OB       = 70    # Overbought threshold
 MOMENTUM_OS       = 30    # Oversold threshold
 
@@ -151,5 +151,10 @@ def get_adjusted_sessions(dt):
     return adj
 
 # ─── TELEGRAM COMMANDS ───────────────────────
-COMMAND_POLL_INTERVAL = 5   # Seconds between getUpdates polls
+COMMAND_POLL_INTERVAL = 2   # Seconds between getUpdates polls
 ALERT_BATCH_WINDOW = 10     # Seconds to wait for multiple alerts before batching
+
+# ─── REGISTRATION & ONBOARDING ───────────────
+BITUNIX_REG_LINK = "https://www.bitunix.com/register?vipCode=mrleverage"
+REQUIRED_DEPOSIT = 100
+INVITE_LINK = "https://t.me/+3Jm5r3Jd0rxiOGUy"

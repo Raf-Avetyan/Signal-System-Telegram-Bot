@@ -69,7 +69,7 @@ class ScalpTracker:
         self.last_processed_ts = None # Cooldown timestamp
         self.last_side = None         # Remember last side for resting buffer
 
-    def update(self, zone, close, atr_value, candle_ts=None, **extra):
+    def update(self, zone, close, atr_value, candle_ts=None, rsi_raw=None, rsi_smooth=None):
         """
         Process new candle data. Returns list of events to act on.
 
@@ -78,15 +78,17 @@ class ScalpTracker:
         """
         events = []
 
-        # Current smoothed RSI value
-        rsi_value = extra.get("rsi_value", 50)
+        # Current smoothed RSI value (used for Entry/Noise Filtering)
+        mom_rsi = rsi_smooth if rsi_smooth is not None else 50
+        # Current raw RSI value (used for Fast Confirmation/Reset)
+        raw_rsi = rsi_raw if rsi_raw is not None else mom_rsi
 
         if self.state == "IDLE":
             # Cooldown check: don't restart on the same candle
             if candle_ts and candle_ts == self.last_processed_ts:
                 return []
                 
-            # Check for zone entry
+            # Check for zone entry (Use Smoothed for Entry to filter noise)
             if zone == "OS":
                 self.state = "ZONE_ENTRY"
                 self.side = "LONG"
@@ -103,10 +105,16 @@ class ScalpTracker:
 
         elif self.state == "ZONE_ENTRY":
             # Waiting for zone exit (confirmation) or timeout
-            expected_zone = "OS" if self.side == "LONG" else "OB"
             opposite_zone = "OB" if self.side == "LONG" else "OS"
 
-            if zone == "NEUTRAL":
+            # FAST CONFIRMATION: Use Raw RSI to detect zone exit immediately
+            is_exit = False
+            if self.side == "LONG" and raw_rsi > 30:
+                is_exit = True
+            elif self.side == "SHORT" and raw_rsi < 70:
+                is_exit = True
+
+            if is_exit:
                 # Zone exit → CONFIRMED
                 entry = close
                 calc = self._calc_sl_tp(entry, atr_value, self.side)
@@ -147,15 +155,14 @@ class ScalpTracker:
                     self.entry_price = None
 
         elif self.state == "RESTING":
-            # Buffer check: wait for RSI to move away from the edge
+            # Buffer check (Use Raw for Fast Reset)
+            # Make it more reactive: exit resting at 32/68 instead of 35/65
             if self.last_side == "SHORT":
-                # SHORT confirmed above 70, must drop below 65 to reset
-                if rsi_value <= 65:
+                if raw_rsi <= 68:
                     self.state = "IDLE"
                     self.last_side = None
             else: # LONG
-                # LONG confirmed below 30, must rise above 35 to reset
-                if rsi_value >= 35:
+                if raw_rsi >= 32:
                     self.state = "IDLE"
                     self.last_side = None
 

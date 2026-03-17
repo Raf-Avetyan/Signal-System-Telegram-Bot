@@ -16,7 +16,8 @@ from config import (
     VOLUME_AVG_PERIOD, APPROACH_THRESHOLD, APPROACH_COOLDOWN,
     APPROACH_LEVELS, SESSIONS, get_adjusted_sessions, ALERT_BATCH_WINDOW,
     OI_CHANGE_THRESHOLD, LIQ_SQUEEZE_THRESHOLD, LIQ_ALERT_COOLDOWN, PRIVATE_CHAT_ID,
-    FAST_MOVE_THRESHOLD, FAST_MOVE_WINDOW, FAST_MOVE_COOLDOWN
+    FAST_MOVE_THRESHOLD, FAST_MOVE_WINDOW, FAST_MOVE_COOLDOWN,
+    BITUNIX_REG_LINK, REQUIRED_DEPOSIT, INVITE_LINK, COMMAND_POLL_INTERVAL
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
@@ -30,6 +31,7 @@ from data import (
     fetch_funding_rate, fetch_open_interest, fetch_liquidations, fetch_global_indicators
 )
 from tracker import SignalTracker
+from bitunix import verify_bitunix_user
 import telegram as tg
 
 
@@ -78,6 +80,8 @@ class PonchBot:
         self.last_summary_date   = state.get("last_summary_date")      # New: Track summary schedule
         self.last_session_update = time.time()
         self.last_daily_update   = time.time()
+        self.last_update_id      = state.get("last_update_id", 0)
+        self.last_command_check  = 0
 
         # Macro Trend & Context
         self.macro_trend = "Ranging"
@@ -139,6 +143,12 @@ class PonchBot:
 
         while True:
             try:
+                # 1. Process Telegram commands
+                if time.time() - self.last_command_check > COMMAND_POLL_INTERVAL:
+                    self._process_commands()
+                    self.last_command_check = time.time()
+                
+                # 2. Main tick
                 self._tick()
             except Exception as e:
                 print(f"[ERROR] {e}")
@@ -355,6 +365,7 @@ class PonchBot:
                 "last_funding_alert": self.last_funding_alert,
                 "last_market_alert": self.last_market_alert,
                 "last_summary_date": self.last_summary_date,
+                "last_update_id": self.last_update_id,
                 "scalp_trackers": {tf: tracker.to_dict() for tf, tracker in self.scalp_trackers.items()}
             }
 
@@ -1000,6 +1011,68 @@ class PonchBot:
                 self.last_daily_update = time.time()
         
         print(f"[TG] Daily levels report {'skipped' if self.is_booting else 'sent'}")
+
+    def _process_commands(self):
+        """Fetch and handle incoming Telegram messages."""
+        updates = tg.get_updates(offset=self.last_update_id + 1)
+        if not updates or not updates.get("ok"):
+            return
+
+        for up in updates.get("result", []):
+            self.last_update_id = up["update_id"]
+            
+            message = up.get("message")
+            if not message or "text" not in message:
+                continue
+
+            user_id = message["from"]["id"]
+            text = message["text"].strip()
+            
+            if text == "/start":
+                welcome_msg = (
+                    f"<b>How to Join:</b>\n\n"
+                    f"1. Sign up on Bitunix to start trading:\n"
+                    f"🔗 {BITUNIX_REG_LINK}\n\n"
+                    f"2. Deposit ${REQUIRED_DEPOSIT} into your account.\n\n"
+                    f"3. <b>Send your unique UID here.</b>\n\n"
+                    f"4. Once all steps are completed, you’ll receive an invite link to join."
+                )
+                tg.send(welcome_msg, parse_mode="HTML", chat_id=user_id)
+            
+            elif text.isdigit():
+                # User sent their UID
+                uid = text
+                print(f"[ONBOARDING] Checking UID: {uid} for user {user_id}")
+                
+                is_referral, has_deposited = verify_bitunix_user(uid)
+                
+                if not is_referral:
+                    error_msg = (
+                        f"⚠️❗️ Hi there, the account you provided is not under this partner. "
+                        f"please use the link below to sign up\n"
+                        f"🔗: {BITUNIX_REG_LINK}"
+                    )
+                    tg.send(error_msg, parse_mode="HTML", chat_id=user_id)
+                elif not has_deposited:
+                    error_msg = (
+                        f"⚠️ <b>Deposit Required</b>\n\n"
+                        f"You are successfully registered through our link, but your account hasn't reached "
+                        f"the required deposit of ${REQUIRED_DEPOSIT} yet.\n\n"
+                        f"Please deposit and send your UID again."
+                    )
+                    tg.send(error_msg, parse_mode="HTML", chat_id=user_id)
+                else:
+                    success_msg = (
+                        f"✅ <b>Verification Successful!</b>\n\n"
+                        f"Welcome to the team. You can now access our private signal channel:\n"
+                        f"🔗 {INVITE_LINK}\n\n"
+                        f"See you inside!"
+                    )
+                    tg.send(success_msg, parse_mode="HTML", chat_id=user_id)
+            
+            # Save state after each update to avoid re-processing on crash
+            self._save_state()
+
     def _send_performance_summary(self, target_date_str=None):
         """Fetch and send the performance summary for a specific date."""
         try:
@@ -1036,7 +1109,8 @@ class PonchBot:
         close      = float(curr["Close"])
         atr_val    = float(curr["ATR"]) if "ATR" in curr else 0
         zone       = curr["MomentumZone"] if "MomentumZone" in curr else "NEUTRAL"
-        rsi_val    = float(curr["MomentumSmooth"]) if "MomentumSmooth" in curr else 50
+        rsi_raw    = float(curr["RSI"]) if "RSI" in curr else 50
+        rsi_smooth = float(curr["MomentumSmooth"]) if "MomentumSmooth" in curr else 50
 
         # ─── REAL-TIME MONITOR (Debug) ───────────────────
 
@@ -1247,7 +1321,7 @@ class PonchBot:
 
         # ─── Scalp Momentum System ───────────────────────
         tracker = self.scalp_trackers[tf]
-        events = tracker.update(zone, close, atr_val, candle_ts=candle_ts, rsi_value=rsi_val)
+        events = tracker.update(zone, close, atr_val, candle_ts=candle_ts, rsi_raw=rsi_raw, rsi_smooth=rsi_smooth)
 
         profile = TIMEFRAME_PROFILES.get(tf, TIMEFRAME_PROFILES["5m"])
         emoji = profile["emoji"]

@@ -7,6 +7,20 @@ API_URL_MSG   = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 API_URL_PHOTO = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
 API_URL_EDIT_MEDIA = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageMedia"
 API_URL_EDIT_TEXT  = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
+API_URL_UPDATES    = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+
+
+def get_updates(offset=None):
+    """Fetch new messages from Telegram."""
+    params = {"timeout": 1}
+    if offset:
+        params["offset"] = offset
+    try:
+        resp = requests.get(API_URL_UPDATES, params=params, timeout=15)
+        return resp.json() if resp.status_code == 200 else None
+    except Exception as e:
+        print(f"[TG ERROR] get_updates failed: {e}")
+        return None
 
 
 def send(text, parse_mode=None, chat_id=None, reply_markup=None):
