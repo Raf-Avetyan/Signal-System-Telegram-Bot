@@ -545,6 +545,22 @@ def send_volume_spike(tf, current_vol, avg_vol, multiplier, price, chat_id=None)
     send(msg, parse_mode="HTML", chat_id=chat_id)
 
 
+def send_market_alert(pct_change, duration_hours, start_price, end_price, chat_id=None):
+    """🚨 BTC FAST MOVE ALERT"""
+    direction = "UP" if pct_change >= 0 else "DOWN"
+    emoji = "🚀" if pct_change >= 0 else "📉"
+    
+    msg = (
+        f"🚨 <b>MARKET ALERT</b>\n"
+        f"\n"
+        f"• BTC just moved {direction} {abs(pct_change):.1f}% in the last {duration_hours} hours {emoji}\n"
+        f"Price went from ${fmt_price(start_price)} to ${fmt_price(end_price)}.\n"
+        f"\n"
+        f"VVIP members got the warning. 👉 @mrponchvvip_bot"
+    )
+    send(msg, parse_mode="HTML", chat_id=chat_id)
+
+
 # ═══════════════════════════════════════════════════════════════
 # SESSION ALERTS
 # ═══════════════════════════════════════════════════════════════

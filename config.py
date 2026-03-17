@@ -117,6 +117,11 @@ OI_CHANGE_THRESHOLD = 0.015      # 1.5% change in OI to trigger divergence check
 LIQ_SQUEEZE_THRESHOLD = 500000   # $500k in liquidations to trigger squeeze alert
 LIQ_ALERT_COOLDOWN = 600         # 10 min cooldown for squeeze alerts
 
+# ─── MARKET ALERTS (FAST MOVE) ────────────────
+FAST_MOVE_THRESHOLD = 0.03       # 3% move
+FAST_MOVE_WINDOW    = 4          # 4 hours
+FAST_MOVE_COOLDOWN  = 14400      # 4 hours
+
 SESSIONS = {
     "ASIA":   {"open": 0.0,  "close": 8.0},
     "LONDON": {"open": 8.0,  "close": 16.0},

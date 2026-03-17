@@ -15,7 +15,8 @@ from config import (
     FUNDING_COOLDOWN, VOLUME_SPIKE_MULT, VOLUME_SPIKE_TIMEFRAMES,
     VOLUME_AVG_PERIOD, APPROACH_THRESHOLD, APPROACH_COOLDOWN,
     APPROACH_LEVELS, SESSIONS, get_adjusted_sessions, ALERT_BATCH_WINDOW,
-    OI_CHANGE_THRESHOLD, LIQ_SQUEEZE_THRESHOLD, LIQ_ALERT_COOLDOWN, PRIVATE_CHAT_ID
+    OI_CHANGE_THRESHOLD, LIQ_SQUEEZE_THRESHOLD, LIQ_ALERT_COOLDOWN, PRIVATE_CHAT_ID,
+    FAST_MOVE_THRESHOLD, FAST_MOVE_WINDOW, FAST_MOVE_COOLDOWN
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
@@ -73,6 +74,7 @@ class PonchBot:
         self.sent_sessions       = set(state.get("sent_sessions", [])) # New: Persist session summaries
         self.approach_alerts     = state.get("approach_alerts", {})    # New: Persist approaching level cooldowns
         self.last_funding_alert  = state.get("last_funding_alert", 0)   
+        self.last_market_alert   = state.get("last_market_alert", 0)
         self.last_summary_date   = state.get("last_summary_date")      # New: Track summary schedule
         self.last_session_update = time.time()
         self.last_daily_update   = time.time()
@@ -351,6 +353,7 @@ class PonchBot:
                 "sent_sessions": list(self.sent_sessions),
                 "approach_alerts": self.approach_alerts,
                 "last_funding_alert": self.last_funding_alert,
+                "last_market_alert": self.last_market_alert,
                 "last_summary_date": self.last_summary_date,
                 "scalp_trackers": {tf: tracker.to_dict() for tf, tracker in self.scalp_trackers.items()}
             }
@@ -419,6 +422,22 @@ class PonchBot:
                 self._send_performance_summary(yesterday.strftime("%Y-%m-%d"))
                 self.last_summary_date = today_str
                 self._save_state()
+
+        # 1.6 Market Alert (Fast Move)
+        if "1h" in data:
+            df_1h = data["1h"]
+            if len(df_1h) > FAST_MOVE_WINDOW:
+                curr_p = float(df_1h.iloc[-1]["Close"])
+                past_p = float(df_1h.iloc[-(FAST_MOVE_WINDOW + 1)]["Open"])
+                move_pct = (curr_p - past_p) / past_p
+                
+                if abs(move_pct) >= FAST_MOVE_THRESHOLD:
+                    if current_time - self.last_market_alert > FAST_MOVE_COOLDOWN:
+                        if not self.is_booting:
+                            tg.send_market_alert(move_pct * 100, FAST_MOVE_WINDOW, past_p, curr_p, chat_id=PRIVATE_CHAT_ID)
+                        self.last_market_alert = current_time
+                        self._save_state()
+                        print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Market Alert: {move_pct*100:.1f}%")
 
         # 2. Fetch Global context
         self.last_oi = fetch_open_interest()
