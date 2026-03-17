@@ -21,7 +21,7 @@ def calculate_levels(daily_df, weekly_df=None, monthly_df=None, hourly_df=None):
     today_utc = now_utc_dt.date()
     yesterday_utc = (now_utc_dt - timedelta(days=1)).date()
 
-    # --- 1. HOURLY RECONSTRUCTION (PREFRRED) ---
+    # --- 1. HOURLY RECONSTRUCTION (PREFERRED) ---
     # Construct "Real UTC Daily" candles from 1H data if available
     if hourly_df is not None and not hourly_df.empty:
         # Group by date part of index
@@ -43,9 +43,21 @@ def calculate_levels(daily_df, weekly_df=None, monthly_df=None, hourly_df=None):
             levels["PDL"] = float(y_candle["Low"])
             levels["PD_Date"] = yesterday_utc.strftime("%d.%m.%Y")
         
-        # Find Today's Open
+        # Find Today's Open (DO)
         if today_utc in daily_agg.index:
             levels["DO"] = float(daily_agg.loc[today_utc]["Open"])
+
+        # Find Weekly Open (WO) - Filter for current week's candles
+        curr_week_start_dt = datetime.combine(curr_week_start, datetime.min.time(), tzinfo=timezone.utc)
+        week_candles = h_df[h_df.index >= curr_week_start_dt]
+        if not week_candles.empty:
+            levels["WO"] = float(week_candles["Open"].iloc[0])
+
+        # Find Monthly Open (MO) - Filter for current month's candles
+        curr_month_start_dt = datetime.combine(first_day_curr_month, datetime.min.time(), tzinfo=timezone.utc)
+        month_candles = h_df[h_df.index >= curr_month_start_dt]
+        if not month_candles.empty:
+            levels["MO"] = float(month_candles["Open"].iloc[0])
 
     # --- 2. FALLBACK/ENHANCE WITH DAILY DATA ---
     if "PDH" not in levels or "DO" not in levels:
@@ -69,14 +81,10 @@ def calculate_levels(daily_df, weekly_df=None, monthly_df=None, hourly_df=None):
             today_df = daily_df[df_dates == today_utc]
             levels["DO"] = float(today_df["Open"].iloc[0]) if not today_df.empty else float(daily_df["Open"].iloc[-1])
 
-    # 3. WEEKLY/MONTHLY RECONSTRUCTION (Use daily_agg if it has enough history, else daily_df)
-    # Filter for previous week range (UTC Mon-Sun)
-    curr_week_start = (now_utc_dt - timedelta(days=now_utc_dt.weekday())).date()
-    prev_week_start = curr_week_start - timedelta(days=7)
-    prev_week_end = curr_week_start - timedelta(days=1)
-    
-    # Use daily_df for broader history
+    # 3. WEEKLY/MONTHLY PREVIOUS LEVELS
     all_days = daily_df.index.date
+    
+    # Previous Week Range (UTC Mon-Sun)
     pw_df = daily_df[(all_days >= prev_week_start) & (all_days <= prev_week_end)]
     if not pw_df.empty:
         levels["PWH"] = float(pw_df["High"].max())
@@ -85,15 +93,13 @@ def calculate_levels(daily_df, weekly_df=None, monthly_df=None, hourly_df=None):
         levels["PWH"] = levels.get("PDH", levels["DO"])
         levels["PWL"] = levels.get("PDL", levels["DO"])
 
-    levels["WO"] = levels.get("DO")
-    if weekly_df is not None and not weekly_df.empty:
-        levels["WO"] = float(weekly_df["Open"].iloc[-1])
+    if "WO" not in levels:
+        if weekly_df is not None and not weekly_df.empty:
+            levels["WO"] = float(weekly_df["Open"].iloc[-1])
+        else:
+            levels["WO"] = levels["DO"]
 
-    # Monthly
-    first_day_curr_month = now_utc_dt.replace(day=1).date()
-    last_day_prev_month = first_day_curr_month - timedelta(days=1)
-    first_day_prev_month = last_day_prev_month.replace(day=1)
-    
+    # Previous Month Range (UTC)
     pm_df = daily_df[(all_days >= first_day_prev_month) & (all_days <= last_day_prev_month)]
     if not pm_df.empty:
         levels["PMH"] = float(pm_df["High"].max())
@@ -102,11 +108,13 @@ def calculate_levels(daily_df, weekly_df=None, monthly_df=None, hourly_df=None):
         levels["PMH"] = levels.get("PWH", levels["PDH"])
         levels["PML"] = levels.get("PWL", levels["PDL"])
 
-    levels["MO"] = levels.get("DO")
-    if monthly_df is not None and not monthly_df.empty:
-        levels["MO"] = float(monthly_df["Open"].iloc[-1])
+    if "MO" not in levels:
+        if monthly_df is not None and not monthly_df.empty:
+            levels["MO"] = float(monthly_df["Open"].iloc[-1])
+        else:
+            levels["MO"] = levels["DO"]
 
-    # Volatility Zones
+    # Volatility Zones (ADR-based)
     history_adr = daily_df[daily_df.index.date < today_utc]
     lookback = min(ADR_LEN, len(history_adr))
     if lookback < 1:
@@ -115,15 +123,6 @@ def calculate_levels(daily_df, weekly_df=None, monthly_df=None, hourly_df=None):
         recent = history_adr.iloc[-lookback:]
         pumps = recent["High"] - recent["Open"]
         dumps = recent["Open"] - recent["Low"]
-        avg_pump = float(pumps.mean())
-        avg_dump = float(dumps.mean())
-        max_pump = float(pumps.max())
-        max_dump = float(dumps.max())
-
-        # Average pump/dump
-        pumps = recent["High"] - recent["Open"]
-        dumps = recent["Open"] - recent["Low"]
-
         avg_pump = float(pumps.mean())
         avg_dump = float(dumps.mean())
         max_pump = float(pumps.max())
@@ -147,10 +146,6 @@ def calculate_levels(daily_df, weekly_df=None, monthly_df=None, hourly_df=None):
     levels["ResistancePct"] = (avg_pump / do) * 100 if do else 0
     levels["SupportPct"]    = (avg_dump / do) * 100 if do else 0
     levels["VolatilityPct"] = ((avg_pump + avg_dump) / do) * 100 if do else 0
-
-    # Raw values for reference
-    levels["AvgPump"] = avg_pump
-    levels["AvgDump"] = avg_dump
 
     return levels
 
