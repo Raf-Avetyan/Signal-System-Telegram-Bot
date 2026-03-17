@@ -423,7 +423,15 @@ class PonchBot:
                 self.last_summary_date = today_str
                 self._save_state()
 
-        # 1.6 Market Alert (Fast Move)
+        # 2. Fetch Global context
+        self.last_oi = fetch_open_interest()
+        self.last_liqs = fetch_liquidations()
+
+        # 3. Fetch all timeframes (only Signal TFs to avoid lag)
+        data = fetch_all_timeframes(timeframes=SIGNAL_TIMEFRAMES)
+        if not data: return
+
+        # 3.1 Market Alert (Fast Move)
         if "1h" in data:
             df_1h = data["1h"]
             if len(df_1h) > FAST_MOVE_WINDOW:
@@ -438,14 +446,6 @@ class PonchBot:
                         self.last_market_alert = current_time
                         self._save_state()
                         print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Market Alert: {move_pct*100:.1f}%")
-
-        # 2. Fetch Global context
-        self.last_oi = fetch_open_interest()
-        self.last_liqs = fetch_liquidations()
-
-        # 3. Fetch all timeframes (only Signal TFs to avoid lag)
-        data = fetch_all_timeframes(timeframes=SIGNAL_TIMEFRAMES)
-        if not data: return
 
         # 4. Update Macro Trend (1h baseline)
         if "1h" in data:
