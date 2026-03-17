@@ -6,83 +6,119 @@ from datetime import datetime, timezone, timedelta
 from config import ADR_LEN, SWEEP_POINTS, SWEEP_STRENGTH, VOL_ZONE_POINTS, VOL_ZONE_STRENGTH
 
 
-def calculate_levels(daily_df, weekly_df=None, monthly_df=None):
+def calculate_levels(daily_df, weekly_df=None, monthly_df=None, hourly_df=None):
     """
-    Calculate key price levels from daily/weekly/monthly data.
-
-    Returns dict with all levels:
-        DO, PDH, PDL, PWH, PWL, PMH, PML, WO, MO,
-        Pump, Dump, PumpMax, DumpMax,
-        Resistance, Support, Volatility, CriticalHigh, CriticalLow
+    Calculate key price levels. 
+    Ideally, hourly_df (last 200+ hours) is provided for UTC-accurate D1 levels.
     """
     levels = {}
 
-    if daily_df.empty:
+    if daily_df.empty and (hourly_df is None or hourly_df.empty):
         return levels
 
-    # Get current UTC date to anchor "Today" vs "Yesterday"
-    now_utc = datetime.now(timezone.utc).date()
+    # Get current UTC date elements
+    now_utc_dt = datetime.now(timezone.utc)
+    today_utc = now_utc_dt.date()
+    yesterday_utc = (now_utc_dt - timedelta(days=1)).date()
 
-    # 1. DAILY LEVELS (DO, PDH, PDL)
-    # Most reliable method for 24/7 markets:
-    # iloc[-1] is the current LIVE candle (Today)
-    # iloc[-2] is the most recent CLOSED candle (Yesterday)
-    
-    if len(daily_df) >= 2:
-        today_candle = daily_df.iloc[-1]
-        prev_day_candle = daily_df.iloc[-2]
+    # --- 1. HOURLY RECONSTRUCTION (PREFRRED) ---
+    # Construct "Real UTC Daily" candles from 1H data if available
+    if hourly_df is not None and not hourly_df.empty:
+        # Group by date part of index
+        h_df = hourly_df.copy()
+        h_df['date'] = h_df.index.date
         
-        levels["DO"] = float(today_candle["Open"])
-        levels["PDH"] = float(prev_day_candle["High"])
-        levels["PDL"] = float(prev_day_candle["Low"])
-        levels["PD_Date"] = prev_day_candle.name.strftime("%d.%m.%Y")
-    else:
-        # Emergency fallback for very short history
-        levels["DO"] = float(daily_df["Open"].iloc[-1])
-        levels["PDH"] = levels["PDL"] = levels["DO"]
-        levels["PD_Date"] = "N/A"
+        # High, Low, Open (first of day), Close (last of day)
+        daily_agg = h_df.groupby('date').agg({
+            'High': 'max',
+            'Low': 'min',
+            'Open': 'first',
+            'Close': 'last'
+        })
+        
+        # Find Yesterday
+        if yesterday_utc in daily_agg.index:
+            y_candle = daily_agg.loc[yesterday_utc]
+            levels["PDH"] = float(y_candle["High"])
+            levels["PDL"] = float(y_candle["Low"])
+            levels["PD_Date"] = yesterday_utc.strftime("%d.%m.%Y")
+        
+        # Find Today's Open
+        if today_utc in daily_agg.index:
+            levels["DO"] = float(daily_agg.loc[today_utc]["Open"])
 
-    # 2. WEEKLY LEVELS (WO, PWH, PWL)
-    if weekly_df is not None and len(weekly_df) >= 2:
+    # --- 2. FALLBACK/ENHANCE WITH DAILY DATA ---
+    if "PDH" not in levels or "DO" not in levels:
+        df_dates = daily_df.index.date
+        
+        if "PDH" not in levels:
+            yesterday_df = daily_df[df_dates == yesterday_utc]
+            if not yesterday_df.empty:
+                levels["PDH"] = float(yesterday_df["High"].max())
+                levels["PDL"] = float(yesterday_df["Low"].min())
+                levels["PD_Date"] = yesterday_utc.strftime("%d.%m.%Y")
+            else:
+                history = daily_df[df_dates < today_utc]
+                if not history.empty:
+                    prev_day = history.iloc[-1]
+                    levels["PDH"] = float(prev_day["High"])
+                    levels["PDL"] = float(prev_day["Low"])
+                    levels["PD_Date"] = prev_day.name.strftime("%d.%m.%Y")
+        
+        if "DO" not in levels:
+            today_df = daily_df[df_dates == today_utc]
+            levels["DO"] = float(today_df["Open"].iloc[0]) if not today_df.empty else float(daily_df["Open"].iloc[-1])
+
+    # 3. WEEKLY/MONTHLY RECONSTRUCTION (Use daily_agg if it has enough history, else daily_df)
+    # Filter for previous week range (UTC Mon-Sun)
+    curr_week_start = (now_utc_dt - timedelta(days=now_utc_dt.weekday())).date()
+    prev_week_start = curr_week_start - timedelta(days=7)
+    prev_week_end = curr_week_start - timedelta(days=1)
+    
+    # Use daily_df for broader history
+    all_days = daily_df.index.date
+    pw_df = daily_df[(all_days >= prev_week_start) & (all_days <= prev_week_end)]
+    if not pw_df.empty:
+        levels["PWH"] = float(pw_df["High"].max())
+        levels["PWL"] = float(pw_df["Low"].min())
+    else:
+        levels["PWH"] = levels.get("PDH", levels["DO"])
+        levels["PWL"] = levels.get("PDL", levels["DO"])
+
+    levels["WO"] = levels.get("DO")
+    if weekly_df is not None and not weekly_df.empty:
         levels["WO"] = float(weekly_df["Open"].iloc[-1])
-        levels["PWH"] = float(weekly_df["High"].iloc[-2])
-        levels["PWL"] = float(weekly_df["Low"].iloc[-2])
-    else:
-        # Fallback to daily estimation
-        levels["WO"] = levels["DO"]
-        if len(daily_df) >= 8:
-            # Last 7 days EXCLUDING today
-            hist_7 = daily_df.iloc[-8:-1]
-            levels["PWH"] = float(hist_7["High"].max())
-            levels["PWL"] = float(hist_7["Low"].min())
-        else:
-            levels["PWH"] = levels["PDH"]
-            levels["PWL"] = levels["PDL"]
 
-    # 3. MONTHLY LEVELS (MO, PMH, PML)
-    if monthly_df is not None and len(monthly_df) >= 2:
+    # Monthly
+    first_day_curr_month = now_utc_dt.replace(day=1).date()
+    last_day_prev_month = first_day_curr_month - timedelta(days=1)
+    first_day_prev_month = last_day_prev_month.replace(day=1)
+    
+    pm_df = daily_df[(all_days >= first_day_prev_month) & (all_days <= last_day_prev_month)]
+    if not pm_df.empty:
+        levels["PMH"] = float(pm_df["High"].max())
+        levels["PML"] = float(pm_df["Low"].min())
+    else:
+        levels["PMH"] = levels.get("PWH", levels["PDH"])
+        levels["PML"] = levels.get("PWL", levels["PDL"])
+
+    levels["MO"] = levels.get("DO")
+    if monthly_df is not None and not monthly_df.empty:
         levels["MO"] = float(monthly_df["Open"].iloc[-1])
-        levels["PMH"] = float(monthly_df["High"].iloc[-2])
-        levels["PML"] = float(monthly_df["Low"].iloc[-2])
-    else:
-        levels["MO"] = levels["DO"]
-        if len(daily_df) >= 31:
-            # Last 30 days EXCLUDING today
-            hist_30 = daily_df.iloc[-31:-1]
-            levels["PMH"] = float(hist_30["High"].max())
-            levels["PML"] = float(hist_30["Low"].min())
-        else:
-            levels["PMH"] = levels.get("PWH", levels["PDH"])
-            levels["PML"] = levels.get("PWL", levels["PDL"])
 
-    # Volatility Zones (ADR-based)
-    # Use only COMPLETED candles (excluding the current live candle at iloc[-1])
-    lookback = min(ADR_LEN, len(daily_df) - 1)
+    # Volatility Zones
+    history_adr = daily_df[daily_df.index.date < today_utc]
+    lookback = min(ADR_LEN, len(history_adr))
     if lookback < 1:
         avg_pump = avg_dump = max_pump = max_dump = 0
     else:
-        # Take lookback number of candles UP TO the last one
-        recent = daily_df.iloc[-lookback-1:-1]
+        recent = history_adr.iloc[-lookback:]
+        pumps = recent["High"] - recent["Open"]
+        dumps = recent["Open"] - recent["Low"]
+        avg_pump = float(pumps.mean())
+        avg_dump = float(dumps.mean())
+        max_pump = float(pumps.max())
+        max_dump = float(dumps.max())
 
         # Average pump/dump
         pumps = recent["High"] - recent["Open"]

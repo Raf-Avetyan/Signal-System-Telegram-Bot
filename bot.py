@@ -928,14 +928,16 @@ class PonchBot:
         self._reconstruct_session_history(now.hour)
 
     def _update_levels(self):
-        """Fetch daily/weekly/monthly data and calculate levels."""
-        print("[LEVELS] Updating daily/weekly/monthly levels...")
+        """Fetch daily/weekly/monthly/hourly data and calculate levels."""
+        print("[LEVELS] Updating daily/weekly/monthly/hourly levels...")
 
         daily_df   = fetch_daily()
         weekly_df  = fetch_weekly()
         monthly_df = fetch_monthly()
+        # Fetch 200 hours to cover current day, yesterday, and day before for stability
+        hourly_df  = fetch_klines(interval="1h", limit=200)
 
-        self.levels = calculate_levels(daily_df, weekly_df, monthly_df)
+        self.levels = calculate_levels(daily_df, weekly_df, monthly_df, hourly_df=hourly_df)
 
         if self.levels:     
             now = datetime.now(timezone.utc)
