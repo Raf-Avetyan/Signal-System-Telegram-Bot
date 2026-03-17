@@ -21,8 +21,11 @@ def calculate_signal_score(signal_data, df_tf, levels, trend, oi_data=None, liq_
     score = 0
     reasons = []
     
-    price = signal_data.get("price")
+    price = signal_data.get("price") or signal_data.get("entry")
     side = signal_data.get("side")
+
+    if price is None:
+        return 0, []
     
     # 1. Level Proximity (+3)
     # Check if price is within 0.15% of any major daily level
