@@ -444,7 +444,7 @@ class PonchBot:
                     if current_time - self.last_funding_alert > FUNDING_COOLDOWN:
                         direction = "POSITIVE" if rate > 0 else "NEGATIVE"
                         if not self.is_booting:
-                            tg.send_funding_alert(rate, direction, chat_id=PUBLIC_CHAT_ID)
+                            tg.send_funding_alert(rate, direction, chat_id=PRIVATE_CHAT_ID)
                         self.last_funding_alert = current_time
                         print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Funding Alert: {direction} {rate:.4f}")
 
@@ -622,7 +622,7 @@ class PonchBot:
                     # Calculate profit %
                     profit = abs(latest_price - sig["entry"]) / sig["entry"] * 100
                     if not self.is_booting:
-                        tg.send_success_teaser(sig["side"], sig["tf"], profit, level=evt_type, chat_id=PUBLIC_CHAT_ID)
+                        tg.send_success_teaser(sig["side"], sig["tf"], profit, level=evt_type, chat_id=PRIVATE_CHAT_ID)
                     self.tracker._save()
                     print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Success Teaser: {evt_type} for {sig['side']} {sig['tf']}")
 
@@ -723,7 +723,7 @@ class PonchBot:
                             high=self.session_data[session_id]["high"],
                             low=self.session_data[session_id]["low"],
                             chart_path=chart_path,
-                            chat_id=PUBLIC_CHAT_ID
+                            chat_id=PRIVATE_CHAT_ID
                         )
                         
                         if resp and "response" in resp:
@@ -773,7 +773,7 @@ class PonchBot:
                             chart_path = self._generate_current_chart(f"session_close_{s_name}.png")
 
                             if not self.is_booting:
-                                tg.send_session_summary(s_name, open_p, latest_price, stats["total"], levels, history=history_text, high=s_high, low=s_low, chart_path=chart_path, chat_id=PUBLIC_CHAT_ID)
+                                tg.send_session_summary(s_name, open_p, latest_price, stats["total"], levels, history=history_text, high=s_high, low=s_low, chart_path=chart_path, chat_id=PRIVATE_CHAT_ID)
                             
                             # Save to history for NEXT sessions
                             change = latest_price - open_p
@@ -896,7 +896,7 @@ class PonchBot:
                             indicators=new_inds
                         )
                         if not self.is_booting:
-                            tg.edit_message_media(d_msg_id, chart_path, caption=new_html)
+                            tg.edit_message_media(d_msg_id, chart_path, caption=new_html, chat_id=PRIVATE_CHAT_ID)
                         else:
                             print(f"  [TG] Skipped editing daily report (booting)")
 
@@ -957,7 +957,7 @@ class PonchBot:
             stats = self.tracker.get_daily_summary()
             if stats:
                 if not self.is_booting:
-                    tg.send_performance_summary(stats, chat_id=PUBLIC_CHAT_ID)
+                    tg.send_performance_summary(stats, chat_id=PRIVATE_CHAT_ID)
                 else:
                     print(f"  [TG] Skipped sending performance summary (booting)")
             self.tracker.cleanup_old(7)
@@ -995,7 +995,7 @@ class PonchBot:
                 critical_low=self.levels.get("DumpMax", 0),
                 indicators=indicators,
                 chart_path=chart_path,
-                chat_id=PUBLIC_CHAT_ID
+                chat_id=PRIVATE_CHAT_ID
             )
         else:
             print(f"  [TG] Skipped sending daily levels report (booting)")
@@ -1023,7 +1023,7 @@ class PonchBot:
             stats = self.tracker.get_daily_summary(target_date_str)
             if stats:
                 if not self.is_booting:
-                    tg.send_performance_summary(stats, chat_id=PUBLIC_CHAT_ID)
+                    tg.send_performance_summary(stats, chat_id=PRIVATE_CHAT_ID)
                 else:
                     print(f"  [TG] Skipped sending performance summary (booting)")
             else:
@@ -1158,7 +1158,7 @@ class PonchBot:
                             },
                             callback=tg.send_approaching_level,
                             args=(lvl_name, lvl_price, close, closest_dist * 100),
-                            chat_id=PUBLIC_CHAT_ID
+                            chat_id=PRIVATE_CHAT_ID
                         )
                         self.approach_alerts[lvl_name] = current_time
                         self._save_state()
@@ -1183,7 +1183,7 @@ class PonchBot:
                     self._save_state()
                     
                     if not self.is_booting:
-                        tg.send_liquidity_sweep(**sw, chat_id=PUBLIC_CHAT_ID)
+                        tg.send_liquidity_sweep(**sw, chat_id=PRIVATE_CHAT_ID)
                     
                     print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Liquidity Sweep: {sw['level']} ({sw['side']})")
 
