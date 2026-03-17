@@ -928,8 +928,8 @@ class PonchBot:
         daily_df   = fetch_daily()
         weekly_df  = fetch_weekly()
         monthly_df = fetch_monthly()
-        # Fetch 200 hours to cover current day, yesterday, and day before for stability
-        hourly_df  = fetch_klines(interval="1h", limit=200)
+        # Fetch 1200 hours to cover a full month + extra buffer for stable UTC reconstruction
+        hourly_df  = fetch_klines(interval="1h", limit=1200)
 
         self.levels = calculate_levels(daily_df, weekly_df, monthly_df, hourly_df=hourly_df)
 

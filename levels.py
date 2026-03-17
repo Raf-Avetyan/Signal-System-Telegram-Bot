@@ -9,7 +9,7 @@ from config import ADR_LEN, SWEEP_POINTS, SWEEP_STRENGTH, VOL_ZONE_POINTS, VOL_Z
 def calculate_levels(daily_df, weekly_df=None, monthly_df=None, hourly_df=None):
     """
     Calculate key price levels. 
-    Ideally, hourly_df (last 200+ hours) is provided for UTC-accurate D1 levels.
+    Ideally, hourly_df is provided for UTC-accurate candle reconstruction.
     """
     levels = {}
 
@@ -30,137 +30,130 @@ def calculate_levels(daily_df, weekly_df=None, monthly_df=None, hourly_df=None):
     last_day_prev_month  = first_day_curr_month - timedelta(days=1)
     first_day_prev_month = last_day_prev_month.replace(day=1)
 
-    # --- 1. HOURLY RECONSTRUCTION (PREFERRED) ---
-    # Construct "Real UTC Daily" candles from 1H data if available
+    # --- UTC CALENDAR RECONSTRUCTION (HIGH ACCURACY) ---
+    h_df = pd.DataFrame()
+    h_daily = pd.DataFrame()
     if hourly_df is not None and not hourly_df.empty:
-        # Group by date part of index
         h_df = hourly_df.copy()
-        h_df['date'] = h_df.index.date
-        
-        # High, Low, Open (first of day), Close (last of day)
-        daily_agg = h_df.groupby('date').agg({
-            'High': 'max',
-            'Low': 'min',
-            'Open': 'first',
-            'Close': 'last'
+        if 'date' not in h_df.columns:
+            h_df['date'] = h_df.index.date
+        h_daily = h_df.groupby('date').agg({
+            'High': 'max', 'Low': 'min', 'Open': 'first', 'Close': 'last'
         })
-        
-        # Find Yesterday
-        if yesterday_utc in daily_agg.index:
-            y_candle = daily_agg.loc[yesterday_utc]
-            levels["PDH"] = float(y_candle["High"])
-            levels["PDL"] = float(y_candle["Low"])
-            levels["PD_Date"] = yesterday_utc.strftime("%d.%m.%Y")
-        
-        # Find Today's Open (DO)
-        if today_utc in daily_agg.index:
-            levels["DO"] = float(daily_agg.loc[today_utc]["Open"])
 
-        # Find Weekly Open (WO) - Filter for current week's candles
-        curr_week_start_dt = datetime.combine(curr_week_start, datetime.min.time(), tzinfo=timezone.utc)
-        week_candles = h_df[h_df.index >= curr_week_start_dt]
-        if not week_candles.empty:
-            levels["WO"] = float(week_candles["Open"].iloc[0])
+    # 1. DAILY LEVELS (DO / PDH / PDL)
+    if today_utc in h_daily.index:
+        levels["DO"] = float(h_daily.loc[today_utc]["Open"])
+    elif not daily_df.empty:
+        levels["DO"] = float(daily_df["Open"].iloc[-1])
 
-        # Find Monthly Open (MO) - Filter for current month's candles
-        curr_month_start_dt = datetime.combine(first_day_curr_month, datetime.min.time(), tzinfo=timezone.utc)
-        month_candles = h_df[h_df.index >= curr_month_start_dt]
-        if not month_candles.empty:
-            levels["MO"] = float(month_candles["Open"].iloc[0])
-
-    # --- 2. FALLBACK/ENHANCE WITH DAILY DATA ---
-    if "PDH" not in levels or "DO" not in levels:
+    if yesterday_utc in h_daily.index:
+        y_candle = h_daily.loc[yesterday_utc]
+        levels["PDH"] = float(y_candle["High"])
+        levels["PDL"] = float(y_candle["Low"])
+        levels["PD_Date"] = yesterday_utc.strftime("%d.%m.%Y")
+    else:
+        # Fallback to Daily DF
         df_dates = daily_df.index.date
-        
-        if "PDH" not in levels:
-            yesterday_df = daily_df[df_dates == yesterday_utc]
-            if not yesterday_df.empty:
-                levels["PDH"] = float(yesterday_df["High"].max())
-                levels["PDL"] = float(yesterday_df["Low"].min())
-                levels["PD_Date"] = yesterday_utc.strftime("%d.%m.%Y")
-            else:
-                history = daily_df[df_dates < today_utc]
-                if not history.empty:
-                    prev_day = history.iloc[-1]
-                    levels["PDH"] = float(prev_day["High"])
-                    levels["PDL"] = float(prev_day["Low"])
-                    levels["PD_Date"] = prev_day.name.strftime("%d.%m.%Y")
-        
-        if "DO" not in levels:
-            today_df = daily_df[df_dates == today_utc]
-            levels["DO"] = float(today_df["Open"].iloc[0]) if not today_df.empty else float(daily_df["Open"].iloc[-1])
+        yesterday_df = daily_df[df_dates == yesterday_utc]
+        if not yesterday_df.empty:
+            levels["PDH"] = float(yesterday_df["High"].max())
+            levels["PDL"] = float(yesterday_df["Low"].min())
+            levels["PD_Date"] = yesterday_utc.strftime("%d.%m.%Y")
 
-    # 3. UTC-ACCURATE PREVIOUS WEEK & MONTH (Strict Calendar Filters)
-    all_days = daily_df.index.date
+    # 2. WEEKLY LEVELS (WO / PWH / PWL)
+    cw_start_dt = datetime.combine(curr_week_start, datetime.min.time(), tzinfo=timezone.utc)
+    pw_start_dt = datetime.combine(prev_week_start, datetime.min.time(), tzinfo=timezone.utc)
     
-    # --- PWH / PWL (Last Full UTC Week: Monday to Sunday) ---
-    pw_df = daily_df[(all_days >= prev_week_start) & (all_days <= prev_week_end)]
-    if not pw_df.empty:
-        levels["PWH"] = float(pw_df["High"].max())
-        levels["PWL"] = float(pw_df["Low"].min())
-    elif weekly_df is not None and len(weekly_df) >= 2:
-        # Fallback to exchange weekly candle if daily history is short
-        pw_candle = weekly_df.iloc[-2]
-        levels["PWH"] = float(pw_candle["High"])
-        levels["PWL"] = float(pw_candle["Low"])
-    else:
-        levels["PWH"] = levels.get("PDH", levels.get("DO", 0))
-        levels["PWL"] = levels.get("PDL", levels.get("DO", 0))
-
+    # Weekly Open (WO)
+    if weekly_df is not None and not weekly_df.empty:
+        levels["WO"] = float(weekly_df["Open"].iloc[-1])
+    elif not h_df.empty:
+        cw_slice = h_df[h_df.index >= cw_start_dt]
+        if not cw_slice.empty:
+            levels["WO"] = float(cw_slice["Open"].iloc[0])
+    
     if "WO" not in levels:
-        if "DO" in levels:
-            # Approximate WO if not found
-            levels["WO"] = levels["DO"]
-        elif not daily_df.empty:
-            levels["WO"] = float(daily_df["Open"].iloc[-1])
+        levels["WO"] = levels.get("DO", 0)
 
-    # --- PMH / PML (Last Full UTC Calendar Month) ---
-    pm_df = daily_df[(all_days >= first_day_prev_month) & (all_days <= last_day_prev_month)]
-    if not pm_df.empty:
-        levels["PMH"] = float(pm_df["High"].max())
-        levels["PML"] = float(pm_df["Low"].min())
-    elif monthly_df is not None and len(monthly_df) >= 2:
-        # Fallback to exchange monthly candle
-        pm_candle = monthly_df.iloc[-2]
-        levels["PMH"] = float(pm_candle["High"])
-        levels["PML"] = float(pm_candle["Low"])
-    else:
-        levels["PMH"] = levels.get("PWH", levels.get("PDH", levels.get("DO", 0)))
-        levels["PML"] = levels.get("PWL", levels.get("PDL", levels.get("DO", 0)))
+    # Previous Week Range (PWH / PWL)
+    if not h_df.empty:
+        pw_slice = h_df[(h_df.index >= pw_start_dt) & (h_df.index < cw_start_dt)]
+        if not pw_slice.empty:
+            levels["PWH"] = float(pw_slice["High"].max())
+            levels["PWL"] = float(pw_slice["Low"].min())
 
+    if "PWH" not in levels:
+        all_days = daily_df.index.date
+        pw_df = daily_df[(all_days >= prev_week_start) & (all_days <= prev_week_end)]
+        if not pw_df.empty:
+            levels["PWH"] = float(pw_df["High"].max())
+            levels["PWL"] = float(pw_df["Low"].min())
+        elif weekly_df is not None and len(weekly_df) >= 2:
+            pw_candle = weekly_df.iloc[-2]
+            levels["PWH"] = float(pw_candle["High"])
+            levels["PWL"] = float(pw_candle["Low"])
+
+    # 3. MONTHLY LEVELS (MO / PMH / PML)
+    # Target MO ~67k (March 1st open on many charts)
     if "MO" not in levels:
-        if "DO" in levels:
-            levels["MO"] = levels["DO"]
-        elif not daily_df.empty:
-            levels["MO"] = float(daily_df["Open"].iloc[-1])
+        # Search daily_df for the candle starting on the 1st
+        target_mo_date = first_day_curr_month
+        all_daily_dates = daily_df.index.date
+        match_mo = daily_df[all_daily_dates == target_mo_date]
+        if not match_mo.empty:
+            levels["MO"] = float(match_mo["Open"].iloc[0])
+        elif monthly_df is not None and not monthly_df.empty:
+            levels["MO"] = float(monthly_df["Open"].iloc[-1])
+        else:
+            levels["MO"] = levels.get("DO", 0)
 
-    # Volatility Zones (ADR-based)
+    # Previous Month Range (PMH / PML)
+    pm_start_dt = datetime.combine(first_day_prev_month, datetime.min.time(), tzinfo=timezone.utc)
+    cm_start_dt = datetime.combine(first_day_curr_month, datetime.min.time(), tzinfo=timezone.utc)
+    if not h_df.empty and h_df.index[0] <= pm_start_dt:
+        pm_slice = h_df[(h_df.index >= pm_start_dt) & (h_df.index < cm_start_dt)]
+        if not pm_slice.empty:
+            levels["PMH"] = float(pm_slice["High"].max())
+            levels["PML"] = float(pm_slice["Low"].min())
+
+    if "PMH" not in levels:
+        all_days = daily_df.index.date
+        pm_df = daily_df[(all_days >= first_day_prev_month) & (all_days <= last_day_prev_month)]
+        if not pm_df.empty:
+            levels["PMH"] = float(pm_df["High"].max())
+            levels["PML"] = float(pm_df["Low"].min())
+        elif monthly_df is not None and len(monthly_df) >= 2:
+            pm_candle = monthly_df.iloc[-2]
+            levels["PMH"] = float(pm_candle["High"])
+            levels["PML"] = float(pm_candle["Low"])
+
+    # 4. Volatility Zones (ADR-based using SMA for standard ranges as requested)
     history_adr = daily_df[daily_df.index.date < today_utc]
     lookback = min(ADR_LEN, len(history_adr))
     if lookback < 1:
         avg_pump = avg_dump = max_pump = max_dump = 0
     else:
         recent = history_adr.iloc[-lookback:]
-        pumps = recent["High"] - recent["Open"]
-        dumps = recent["Open"] - recent["Low"]
-        avg_pump = float(pumps.mean())
-        avg_dump = float(dumps.mean())
-        max_pump = float(pumps.max())
-        max_dump = float(dumps.max())
+        pumps_raw = recent["High"] - recent["Open"]
+        dumps_raw = recent["Open"] - recent["Low"]
+        avg_pump = float(pumps_raw.mean())
+        avg_dump = float(dumps_raw.mean())
+        max_pump = float(pumps_raw.max())
+        max_dump = float(dumps_raw.max())
 
     do = levels["DO"]
-
     levels["Pump"]     = do + avg_pump
     levels["Dump"]     = do - avg_dump
     levels["PumpMax"]  = do + max_pump
     levels["DumpMax"]  = do - max_dump
 
     # Daily levels report values
-    levels["Resistance"]   = do + avg_pump
-    levels["Support"]      = do - avg_dump
+    levels["Resistance"]   = levels["Pump"]
+    levels["Support"]      = levels["Dump"]
     levels["Volatility"]   = avg_pump + avg_dump
-    levels["CriticalHigh"] = do + max_pump
-    levels["CriticalLow"]  = do - max_dump
+    levels["CriticalHigh"] = levels["PumpMax"]
+    levels["CriticalLow"]  = levels["DumpMax"]
 
     # Percentages
     levels["ResistancePct"] = (avg_pump / do) * 100 if do else 0
@@ -171,34 +164,14 @@ def calculate_levels(daily_df, weekly_df=None, monthly_df=None, hourly_df=None):
 
 
 def check_liquidity_sweep(price_high, price_low, levels, prev_high=None, prev_low=None):
-    """
-    Check if current candle sweeps any liquidity levels.
-
-    Returns list of sweep events:
-    [{"side": "LONG", "level": "PDL", "price": ..., "points": ..., "strength": ...}, ...]
-    """
+    """Check if current candle sweeps any liquidity levels."""
     sweeps = []
-
-    # Levels to check for LONG sweeps (price goes BELOW these)
-    long_levels = {
-        "PDL": levels.get("PDL"),
-        "PWL": levels.get("PWL"),
-        "PML": levels.get("PML"),
-    }
-
-    # Levels to check for SHORT sweeps (price goes ABOVE these)
-    short_levels = {
-        "PDH": levels.get("PDH"),
-        "PWH": levels.get("PWH"),
-        "PMH": levels.get("PMH"),
-    }
+    long_levels = {"PDL": levels.get("PDL"), "PWL": levels.get("PWL"), "PML": levels.get("PML")}
+    short_levels = {"PDH": levels.get("PDH"), "PWH": levels.get("PWH"), "PMH": levels.get("PMH")}
 
     for name, value in long_levels.items():
-        if value is None:
-            continue
-        # Low sweeps below the level
+        if value is None: continue
         if price_low <= value:
-            # Check it's a new cross (prev candle was above)
             if prev_low is None or prev_low > value:
                 pts = SWEEP_POINTS.get(name, 1)
                 sweeps.append({
@@ -211,9 +184,7 @@ def check_liquidity_sweep(price_high, price_low, levels, prev_high=None, prev_lo
                 })
 
     for name, value in short_levels.items():
-        if value is None:
-            continue
-        # High sweeps above the level
+        if value is None: continue
         if price_high >= value:
             if prev_high is None or prev_high < value:
                 pts = SWEEP_POINTS.get(name, 1)
@@ -225,62 +196,40 @@ def check_liquidity_sweep(price_high, price_low, levels, prev_high=None, prev_lo
                     "strength": SWEEP_STRENGTH.get(pts, "Low"),
                     "note":     f"Liquidity cross {name} ({SWEEP_STRENGTH.get(pts, 'weak').lower()})",
                 })
-
     return sweeps
 
 
 def check_volatility_touch(price_high, price_low, levels, prev_high=None, prev_low=None):
-    """
-    Check if current candle touches volatility zones.
-
-    Returns list of touch events.
-    """
+    """Check if current candle touches volatility zones."""
     touches = []
-
-    # LONG touches (price drops into dump zones)
-    dump_levels = {
-        "DUMP":    levels.get("Dump"),
-        "DUMPMAX": levels.get("DumpMax"),
-    }
-
-    # SHORT touches (price rises into pump zones)
-    pump_levels = {
-        "PUMP":    levels.get("Pump"),
-        "PUMPMAX": levels.get("PumpMax"),
-    }
+    dump_levels = {"DUMP": levels.get("Dump"), "DUMPMAX": levels.get("DumpMax")}
+    pump_levels = {"PUMP": levels.get("Pump"), "PUMPMAX": levels.get("PumpMax")}
 
     for name, value in dump_levels.items():
-        if value is None:
-            continue
+        if value is None: continue
         if price_low <= value:
             if prev_low is None or prev_low > value:
                 pts = VOL_ZONE_POINTS.get(name, 1)
-                strength = VOL_ZONE_STRENGTH.get(pts, "Low")
-                note_suffix = "(weak)" if pts == 1 else "(strong/anomaly)" if "MAX" in name else "(strong)"
                 touches.append({
                     "side":     "LONG",
                     "level":    name,
                     "price":    value,
                     "points":   pts,
-                    "strength": strength,
-                    "note":     f"Vol line cross {name.replace('MAX', ' Max')} {note_suffix}",
+                    "strength": VOL_ZONE_STRENGTH.get(pts, "Low"),
+                    "note":     f"Vol line cross {name.replace('MAX', ' Max')} {'(weak)' if pts == 1 else '(strong)'}",
                 })
 
     for name, value in pump_levels.items():
-        if value is None:
-            continue
+        if value is None: continue
         if price_high >= value:
             if prev_high is None or prev_high < value:
                 pts = VOL_ZONE_POINTS.get(name, 1)
-                strength = VOL_ZONE_STRENGTH.get(pts, "Low")
-                note_suffix = "(weak)" if pts == 1 else "(strong/anomaly)" if "MAX" in name else "(strong)"
                 touches.append({
                     "side":     "SHORT",
                     "level":    name,
                     "price":    value,
                     "points":   pts,
-                    "strength": strength,
-                    "note":     f"Vol line cross {name.replace('MAX', ' Max')} {note_suffix}",
+                    "strength": VOL_ZONE_STRENGTH.get(pts, "Low"),
+                    "note":     f"Vol line cross {name.replace('MAX', ' Max')} {'(weak)' if pts == 1 else '(strong)'}",
                 })
-
     return touches
