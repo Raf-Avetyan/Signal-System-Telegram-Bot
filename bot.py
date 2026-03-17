@@ -589,40 +589,6 @@ class PonchBot:
                 # Update the original signal message with hit markers
                 if sig.get("msg_id") and sig.get("chat_id"):
                     tg.update_signal_message(sig["chat_id"], sig["msg_id"], sig)
-                
-                # --- SPAM OPTIMIZATION ---
-                # A. Only show successes for signals opened TODAY
-                sig_date = sig.get("timestamp", "").split(" ")[0]
-                if sig_date != today_str:
-                    continue
-
-                # B. Determine Strategy Type
-                is_confluence = (sig.get("tf", "").lower() == "confluence")
-                
-                # C. Selective TP levels to reduce noise
-                should_tease = False
-                if is_confluence:
-                    # High-value trades: show TP2 and TP3
-                    if evt_type in ["TP2", "TP3"]:
-                        should_tease = True
-                else:
-                    # Regular scalps: ONLY show TP2 (the solid win)
-                    if evt_type == "TP2":
-                        should_tease = True
-                
-                if not should_tease:
-                    continue
-
-                # D. Send Teaser if not already sent for this level
-                teaser_key = f"teaser_{evt_type}"
-                if not sig.get(teaser_key):
-                    sig[teaser_key] = True
-                    # Calculate profit %
-                    profit = abs(latest_price - sig["entry"]) / sig["entry"] * 100
-                    if not self.is_booting:
-                        tg.send_success_teaser(sig["side"], sig["tf"], profit, level=evt_type, chat_id=PRIVATE_CHAT_ID)
-                    self.tracker._save()
-                    print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Success Teaser: {evt_type} for {sig['side']} {sig['tf']}")
 
             # 2. Liquidation Squeezes
             if self.last_liqs >= LIQ_SQUEEZE_THRESHOLD:

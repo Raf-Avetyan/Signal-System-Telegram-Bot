@@ -500,47 +500,6 @@ def send_funding_alert(rate, direction, chat_id=None):
     send(msg, parse_mode="HTML", chat_id=chat_id)
 
 
-# ═══════════════════════════════════════════════════════════════
-# ADVANCED ALERTS (NEW)
-# ═══════════════════════════════════════════════════════════════
-
-def send_success_teaser(side, tf, profit_pct, level="TP1", chat_id=None):
-    """📢 SUCCESS TEASER (Public)"""
-    side_emoji = "🟢" if side == "LONG" else "🔴"
-    
-    # Differentiate between Confluence and standard Scalps
-    is_confluence = (tf.lower() == "confluence")
-    strategy_label = "Confluence Setup" if is_confluence else "Scalp Strategy"
-    display_tf = "VVIP" if is_confluence else tf
-
-    # Dynamic target hit text
-    if level == "TP1":
-        action_text = "hit its First Target!"
-    elif level == "TP2":
-        action_text = "has hit its Targets!"
-    elif level == "TP3":
-        action_text = "hit ALL TARGETS! 🔥"
-    else:
-        action_text = "hit Targets!"
-
-    msg = (
-        f"📢 <b>STRATEGY SUCCESS</b>\n"
-        f"\n"
-        f"{side_emoji} <b>{side} [{display_tf}]</b> {strategy_label} {action_text}\n"
-        f"💰 <b>Estimated Profit: +{profit_pct:.2f}%</b>\n"
-        f"\n"
-        f"🔒 <i>Full setup logic and real-time confluences are exclusive to the Private Channel.</i>"
-    )
-    
-    # Add subscription button
-    reply_markup = json.dumps({
-        "inline_keyboard": [[
-            {"text": "🚀 Get Access to Private Channel", "url": "https://t.me/tribute/app?startapp=ep_8xkUUixQtUTQRp5pGzmwipznnPELc2qGWKl8rUZfC0GbAX3o8b"}
-        ]]
-    })
-    
-    send(msg, parse_mode="HTML", chat_id=chat_id, reply_markup=reply_markup)
-
 def send_oi_divergence(price_change, oi_change, note, chat_id=None):
     """⚠️ OI DIVERGENCE (Private)"""
     msg = (
