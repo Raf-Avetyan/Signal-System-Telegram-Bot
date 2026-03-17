@@ -21,6 +21,15 @@ def calculate_levels(daily_df, weekly_df=None, monthly_df=None, hourly_df=None):
     today_utc = now_utc_dt.date()
     yesterday_utc = (now_utc_dt - timedelta(days=1)).date()
 
+    # Time boundaries for Weekly/Monthly
+    curr_week_start = (now_utc_dt - timedelta(days=now_utc_dt.weekday())).date()
+    prev_week_start = curr_week_start - timedelta(days=7)
+    prev_week_end   = curr_week_start - timedelta(days=1)
+    
+    first_day_curr_month = now_utc_dt.replace(day=1).date()
+    last_day_prev_month  = first_day_curr_month - timedelta(days=1)
+    first_day_prev_month = last_day_prev_month.replace(day=1)
+
     # --- 1. HOURLY RECONSTRUCTION (PREFERRED) ---
     # Construct "Real UTC Daily" candles from 1H data if available
     if hourly_df is not None and not hourly_df.empty:
