@@ -620,6 +620,12 @@ class PonchBot:
                 if sig.get("msg_id") and sig.get("chat_id"):
                     tg.update_signal_message(sig["chat_id"], sig["msg_id"], sig)
 
+                    # NEW: Reply if TP2 or TP3 targets hit
+                    if evt_type == "TP2":
+                        tg.send_tp2_hit_congrats(sig["chat_id"], sig["msg_id"], sig.get("tf", "Unknown"))
+                    elif evt_type == "TP3":
+                        tg.send_tp3_hit_congrats(sig["chat_id"], sig["msg_id"], sig.get("tf", "Unknown"))
+
             # 2. Liquidation Squeezes
             if self.last_liqs >= LIQ_SQUEEZE_THRESHOLD:
                 if current_time - self.last_liq_alert_time > LIQ_ALERT_COOLDOWN:

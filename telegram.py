@@ -23,7 +23,7 @@ def get_updates(offset=None):
         return None
 
 
-def send(text, parse_mode=None, chat_id=None, reply_markup=None):
+def send(text, parse_mode=None, chat_id=None, reply_markup=None, reply_to_message_id=None):
     """Send a message via Telegram Bot API."""
     target_chat = chat_id if chat_id else CHAT_ID
     try:
@@ -35,6 +35,8 @@ def send(text, parse_mode=None, chat_id=None, reply_markup=None):
             payload["parse_mode"] = parse_mode
         if reply_markup:
             payload["reply_markup"] = reply_markup
+        if reply_to_message_id:
+            payload["reply_to_message_id"] = reply_to_message_id
             
         resp = requests.post(API_URL_MSG, data=payload)
         if not resp.ok:
@@ -44,6 +46,29 @@ def send(text, parse_mode=None, chat_id=None, reply_markup=None):
     except Exception as e:
         print(f"[TG ERROR] {e}")
         return None
+
+def send_tp2_hit_congrats(chat_id, message_id, tf):
+    """Send a reply for hitting TP2."""
+    import random
+    messages = [
+        f"⚡️ <b>TARGET 2 SMACKED!</b> [{tf}] Moving fast! Final goal in sight. 🚀",
+        f"💹 <b>TP2 REACHED!</b> [{tf}] Profits secured. Riding to the end! ✅",
+        f"🔥 <b>MID-TARGET HIT!</b> [{tf}] 2/3 TPs done. Pure momentum! 💰",
+    ]
+    txt = random.choice(messages)
+    return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
+
+def send_tp3_hit_congrats(chat_id, message_id, tf):
+    """Send a congratulatory reply for hitting TP3."""
+    import random
+    messages = [
+        f"🎯 <b>TP3 HIT!</b> [{tf}] All targets achieved. Incredible trade! 🔥",
+        f"🚀 <b>BOOM! TP3 SMASHED!</b> [{tf}] The trend was our friend today! 💰",
+        f"💎 <b>GOLDEN SIGNAL!</b> [{tf}] TP3 reached. Max profit secured! 💹",
+        f"📊 <b>PERFECT TRADE!</b> [{tf}] 3/3 Targets Hit. Pure accuracy. ✅",
+    ]
+    txt = random.choice(messages)
+    return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
 
 def edit_message_text(message_id, text, chat_id=None, parse_mode="HTML"):
     """Edit an existing text message."""
