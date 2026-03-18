@@ -17,7 +17,7 @@ from config import (
     APPROACH_LEVELS, SESSIONS, get_adjusted_sessions, ALERT_BATCH_WINDOW,
     OI_CHANGE_THRESHOLD, LIQ_SQUEEZE_THRESHOLD, LIQ_ALERT_COOLDOWN, PRIVATE_CHAT_ID,
     FAST_MOVE_THRESHOLD, FAST_MOVE_WINDOW, FAST_MOVE_COOLDOWN,
-    BITUNIX_REG_LINK, REQUIRED_DEPOSIT, INVITE_LINK, COMMAND_POLL_INTERVAL
+    BITUNIX_REG_LINK, INVITE_LINK, COMMAND_POLL_INTERVAL
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
@@ -1046,32 +1046,23 @@ class PonchBot:
                     f"<b>How to Join:</b>\n\n"
                     f"1. Sign up on Bitunix to start trading:\n"
                     f"🔗 {BITUNIX_REG_LINK}\n\n"
-                    f"2. Deposit ${REQUIRED_DEPOSIT} into your account.\n\n"
-                    f"3. <b>Send your unique UID here.</b>\n\n"
-                    f"4. Once all steps are completed, you’ll receive an invite link to join."
+                    f"2. <b>Send your unique UID here.</b>\n\n"
+                    f"3. Once verified, you’ll receive an invite link to join."
                 )
                 tg.send(welcome_msg, parse_mode="HTML", chat_id=user_id)
-            
+
             elif text.isdigit():
                 # User sent their UID
                 uid = text
                 print(f"[ONBOARDING] Checking UID: {uid} for user {user_id}")
-                
-                is_referral, has_deposited = verify_bitunix_user(uid)
-                
+
+                is_referral = verify_bitunix_user(uid)
+
                 if not is_referral:
                     error_msg = (
                         f"⚠️❗️ Hi there, the account you provided is not under this partner. "
                         f"please use the link below to sign up\n"
                         f"🔗: {BITUNIX_REG_LINK}"
-                    )
-                    tg.send(error_msg, parse_mode="HTML", chat_id=user_id)
-                elif not has_deposited:
-                    error_msg = (
-                        f"⚠️ <b>Deposit Required</b>\n\n"
-                        f"You are successfully registered through our link, but your account hasn't reached "
-                        f"the required deposit of ${REQUIRED_DEPOSIT} yet.\n\n"
-                        f"Please deposit and send your UID again."
                     )
                     tg.send(error_msg, parse_mode="HTML", chat_id=user_id)
                 else:

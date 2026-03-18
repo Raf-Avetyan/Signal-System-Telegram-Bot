@@ -156,5 +156,4 @@ ALERT_BATCH_WINDOW = 10     # Seconds to wait for multiple alerts before batchin
 
 # ─── REGISTRATION & ONBOARDING ───────────────
 BITUNIX_REG_LINK = "https://www.bitunix.com/register?vipCode=mrleverage"
-REQUIRED_DEPOSIT = 100
 INVITE_LINK = "https://t.me/+3Jm5r3Jd0rxiOGUy"
