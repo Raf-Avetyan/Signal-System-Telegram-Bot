@@ -728,9 +728,7 @@ def send_performance_summary(stats, chat_id=None):
     msg = (
         f"{score_emoji} <b>DAILY PERFORMANCE RECAP</b>\n"
         f"\n"
-        f"<pre>{code_part}</pre>\n"
-        f"\n"
-        f"🔒 <i>All real-time setups and VVIP confluences are exclusive to the Private Channel.</i>"
+        f"<pre>{code_part}</pre>"
     )
     send(msg, parse_mode="HTML", chat_id=chat_id)
 
