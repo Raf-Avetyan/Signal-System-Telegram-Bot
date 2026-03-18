@@ -17,6 +17,7 @@ class SignalTracker:
 
     def __init__(self):
         self.signals = self._load()
+        self._new_this_tick: set = set()  # indices of signals logged this tick
 
     def _load(self):
         """Load signals from JSON file."""
@@ -60,7 +61,9 @@ class SignalTracker:
             "teaser_sent": False,
             "closed_at": None,
         }
+        idx = len(self.signals)
         self.signals.append(signal)
+        self._new_this_tick.add(idx)
         self._save()
         print(f"  [TRACKER] Logged {signal_type} {side} @ {entry:,.2f} [{tf}] (Msg: {msg_id})")
 
@@ -68,16 +71,21 @@ class SignalTracker:
         """
         Check all OPEN signals against price movement.
         Uses high/low if provided to catch wicks (much more accurate).
+        Signals logged in this same tick are skipped to avoid immediate false hits.
         """
         changed = False
         events = []
-        
+
         # Fallbacks to current_price if high/low not provided
         p_high = high if high is not None else current_price
         p_low = low if low is not None else current_price
 
-        for sig in self.signals:
+        for idx, sig in enumerate(self.signals):
             if sig["status"] in ("SL", "TP3", "CLOSED"):
+                continue
+
+            # Skip signals logged in this same tick — price hasn't moved yet
+            if idx in self._new_this_tick:
                 continue
 
             is_long = sig["side"] == "LONG"
@@ -159,7 +167,10 @@ class SignalTracker:
 
         if changed:
             self._save()
-        
+
+        # Clear new-this-tick set so next tick evaluates all signals normally
+        self._new_this_tick.clear()
+
         return events
 
     def get_daily_summary(self, date_str=None, since=None, until=None):
