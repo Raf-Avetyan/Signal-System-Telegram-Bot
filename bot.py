@@ -608,7 +608,8 @@ class PonchBot:
         # ─── Update Performance Tracker & Success Teasers ────
         if latest_price is not None:
             # 1. Success Teasers (Public Marketing FOMO)
-            trade_events = self.tracker.check_outcomes(latest_price)
+            # Use aggregated high/low from current candle wicks for better accuracy
+            trade_events = self.tracker.check_outcomes(latest_price, high=current_candle_high, low=current_candle_low)
             today_str = now.strftime("%Y-%m-%d")
 
             for event in trade_events:
@@ -625,6 +626,8 @@ class PonchBot:
                         tg.send_tp2_hit_congrats(sig["chat_id"], sig["msg_id"], sig.get("tf", "Unknown"))
                     elif evt_type == "TP3":
                         tg.send_tp3_hit_congrats(sig["chat_id"], sig["msg_id"], sig.get("tf", "Unknown"))
+                    elif evt_type == "ENTRY_CLOSE":
+                        tg.send_breakeven_alert(sig["chat_id"], sig["msg_id"], sig.get("tf", "Unknown"))
 
             # 2. Liquidation Squeezes
             if self.last_liqs >= LIQ_SQUEEZE_THRESHOLD:

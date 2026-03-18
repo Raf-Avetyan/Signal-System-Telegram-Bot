@@ -70,6 +70,11 @@ def send_tp3_hit_congrats(chat_id, message_id, tf):
     txt = random.choice(messages)
     return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
 
+def send_breakeven_alert(chat_id, message_id, tf):
+    """Send a reply when price returns to entry after TPs hit."""
+    txt = f"📉 <b>REVERSAL ALERT!</b> [{tf}] Price returned to Entry level after hitting targets. Signal closed at Breakeven. ⚖️"
+    return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
+
 def edit_message_text(message_id, text, chat_id=None, parse_mode="HTML"):
     """Edit an existing text message."""
     target_chat = chat_id if chat_id else CHAT_ID
@@ -149,8 +154,9 @@ def edit_message_media(message_id, photo_path, caption=None, chat_id=None):
 
 
 def fmt_price(price):
-    """Format price with comma separator."""
-    return f"{price:,.2f}"
+    """Format price with comma separator, 0 decimals."""
+    if price is None: return "0"
+    return f"{abs(price):,.0f}" if price != 0 else "0"
 
 
 # ═══════════════════════════════════════════════════════════════

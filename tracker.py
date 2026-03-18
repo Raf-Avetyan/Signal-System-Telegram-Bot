@@ -64,67 +64,92 @@ class SignalTracker:
         self._save()
         print(f"  [TRACKER] Logged {signal_type} {side} @ {entry:,.2f} [{tf}] (Msg: {msg_id})")
 
-    def check_outcomes(self, current_price):
-        """Check all OPEN signals against current price."""
+    def check_outcomes(self, current_price, high=None, low=None):
+        """
+        Check all OPEN signals against price movement.
+        Uses high/low if provided to catch wicks (much more accurate).
+        """
         changed = False
         events = []
+        
+        # Fallbacks to current_price if high/low not provided
+        p_high = high if high is not None else current_price
+        p_low = low if low is not None else current_price
 
         for sig in self.signals:
             if sig["status"] in ("SL", "TP3", "CLOSED"):
-                continue  # Already fully resolved
+                continue
 
             is_long = sig["side"] == "LONG"
 
-            # 1. Check TPs (progressive) - Check TPs FIRST
-            if is_long:
-                if not sig["tp1_hit"] and current_price >= sig["tp1"]:
-                    sig["tp1_hit"] = True
-                    sig["status"] = "TP1"
-                    changed = True
-                    events.append({"type": "TP1", "sig": sig})
-                if not sig["tp2_hit"] and current_price >= sig["tp2"]:
-                    sig["tp2_hit"] = True
-                    sig["status"] = "TP2"
-                    changed = True
-                    events.append({"type": "TP2", "sig": sig})
-                if not sig["tp3_hit"] and current_price >= sig["tp3"]:
-                    sig["tp3_hit"] = True
-                    sig["status"] = "TP3"
-                    sig["closed_at"] = datetime.now(timezone.utc).isoformat()
-                    changed = True
-                    events.append({"type": "TP3", "sig": sig})
-                    continue # Signal finished
-            else:
-                if not sig["tp1_hit"] and current_price <= sig["tp1"]:
-                    sig["tp1_hit"] = True
-                    sig["status"] = "TP1"
-                    changed = True
-                    events.append({"type": "TP1", "sig": sig})
-                if not sig["tp2_hit"] and current_price <= sig["tp2"]:
-                    sig["tp2_hit"] = True
-                    sig["status"] = "TP2"
-                    changed = True
-                    events.append({"type": "TP2", "sig": sig})
-                if not sig["tp3_hit"] and current_price <= sig["tp3"]:
-                    sig["tp3_hit"] = True
-                    sig["status"] = "TP3"
-                    sig["closed_at"] = datetime.now(timezone.utc).isoformat()
-                    changed = True
-                    events.append({"type": "TP3", "sig": sig})
-                    continue # Signal finished
+            # 1. Check TPs (progressive)
+            # Longs use High to hit TP, Shorts use Low to hit TP
+            tp_price = p_high if is_long else p_low
 
-            # 2. Check SL
-            # If TP1 was already hit, returning to SL level just closes the signal 
-            # WITHOUT marking it as sl_hit=True (so it won't show as a loss in summary).
-            if (is_long and current_price <= sig["sl"]) or (not is_long and current_price >= sig["sl"]):
+            if is_long:
+                if not sig["tp1_hit"] and tp_price >= sig["tp1"]:
+                    sig["tp1_hit"] = True
+                    sig["status"] = "TP1"
+                    changed = True
+                    events.append({"type": "TP1", "sig": sig})
+                if not sig["tp2_hit"] and tp_price >= sig["tp2"]:
+                    sig["tp2_hit"] = True
+                    sig["status"] = "TP2"
+                    changed = True
+                    events.append({"type": "TP2", "sig": sig})
+                if not sig["tp3_hit"] and tp_price >= sig["tp3"]:
+                    sig["tp3_hit"] = True
+                    sig["status"] = "TP3"
+                    sig["closed_at"] = datetime.now(timezone.utc).isoformat()
+                    changed = True
+                    events.append({"type": "TP3", "sig": sig})
+                    continue
+            else:
+                if not sig["tp1_hit"] and tp_price <= sig["tp1"]:
+                    sig["tp1_hit"] = True
+                    sig["status"] = "TP1"
+                    changed = True
+                    events.append({"type": "TP1", "sig": sig})
+                if not sig["tp2_hit"] and tp_price <= sig["tp2"]:
+                    sig["tp2_hit"] = True
+                    sig["status"] = "TP2"
+                    changed = True
+                    events.append({"type": "TP2", "sig": sig})
+                if not sig["tp3_hit"] and tp_price <= sig["tp3"]:
+                    sig["tp3_hit"] = True
+                    sig["status"] = "TP3"
+                    sig["closed_at"] = datetime.now(timezone.utc).isoformat()
+                    changed = True
+                    events.append({"type": "TP3", "sig": sig})
+                    continue
+
+            # 2. Check Entry Return (Breakeven after TP)
+            # If TP1 hit, and we touch entry again, close as ENTRY_CLOSE
+            if sig.get("tp1_hit") and sig["status"] != "ENTRY_CLOSE":
+                entry_hit = False
+                if is_long and p_low <= sig["entry"]:
+                    entry_hit = True
+                elif not is_long and p_high >= sig["entry"]:
+                    entry_hit = True
+                
+                if entry_hit:
+                    sig["status"] = "ENTRY_CLOSE"
+                    sig["closed_at"] = datetime.now(timezone.utc).isoformat()
+                    changed = True
+                    events.append({"type": "ENTRY_CLOSE", "sig": sig})
+                    continue
+
+            # 3. Check SL
+            # Longs use Low to hit SL, Shorts use High to hit SL
+            sl_price = p_low if is_long else p_high
+
+            if (is_long and sl_price <= sig["sl"]) or (not is_long and sl_price >= sig["sl"]):
                 if sig["tp1_hit"]:
-                    # Close silently as a 'Successful' trade (TP1 hit)
+                    # Fallback — usually ENTRY_CLOSE should hit first if checked before SL
                     sig["status"] = "CLOSED" 
                     sig["closed_at"] = datetime.now(timezone.utc).isoformat()
                     changed = True
-                    print(f"  [TRACKER] {sig['side']} closed at SL level AFTER targeting TP1. (Not a loss)")
                 else:
-                    # Pure SL hit
                     sig["sl_hit"] = True
                     sig["status"] = "SL"
                     sig["closed_at"] = datetime.now(timezone.utc).isoformat()
