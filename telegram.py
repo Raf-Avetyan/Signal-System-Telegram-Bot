@@ -230,6 +230,24 @@ def send_scalp_open(timeframe, side, price, emoji="⚡️", chat_id=None):
     send(msg, parse_mode="HTML", chat_id=chat_id)
 
 
+def send_scalp_closed(timeframe, side, price, emoji="⚡️", chat_id=None):
+    """
+    ❌ SCALP WINDOW CLOSED [TF] — no confirmation
+    """
+    label = "SCALP" if timeframe.lower() in ["5m", "15m"] else "SIGNAL"
+    side_emoji = "🟢" if side == "LONG" else "🔴"
+    code_part = (
+        f"Momentum: Window Expired\n"
+        f"Price:    {fmt_price(price)}"
+    )
+    msg = (
+        f"<b>❌ {label} WINDOW CLOSED</b> [{timeframe.upper()}]\n"
+        f"<b>{side_emoji} {side}</b>\n"
+        f"<pre>{code_part}</pre>"
+    )
+    send(msg, parse_mode="HTML", chat_id=chat_id)
+
+
 def send_scalp_prepare(timeframe, side, points=None, strength=None, emoji="⚡️", chat_id=None):
     """
     ⚠️ PREPARE FOR ENTRY [TF] 🟢/🔴 SIDE
