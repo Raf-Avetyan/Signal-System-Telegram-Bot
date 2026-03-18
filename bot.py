@@ -574,6 +574,7 @@ class PonchBot:
                         tp3_c = latest_price - ref_atr * tp3_m
 
                     if ce["type"] == "STRONG":
+                        strong_size = round(min(ce["points"] * 0.3, 5.0), 1)
                         resp = tg.send_strong(
                             side=ce["side"],
                             total_points=ce["points"],
@@ -581,6 +582,7 @@ class PonchBot:
                             indicators_list=ce["indicators"],
                             price=latest_price,
                             sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
+                            size=strong_size,
                             chat_id=PRIVATE_CHAT_ID
                         )
                         msg_id = resp.get("result", {}).get("message_id") if resp else None
@@ -588,12 +590,13 @@ class PonchBot:
                             side=ce["side"], entry=latest_price, sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
                             tf="Confluence", timestamp=ref_ts,
                             msg_id=msg_id, chat_id=PRIVATE_CHAT_ID, signal_type="STRONG",
-                            meta={"indicators": ce["indicators"]}
+                            meta={"indicators": ce["indicators"], "size": strong_size}
                         )
                         self._save_state()
                         print(f"  [CONFLUENCE] ✅ STRONG {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
 
                     elif ce["type"] == "EXTREME":
+                        extreme_size = round(min(ce["points"] * 0.3, 5.0), 1)
                         resp = tg.send_extreme(
                             side=ce["side"],
                             total_points=ce["points"],
@@ -601,6 +604,7 @@ class PonchBot:
                             indicators_list=ce["indicators"],
                             price=latest_price,
                             sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
+                            size=extreme_size,
                             chat_id=PRIVATE_CHAT_ID
                         )
                         msg_id = resp.get("result", {}).get("message_id") if resp else None
@@ -608,7 +612,7 @@ class PonchBot:
                             side=ce["side"], entry=latest_price, sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
                             tf="Confluence", timestamp=ref_ts,
                             msg_id=msg_id, chat_id=PRIVATE_CHAT_ID, signal_type="EXTREME",
-                            meta={"indicators": ce["indicators"]}
+                            meta={"indicators": ce["indicators"], "size": extreme_size}
                         )
                         self._save_state()
                         print(f"  [CONFLUENCE] 🔥 EXTREME {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
@@ -1364,6 +1368,9 @@ class PonchBot:
                     evt, df, self.levels, self.macro_trend, self.last_oi, self.last_liqs
                 )
 
+                # Dynamic size: scale base size by score, min 0.5%
+                dyn_size = round(max(0.5, (score / 10) * profile["size"]), 1) if score else profile["size"]
+
                 resp = tg.send_scalp_confirmed(
                     timeframe=tf,
                     side=evt["side"],
@@ -1373,7 +1380,7 @@ class PonchBot:
                     tp2=evt["tp2"],
                     tp3=evt["tp3"],
                     strength=profile["strength"],
-                    size=profile["size"],
+                    size=dyn_size,
                     score=score,
                     trend=self.macro_trend,
                     reasons=reasons,
@@ -1382,7 +1389,7 @@ class PonchBot:
                 msg_id = resp.get("result", {}).get("message_id") if resp else None
                 self._save_state()
                 print(f"  [TG] Scalp Confirmed [{tf}] {evt['side']} @ {evt['entry']:,.2f}")
-                
+
                 # Log signal for performance tracking
                 self.tracker.log_signal(
                     side=evt["side"],
@@ -1396,7 +1403,7 @@ class PonchBot:
                     msg_id=msg_id,
                     chat_id=PRIVATE_CHAT_ID,
                     signal_type="SCALP",
-                    meta={"score": score, "trend": self.macro_trend, "reasons": reasons}
+                    meta={"score": score, "trend": self.macro_trend, "reasons": reasons, "size": dyn_size}
                 )
 
             elif evt["type"] == "CLOSED":

@@ -11,14 +11,16 @@ def test_live_updates():
     entry, sl = 73500.0, 73000.0
     tp1, tp2, tp3 = 73800.0, 74200.0, 74800.0
     
+    # Dynamic size: score 8/10 × base 1.0 (15m) = 0.8%
+    scalp_size = round(max(0.5, (8 / 10) * 1.0), 1)
     resp = tg.send_scalp_confirmed(
         timeframe="15m", side="LONG",
         entry=entry, sl=sl, tp1=tp1, tp2=tp2, tp3=tp3,
-        strength="Strong", size=1.0, score=8, trend="Bullish",
+        strength="Strong", size=scalp_size, score=8, trend="Bullish",
         reasons=["RSI Entry", "Near DO"],
         chat_id=PRIVATE_CHAT_ID
     )
-    
+
     if not resp:
         print("❌ Failed to send initial scalp message.")
         return
@@ -28,7 +30,7 @@ def test_live_updates():
         "type": "SCALP", "side": "LONG", "tf": "15m",
         "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3,
         "status": "OPEN", "tp1_hit": False, "tp2_hit": False, "tp3_hit": False, "sl_hit": False,
-        "meta": {"score": 8, "trend": "Bullish", "reasons": ["RSI Entry", "Near DO"]}
+        "meta": {"score": 8, "trend": "Bullish", "reasons": ["RSI Entry", "Near DO"], "size": scalp_size}
     }
 
     time.sleep(3)
@@ -60,20 +62,23 @@ def test_live_updates():
         {"name": "Ponch_Flow_Confirm", "signal": "S", "points": 1, "tf": "5m"}
     ]
 
+    # Dynamic size: 4 points × 0.3 = 1.2%
+    strong_size = round(min(4 * 0.3, 5.0), 1)
     resp_s = tg.send_strong(
         side="SHORT", total_points=4, confirmations=3,
         indicators_list=indicators,
         price=entry_s, sl=sl_s, tp1=tp1_s, tp2=tp2_s, tp3=tp3_s,
+        size=strong_size,
         chat_id=PRIVATE_CHAT_ID
     )
-    
+
     if resp_s and "result" in resp_s:
         msg_id_s = resp_s["result"]["message_id"]
         sig_data_s = {
             "type": "STRONG", "side": "SHORT", "tf": "1h, 15m, 5m",
             "entry": entry_s, "sl": sl_s, "tp1": tp1_s, "tp2": tp2_s, "tp3": tp3_s,
             "status": "OPEN", "tp1_hit": False, "tp2_hit": False, "tp3_hit": False, "sl_hit": False,
-            "meta": {"indicators": indicators}
+            "meta": {"indicators": indicators, "size": strong_size}
         }
         
         time.sleep(3)
@@ -92,20 +97,23 @@ def test_live_updates():
         {"name": "Ponch_Momentum_Confirm", "signal": "L", "points": 1, "tf": "15m"}
     ]
     
+    # Dynamic size: 7 points × 0.3 = 2.1%
+    extreme_size = round(min(7 * 0.3, 5.0), 1)
     resp_e = tg.send_extreme(
         side="LONG", total_points=7, confirmations=4,
         indicators_list=indicators_e,
         price=72400.0, sl=72000.0, tp1=72800.0, tp2=73500.0, tp3=74500.0,
+        size=extreme_size,
         chat_id=PRIVATE_CHAT_ID
     )
-    
+
     if resp_e and "result" in resp_e:
         msg_id_e = resp_e["result"]["message_id"]
         sig_data_e = {
             "type": "EXTREME", "side": "LONG", "tf": "5m, 1h, 4h, 15m",
             "entry": 72400.0, "sl": 72000.0, "tp1": 72800.0, "tp2": 73500.0, "tp3": 74500.0,
             "status": "OPEN", "tp1_hit": False, "tp2_hit": False, "tp3_hit": False, "sl_hit": False,
-            "meta": {"indicators": indicators_e}
+            "meta": {"indicators": indicators_e, "size": extreme_size}
         }
         
         time.sleep(3)

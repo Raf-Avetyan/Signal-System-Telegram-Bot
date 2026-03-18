@@ -66,9 +66,11 @@ class ScalpTracker:
         self.state = "IDLE"
         self.side = None
         self.entry_price = None
-        self.last_processed_ts = None # Cooldown timestamp
-        self.last_side = None         # Remember last side for resting buffer
-        self.zone_entry_candles = 0   # Candles spent in ZONE_ENTRY (for timeout)
+        self.last_processed_ts = None  # Cooldown timestamp
+        self.last_side = None          # Remember last side for resting buffer
+        self.zone_entry_candles = 0    # Candles spent in ZONE_ENTRY (for timeout)
+        self.zone_entry_candle_ts = None  # Candle that triggered ZONE_ENTRY (no same-candle confirm)
+        self.prepare_sent = False      # PREPARE fires on first candle after OPEN, not same candle
 
     def update(self, zone, close, atr_value, candle_ts=None, rsi_raw=None, rsi_smooth=None):
         """
@@ -88,28 +90,43 @@ class ScalpTracker:
             # Cooldown check: don't restart on the same candle
             if candle_ts and candle_ts == self.last_processed_ts:
                 return []
-                
+
             # Check for zone entry (Use Smoothed for Entry to filter noise)
-            if zone == "OS":
+            # OB (RSI > 70) = LONG momentum  |  OS (RSI < 30) = SHORT momentum
+            if zone == "OB":
                 self.state = "ZONE_ENTRY"
                 self.side = "LONG"
                 self.entry_price = close
                 self.zone_entry_candles = 0
+                self.zone_entry_candle_ts = candle_ts
+                self.prepare_sent = False
                 events.append({"type": "OPEN", "side": "LONG", "price": close})
-                events.append({"type": "PREPARE", "side": "LONG", "price": close})
 
-            elif zone == "OB":
+            elif zone == "OS":
                 self.state = "ZONE_ENTRY"
                 self.side = "SHORT"
                 self.entry_price = close
                 self.zone_entry_candles = 0
+                self.zone_entry_candle_ts = candle_ts
+                self.prepare_sent = False
                 events.append({"type": "OPEN", "side": "SHORT", "price": close})
-                events.append({"type": "PREPARE", "side": "SHORT", "price": close})
 
         elif self.state == "ZONE_ENTRY":
             # Waiting for zone exit (confirmation) or timeout
-            opposite_zone = "OB" if self.side == "LONG" else "OS"
+            # LONG was in OB (RSI > 70), opposite zone is OS
+            # SHORT was in OS (RSI < 30), opposite zone is OB
+            opposite_zone = "OS" if self.side == "LONG" else "OB"
+
+            # Don't evaluate on the same candle that triggered zone entry
+            if candle_ts and candle_ts == self.zone_entry_candle_ts:
+                return events
+
             self.zone_entry_candles += 1
+
+            # PREPARE fires on the first candle after OPEN (once only)
+            if not self.prepare_sent:
+                self.prepare_sent = True
+                events.append({"type": "PREPARE", "side": self.side, "price": close})
 
             # TIMEOUT: close stale window after 10 candles with no confirmation
             if self.zone_entry_candles > 10:
@@ -124,16 +141,18 @@ class ScalpTracker:
                 self.side = None
                 self.entry_price = None
                 self.zone_entry_candles = 0
+                self.zone_entry_candle_ts = None
+                self.prepare_sent = False
 
-            # FAST CONFIRMATION: Use Raw RSI to detect zone exit immediately
-            elif self.side == "LONG" and raw_rsi > 30:
-                # Zone exit → CONFIRMED
+            # FAST CONFIRMATION: Use Raw RSI to detect zone exit
+            # LONG (was in OB > 70): confirm when RSI drops back below 70
+            elif self.side == "LONG" and raw_rsi < MOMENTUM_OB:
                 entry = close
                 calc = self._calc_sl_tp(entry, atr_value, self.side)
                 events.append({
-                    "type":     "CONFIRMED",
-                    "side":     self.side,
-                    "entry":    entry,
+                    "type":  "CONFIRMED",
+                    "side":  self.side,
+                    "entry": entry,
                     **calc,
                 })
                 self.last_side = self.side
@@ -142,15 +161,17 @@ class ScalpTracker:
                 self.side = None
                 self.entry_price = None
                 self.zone_entry_candles = 0
+                self.zone_entry_candle_ts = None
+                self.prepare_sent = False
 
-            elif self.side == "SHORT" and raw_rsi < 70:
-                # Zone exit → CONFIRMED
+            # SHORT (was in OS < 30): confirm when RSI rises back above 30
+            elif self.side == "SHORT" and raw_rsi > MOMENTUM_OS:
                 entry = close
                 calc = self._calc_sl_tp(entry, atr_value, self.side)
                 events.append({
-                    "type":     "CONFIRMED",
-                    "side":     self.side,
-                    "entry":    entry,
+                    "type":  "CONFIRMED",
+                    "side":  self.side,
+                    "entry": entry,
                     **calc,
                 })
                 self.last_side = self.side
@@ -159,6 +180,8 @@ class ScalpTracker:
                 self.side = None
                 self.entry_price = None
                 self.zone_entry_candles = 0
+                self.zone_entry_candle_ts = None
+                self.prepare_sent = False
 
             elif zone == opposite_zone:
                 # Crossed directly to opposite zone → CLOSED without confirmation
@@ -171,6 +194,8 @@ class ScalpTracker:
                 self.last_side = prev_side
                 self.last_processed_ts = candle_ts
                 self.zone_entry_candles = 0
+                self.zone_entry_candle_ts = None
+                self.prepare_sent = False
                 # Go to RESTING — do not immediately open opposite window
                 self.state = "RESTING"
                 self.side = None
@@ -178,12 +203,13 @@ class ScalpTracker:
 
         elif self.state == "RESTING":
             # Buffer check (Use Raw for Fast Reset)
-            # Make it more reactive: exit resting at 32/68 instead of 35/65
-            if self.last_side == "SHORT":
+            # LONG was in OB (RSI > 70): rest until RSI drops back to neutral (≤ 68)
+            # SHORT was in OS (RSI < 30): rest until RSI recovers to neutral (≥ 32)
+            if self.last_side == "LONG":
                 if raw_rsi <= 68:
                     self.state = "IDLE"
                     self.last_side = None
-            else: # LONG
+            else:  # SHORT
                 if raw_rsi >= 32:
                     self.state = "IDLE"
                     self.last_side = None
@@ -198,6 +224,8 @@ class ScalpTracker:
             "last_processed_ts": self.last_processed_ts,
             "last_side": self.last_side,
             "zone_entry_candles": self.zone_entry_candles,
+            "zone_entry_candle_ts": self.zone_entry_candle_ts,
+            "prepare_sent": self.prepare_sent,
         }
 
     def from_dict(self, data):
@@ -208,6 +236,8 @@ class ScalpTracker:
         self.last_processed_ts = data.get("last_processed_ts")
         self.last_side = data.get("last_side")
         self.zone_entry_candles = data.get("zone_entry_candles", 0)
+        self.zone_entry_candle_ts = data.get("zone_entry_candle_ts")
+        self.prepare_sent = data.get("prepare_sent", False)
 
     def _calc_sl_tp(self, entry, atr_val, side):
         """Calculate SL and 3 TP levels based on ATR."""
