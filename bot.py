@@ -483,27 +483,33 @@ class PonchBot:
         latest_price = None
         current_candle_high = 0
         current_candle_low = 9999999
-        
+
         # Track reference values for confluence alerts
         ref_atr = 0
         conf_ts = now.strftime("%Y-%m-%d %H:%M")  # Minute-level key for alerts
-        ref_ts  = conf_ts 
-        
+        ref_ts  = conf_ts
+        # Collect current candle timestamps for ALL timeframes (for TP protection)
+        current_candle_ts_set: set = set()
+
         for tf in SIGNAL_TIMEFRAMES:
             if tf not in data: continue
             df = data[tf]
-            
+
             # Update session-level H/L tracking using the current candle's wicks
             last_c = df.iloc[-1]
             current_candle_high = max(current_candle_high, float(last_c["High"]))
             current_candle_low = min(current_candle_low, float(last_c["Low"]))
-            
+
             if latest_price is None:
                 latest_price = float(df.iloc[-1]["Close"])
 
             # Process timeframe and capture ATR/TS for confluence reference
             tf_atr, tf_ts = self._process_timeframe(tf, df, now)
-            
+
+            # Collect this TF's current candle ts for TP skip protection
+            if tf_ts:
+                current_candle_ts_set.add(tf_ts)
+
             # Use 1h ATR for confluence targets if available, otherwise fallback
             if tf == "1h" or ref_atr == 0:
                 if tf_atr > 0:
@@ -611,7 +617,7 @@ class PonchBot:
         if latest_price is not None:
             # 1. Success Teasers (Public Marketing FOMO)
             # Use aggregated high/low from current candle wicks for better accuracy
-            trade_events = self.tracker.check_outcomes(latest_price, high=current_candle_high, low=current_candle_low, current_candle_ts=ref_ts)
+            trade_events = self.tracker.check_outcomes(latest_price, high=current_candle_high, low=current_candle_low, current_candle_ts_set=current_candle_ts_set)
             today_str = now.strftime("%Y-%m-%d")
 
             for event in trade_events:

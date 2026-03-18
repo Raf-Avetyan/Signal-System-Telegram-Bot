@@ -68,12 +68,14 @@ class SignalTracker:
         self._save()
         print(f"  [TRACKER] Logged {signal_type} {side} @ {entry:,.2f} [{tf}] (Msg: {msg_id})")
 
-    def check_outcomes(self, current_price, high=None, low=None, current_candle_ts=None):
+    def check_outcomes(self, current_price, high=None, low=None, current_candle_ts=None, current_candle_ts_set=None):
         """
         Check all OPEN signals against price movement.
         Uses high/low if provided to catch wicks (much more accurate).
-        current_candle_ts: skip signals whose entry candle matches this — price
-        hasn't closed yet so TPs/SL on that candle are unreliable.
+        current_candle_ts_set: set of current candle timestamps across all timeframes.
+          Any signal whose entry_candle_ts is in this set is skipped — the candle
+          it was born on hasn't closed yet so TPs/SL on that candle are unreliable.
+        current_candle_ts: legacy single-ts fallback (still supported).
         """
         changed = False
         events = []
@@ -90,7 +92,10 @@ class SignalTracker:
                 continue
 
             # Skip signal if we're still on the candle it was born on
-            if current_candle_ts and sig.get("entry_candle_ts") == current_candle_ts:
+            entry_ts = sig.get("entry_candle_ts")
+            if current_candle_ts_set and entry_ts and entry_ts in current_candle_ts_set:
+                continue
+            if current_candle_ts and entry_ts and entry_ts == current_candle_ts:
                 continue
 
             is_long = sig["side"] == "LONG"
