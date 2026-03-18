@@ -132,11 +132,18 @@ class ScalpTracker:
             if candle_ts and candle_ts == self.zone_entry_candle_ts:
                 return events
 
-            # Dedup: only process each new candle once (bot polls every 5s)
-            if candle_ts and candle_ts == self.last_zone_candle_ts:
-                return events
-            self.last_zone_candle_ts = candle_ts
-            self.zone_entry_candles += 1
+            # Increment candle counter only on new candles (for timeout)
+            if candle_ts and candle_ts != self.last_zone_candle_ts:
+                self.last_zone_candle_ts = candle_ts
+                self.zone_entry_candles += 1
+
+                # Update prev_raw_rsi and flat counter once per new candle
+                if self.prev_raw_rsi is not None:
+                    if abs(raw_rsi - self.prev_raw_rsi) < 2:
+                        self.flat_candles += 1
+                    else:
+                        self.flat_candles = 0
+                self.prev_raw_rsi = raw_rsi
 
             # --- Helper to reset state ---
             def _reset(next_state="RESTING"):
@@ -187,25 +194,18 @@ class ScalpTracker:
                     if deeper:
                         events.append({"type": "CLOSED", "side": self.side, "price": close})
                         _reset()
-                        self.prev_raw_rsi = raw_rsi
                         return events
 
-                # 5. CLOSE: RSI flat too long (< 2pt movement for 5 candles)
-                if self.prev_raw_rsi is not None:
-                    if abs(raw_rsi - self.prev_raw_rsi) < 2:
-                        self.flat_candles += 1
-                    else:
-                        self.flat_candles = 0
-
-                    if self.flat_candles >= 5:
-                        events.append({"type": "CLOSED", "side": self.side, "price": close})
-                        _reset()
-                        self.prev_raw_rsi = raw_rsi
-                        return events
+                # 5. CLOSE: RSI flat too long (< 2pt movement for 5 consecutive candles)
+                if self.flat_candles >= 5:
+                    events.append({"type": "CLOSED", "side": self.side, "price": close})
+                    _reset()
+                    return events
 
                 # 6. PREPARE: RSI starting to reverse but STILL inside zone
-                #    LONG (OS): RSI going UP (raw > prev) while still ≤ 30
-                #    SHORT (OB): RSI going DOWN (raw < prev) while still ≥ 70
+                #    LONG (OS): RSI going UP while still ≤ 30
+                #    SHORT (OB): RSI going DOWN while still ≥ 70
+                #    Uses prev_raw_rsi (updated once per candle above)
                 if not self.prepare_sent and self.prev_raw_rsi is not None:
                     reversing = False
                     if self.side == "LONG" and raw_rsi > self.prev_raw_rsi and raw_rsi <= MOMENTUM_OS:
@@ -216,9 +216,6 @@ class ScalpTracker:
                     if reversing:
                         self.prepare_sent = True
                         events.append({"type": "PREPARE", "side": self.side, "price": close})
-
-                # Update prev RSI for next candle comparison
-                self.prev_raw_rsi = raw_rsi
 
         elif self.state == "RESTING":
             # Buffer check (Use Raw for Fast Reset)
