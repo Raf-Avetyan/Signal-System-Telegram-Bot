@@ -86,6 +86,7 @@ class PonchBot:
         # Macro Trend & Context
         self.macro_trend = "Ranging"
         self.last_oi = 0
+        self.last_oi_base = 0
         self.last_liqs = 0
         self.last_oi_price = 0
         self.last_liq_alert_time = 0
@@ -446,7 +447,7 @@ class PonchBot:
         # 3.1 Market Alert (Fast Move)
         if "1h" in data:
             df_1h = data["1h"]
-            if len(df_1h) > FAST_MOVE_WINDOW:
+            if len(df_1h) >= FAST_MOVE_WINDOW + 1:
                 curr_p = float(df_1h.iloc[-1]["Close"])
                 past_p = float(df_1h.iloc[-(FAST_MOVE_WINDOW + 1)]["Open"])
                 move_pct = (curr_p - past_p) / past_p
@@ -641,7 +642,7 @@ class PonchBot:
             # 3. OI Divergence
             if self.last_oi and self.last_oi_price:
                 price_chg = (latest_price / self.last_oi_price) - 1
-                oi_chg = (self.last_oi / self.last_oi_base) - 1 if hasattr(self, 'last_oi_base') else 0
+                oi_chg = (self.last_oi / self.last_oi_base) - 1 if self.last_oi_base else 0
                 
                 # We only check if OI change is significant
                 if abs(oi_chg) >= OI_CHANGE_THRESHOLD:

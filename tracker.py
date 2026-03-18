@@ -186,6 +186,8 @@ class SignalTracker:
             for s in self.signals:
                 try:
                     logged = datetime.fromisoformat(s["logged_at"])
+                    if logged.tzinfo is None:
+                        logged = logged.replace(tzinfo=timezone.utc)
                     if since <= logged < until:
                         today_signals.append(s)
                 except Exception:

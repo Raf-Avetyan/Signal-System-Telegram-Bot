@@ -88,8 +88,6 @@ class ConfirmationTracker:
                 "indicators":    indicators_list,
             })
             self.last_extreme_count[side] = confirmations
-            # Also update strong count to suppress it
-            self.last_strong_count[side] = max(self.last_strong_count[side], confirmations)
 
         # Check STRONG (2+)
         elif confirmations >= STRONG_THRESHOLD and confirmations > self.last_strong_count[side]:
