@@ -94,7 +94,7 @@ STRONG_THRESHOLD  = 3    # Confirmed Confluence (3+ systems)
 EXTREME_THRESHOLD = 4    # High-Alpha Confluence (4+ systems)
 
 # ─── TIMING ──────────────────────────────────
-POLL_INTERVAL = 5       # Seconds between data fetches
+POLL_INTERVAL = 0       # Seconds between data fetches
 CONFIRMATION_WINDOW = 1800  # 30 min window to aggregate signals
 
 # ─── FUNDING RATE ALERTS ─────────────────────
