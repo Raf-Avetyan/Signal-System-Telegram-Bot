@@ -66,11 +66,13 @@ class ScalpTracker:
         self.state = "IDLE"
         self.side = None
         self.entry_price = None
-        self.last_processed_ts = None  # Cooldown timestamp
-        self.last_side = None          # Remember last side for resting buffer
-        self.zone_entry_candles = 0    # Candles spent in ZONE_ENTRY (for timeout)
-        self.zone_entry_candle_ts = None  # Candle that triggered ZONE_ENTRY (no same-candle confirm)
-        self.prepare_sent = False      # PREPARE fires on first candle after OPEN, not same candle
+        self.last_processed_ts = None     # Cooldown timestamp
+        self.last_side = None             # Remember last side for resting buffer
+        self.zone_entry_candles = 0       # Candles spent in ZONE_ENTRY (for timeout)
+        self.zone_entry_candle_ts = None  # Candle that triggered ZONE_ENTRY
+        self.last_zone_candle_ts = None   # Last candle processed in ZONE_ENTRY (dedup)
+        self.prepare_sent = False         # PREPARE: RSI reversing while still in zone
+        self.prev_raw_rsi = None          # Previous candle's raw RSI (for reversal detection)
 
     def update(self, zone, close, atr_value, candle_ts=None, rsi_raw=None, rsi_smooth=None):
         """
@@ -92,125 +94,105 @@ class ScalpTracker:
                 return []
 
             # Check for zone entry (Use Smoothed for Entry to filter noise)
-            # OB (RSI > 70) = LONG momentum  |  OS (RSI < 30) = SHORT momentum
-            if zone == "OB":
+            # OS (RSI < 30, oversold) → LONG  |  OB (RSI > 70, overbought) → SHORT
+            if zone == "OS":
                 self.state = "ZONE_ENTRY"
                 self.side = "LONG"
                 self.entry_price = close
                 self.zone_entry_candles = 0
                 self.zone_entry_candle_ts = candle_ts
+                self.last_zone_candle_ts = candle_ts
                 self.prepare_sent = False
+                self.prev_raw_rsi = raw_rsi
                 events.append({"type": "OPEN", "side": "LONG", "price": close})
 
-            elif zone == "OS":
+            elif zone == "OB":
                 self.state = "ZONE_ENTRY"
                 self.side = "SHORT"
                 self.entry_price = close
                 self.zone_entry_candles = 0
                 self.zone_entry_candle_ts = candle_ts
+                self.last_zone_candle_ts = candle_ts
                 self.prepare_sent = False
+                self.prev_raw_rsi = raw_rsi
                 events.append({"type": "OPEN", "side": "SHORT", "price": close})
 
         elif self.state == "ZONE_ENTRY":
-            # Waiting for zone exit (confirmation) or timeout
-            # LONG was in OB (RSI > 70), opposite zone is OS
-            # SHORT was in OS (RSI < 30), opposite zone is OB
-            opposite_zone = "OS" if self.side == "LONG" else "OB"
+            # LONG was in OS (RSI < 30), opposite zone is OB
+            # SHORT was in OB (RSI > 70), opposite zone is OS
+            opposite_zone = "OB" if self.side == "LONG" else "OS"
 
             # Don't evaluate on the same candle that triggered zone entry
             if candle_ts and candle_ts == self.zone_entry_candle_ts:
                 return events
 
+            # Dedup: only process each new candle once (bot polls every 5s)
+            if candle_ts and candle_ts == self.last_zone_candle_ts:
+                return events
+            self.last_zone_candle_ts = candle_ts
             self.zone_entry_candles += 1
 
-            # PREPARE fires on the first candle after OPEN (once only)
-            if not self.prepare_sent:
-                self.prepare_sent = True
-                events.append({"type": "PREPARE", "side": self.side, "price": close})
+            # --- Helper to reset state ---
+            def _reset(next_state="RESTING"):
+                self.last_side = self.side
+                self.last_processed_ts = candle_ts
+                self.state = next_state
+                self.side = None
+                self.entry_price = None
+                self.zone_entry_candles = 0
+                self.zone_entry_candle_ts = None
+                self.last_zone_candle_ts = None
+                self.prepare_sent = False
+                self.prev_raw_rsi = None
 
-            # TIMEOUT: close stale window after 10 candles with no confirmation
+            # 1. TIMEOUT: close stale window after 10 candles
             if self.zone_entry_candles > 10:
-                events.append({
-                    "type":  "CLOSED",
-                    "side":  self.side,
-                    "price": close,
-                })
-                self.last_side = self.side
-                self.last_processed_ts = candle_ts
-                self.state = "RESTING"
-                self.side = None
-                self.entry_price = None
-                self.zone_entry_candles = 0
-                self.zone_entry_candle_ts = None
-                self.prepare_sent = False
+                events.append({"type": "CLOSED", "side": self.side, "price": close})
+                _reset()
 
-            # FAST CONFIRMATION: Use Raw RSI to detect zone exit
-            # LONG (was in OB > 70): confirm when RSI drops back below 70
-            elif self.side == "LONG" and raw_rsi < MOMENTUM_OB:
+            # 2. CONFIRMED: RSI exits the zone
+            #    LONG (was OS < 30): RSI rises above 30
+            #    SHORT (was OB > 70): RSI drops below 70
+            elif (self.side == "LONG" and raw_rsi > MOMENTUM_OS) or \
+                 (self.side == "SHORT" and raw_rsi < MOMENTUM_OB):
                 entry = close
                 calc = self._calc_sl_tp(entry, atr_value, self.side)
-                events.append({
-                    "type":  "CONFIRMED",
-                    "side":  self.side,
-                    "entry": entry,
-                    **calc,
-                })
-                self.last_side = self.side
-                self.state = "RESTING"
-                self.last_processed_ts = candle_ts
-                self.side = None
-                self.entry_price = None
-                self.zone_entry_candles = 0
-                self.zone_entry_candle_ts = None
-                self.prepare_sent = False
+                events.append({"type": "CONFIRMED", "side": self.side, "entry": entry, **calc})
+                _reset()
 
-            # SHORT (was in OS < 30): confirm when RSI rises back above 30
-            elif self.side == "SHORT" and raw_rsi > MOMENTUM_OS:
-                entry = close
-                calc = self._calc_sl_tp(entry, atr_value, self.side)
-                events.append({
-                    "type":  "CONFIRMED",
-                    "side":  self.side,
-                    "entry": entry,
-                    **calc,
-                })
-                self.last_side = self.side
-                self.state = "RESTING"
-                self.last_processed_ts = candle_ts
-                self.side = None
-                self.entry_price = None
-                self.zone_entry_candles = 0
-                self.zone_entry_candle_ts = None
-                self.prepare_sent = False
-
+            # 3. OPPOSITE ZONE: crossed directly → CLOSED
             elif zone == opposite_zone:
-                # Crossed directly to opposite zone → CLOSED without confirmation
-                prev_side = self.side
-                events.append({
-                    "type":  "CLOSED",
-                    "side":  prev_side,
-                    "price": close,
-                })
-                self.last_side = prev_side
-                self.last_processed_ts = candle_ts
-                self.zone_entry_candles = 0
-                self.zone_entry_candle_ts = None
-                self.prepare_sent = False
-                # Go to RESTING — do not immediately open opposite window
-                self.state = "RESTING"
-                self.side = None
-                self.entry_price = None
+                events.append({"type": "CLOSED", "side": self.side, "price": close})
+                _reset()
+
+            else:
+                # 4. PREPARE: RSI starting to reverse but STILL inside zone
+                #    LONG (OS): RSI going UP (raw > prev) while still ≤ 30
+                #    SHORT (OB): RSI going DOWN (raw < prev) while still ≥ 70
+                if not self.prepare_sent and self.prev_raw_rsi is not None:
+                    reversing = False
+                    if self.side == "LONG" and raw_rsi > self.prev_raw_rsi and raw_rsi <= MOMENTUM_OS:
+                        reversing = True
+                    elif self.side == "SHORT" and raw_rsi < self.prev_raw_rsi and raw_rsi >= MOMENTUM_OB:
+                        reversing = True
+
+                    if reversing:
+                        self.prepare_sent = True
+                        events.append({"type": "PREPARE", "side": self.side, "price": close})
+
+                # Update prev RSI for next candle comparison
+                self.prev_raw_rsi = raw_rsi
 
         elif self.state == "RESTING":
             # Buffer check (Use Raw for Fast Reset)
-            # LONG was in OB (RSI > 70): rest until RSI drops back to neutral (≤ 68)
-            # SHORT was in OS (RSI < 30): rest until RSI recovers to neutral (≥ 32)
+            # LONG was in OS (RSI < 30): rest until RSI recovers to neutral (≥ 32)
+            # SHORT was in OB (RSI > 70): rest until RSI drops to neutral (≤ 68)
             if self.last_side == "LONG":
-                if raw_rsi <= 68:
+                if raw_rsi >= 32:
                     self.state = "IDLE"
                     self.last_side = None
             else:  # SHORT
-                if raw_rsi >= 32:
+                if raw_rsi <= 68:
                     self.state = "IDLE"
                     self.last_side = None
 
@@ -225,7 +207,9 @@ class ScalpTracker:
             "last_side": self.last_side,
             "zone_entry_candles": self.zone_entry_candles,
             "zone_entry_candle_ts": self.zone_entry_candle_ts,
+            "last_zone_candle_ts": self.last_zone_candle_ts,
             "prepare_sent": self.prepare_sent,
+            "prev_raw_rsi": self.prev_raw_rsi,
         }
 
     def from_dict(self, data):
@@ -237,7 +221,9 @@ class ScalpTracker:
         self.last_side = data.get("last_side")
         self.zone_entry_candles = data.get("zone_entry_candles", 0)
         self.zone_entry_candle_ts = data.get("zone_entry_candle_ts")
+        self.last_zone_candle_ts = data.get("last_zone_candle_ts")
         self.prepare_sent = data.get("prepare_sent", False)
+        self.prev_raw_rsi = data.get("prev_raw_rsi")
 
     def _calc_sl_tp(self, entry, atr_val, side):
         """Calculate SL and 3 TP levels based on ATR."""
