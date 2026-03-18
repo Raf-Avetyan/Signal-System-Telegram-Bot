@@ -73,6 +73,8 @@ class ScalpTracker:
         self.last_zone_candle_ts = None   # Last candle processed in ZONE_ENTRY (dedup)
         self.prepare_sent = False         # PREPARE: RSI reversing while still in zone
         self.prev_raw_rsi = None          # Previous candle's raw RSI (for reversal detection)
+        self.entry_rsi = None             # RSI at zone entry (for deeper-into-zone detection)
+        self.flat_candles = 0             # Consecutive candles with < 2pt RSI movement
 
     def update(self, zone, close, atr_value, candle_ts=None, rsi_raw=None, rsi_smooth=None):
         """
@@ -104,6 +106,8 @@ class ScalpTracker:
                 self.last_zone_candle_ts = candle_ts
                 self.prepare_sent = False
                 self.prev_raw_rsi = raw_rsi
+                self.entry_rsi = raw_rsi
+                self.flat_candles = 0
                 events.append({"type": "OPEN", "side": "LONG", "price": close})
 
             elif zone == "OB":
@@ -115,6 +119,8 @@ class ScalpTracker:
                 self.last_zone_candle_ts = candle_ts
                 self.prepare_sent = False
                 self.prev_raw_rsi = raw_rsi
+                self.entry_rsi = raw_rsi
+                self.flat_candles = 0
                 events.append({"type": "OPEN", "side": "SHORT", "price": close})
 
         elif self.state == "ZONE_ENTRY":
@@ -144,6 +150,8 @@ class ScalpTracker:
                 self.last_zone_candle_ts = None
                 self.prepare_sent = False
                 self.prev_raw_rsi = None
+                self.entry_rsi = None
+                self.flat_candles = 0
 
             # 1. TIMEOUT: close stale window after 10 candles
             if self.zone_entry_candles > 10:
@@ -166,7 +174,36 @@ class ScalpTracker:
                 _reset()
 
             else:
-                # 4. PREPARE: RSI starting to reverse but STILL inside zone
+                # 4. CLOSE: RSI going DEEPER into zone (getting worse)
+                #    LONG (OS): RSI dropped 5+ pts below entry RSI (e.g. 25 → 20)
+                #    SHORT (OB): RSI rose 5+ pts above entry RSI (e.g. 75 → 80)
+                if self.entry_rsi is not None:
+                    deeper = False
+                    if self.side == "LONG" and raw_rsi <= self.entry_rsi - 5:
+                        deeper = True
+                    elif self.side == "SHORT" and raw_rsi >= self.entry_rsi + 5:
+                        deeper = True
+
+                    if deeper:
+                        events.append({"type": "CLOSED", "side": self.side, "price": close})
+                        _reset()
+                        self.prev_raw_rsi = raw_rsi
+                        return events
+
+                # 5. CLOSE: RSI flat too long (< 2pt movement for 5 candles)
+                if self.prev_raw_rsi is not None:
+                    if abs(raw_rsi - self.prev_raw_rsi) < 2:
+                        self.flat_candles += 1
+                    else:
+                        self.flat_candles = 0
+
+                    if self.flat_candles >= 5:
+                        events.append({"type": "CLOSED", "side": self.side, "price": close})
+                        _reset()
+                        self.prev_raw_rsi = raw_rsi
+                        return events
+
+                # 6. PREPARE: RSI starting to reverse but STILL inside zone
                 #    LONG (OS): RSI going UP (raw > prev) while still ≤ 30
                 #    SHORT (OB): RSI going DOWN (raw < prev) while still ≥ 70
                 if not self.prepare_sent and self.prev_raw_rsi is not None:
@@ -210,6 +247,8 @@ class ScalpTracker:
             "last_zone_candle_ts": self.last_zone_candle_ts,
             "prepare_sent": self.prepare_sent,
             "prev_raw_rsi": self.prev_raw_rsi,
+            "entry_rsi": self.entry_rsi,
+            "flat_candles": self.flat_candles,
         }
 
     def from_dict(self, data):
@@ -224,6 +263,8 @@ class ScalpTracker:
         self.last_zone_candle_ts = data.get("last_zone_candle_ts")
         self.prepare_sent = data.get("prepare_sent", False)
         self.prev_raw_rsi = data.get("prev_raw_rsi")
+        self.entry_rsi = data.get("entry_rsi")
+        self.flat_candles = data.get("flat_candles", 0)
 
     def _calc_sl_tp(self, entry, atr_val, side):
         """Calculate SL and 3 TP levels based on ATR."""
