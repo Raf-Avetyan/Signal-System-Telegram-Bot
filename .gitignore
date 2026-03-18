@@ -1,3 +1,14 @@
 .env
 __pycache__/
 *.pyc
+
+# Runtime-generated state & logs
+bot_state.json
+signals_log.json
+
+# Generated charts/images
+*.png
+*.jpg
+
+# Windows metadata
+desktop.ini
