@@ -610,7 +610,7 @@ class PonchBot:
         if latest_price is not None:
             # 1. Success Teasers (Public Marketing FOMO)
             # Use aggregated high/low from current candle wicks for better accuracy
-            trade_events = self.tracker.check_outcomes(latest_price, high=current_candle_high, low=current_candle_low)
+            trade_events = self.tracker.check_outcomes(latest_price, high=current_candle_high, low=current_candle_low, current_candle_ts=ref_ts)
             today_str = now.strftime("%Y-%m-%d")
 
             for event in trade_events:

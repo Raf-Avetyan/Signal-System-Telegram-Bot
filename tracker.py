@@ -49,6 +49,7 @@ class SignalTracker:
             "tp3": tp3,
             "tf": tf,
             "timestamp": timestamp,
+            "entry_candle_ts": timestamp,  # candle that produced this signal — skip TP checks on this candle
             "logged_at": datetime.now(timezone.utc).isoformat(),
             "status": "OPEN",       # OPEN, TP1, TP2, TP3, SL, CLOSED
             "tp1_hit": False,
@@ -67,11 +68,12 @@ class SignalTracker:
         self._save()
         print(f"  [TRACKER] Logged {signal_type} {side} @ {entry:,.2f} [{tf}] (Msg: {msg_id})")
 
-    def check_outcomes(self, current_price, high=None, low=None):
+    def check_outcomes(self, current_price, high=None, low=None, current_candle_ts=None):
         """
         Check all OPEN signals against price movement.
         Uses high/low if provided to catch wicks (much more accurate).
-        Signals logged in this same tick are skipped to avoid immediate false hits.
+        current_candle_ts: skip signals whose entry candle matches this — price
+        hasn't closed yet so TPs/SL on that candle are unreliable.
         """
         changed = False
         events = []
@@ -80,12 +82,15 @@ class SignalTracker:
         p_high = high if high is not None else current_price
         p_low = low if low is not None else current_price
 
-        for idx, sig in enumerate(self.signals):
+        # Clear new-this-tick set each call
+        self._new_this_tick.clear()
+
+        for sig in self.signals:
             if sig["status"] in ("SL", "TP3", "CLOSED"):
                 continue
 
-            # Skip signals logged in this same tick — price hasn't moved yet
-            if idx in self._new_this_tick:
+            # Skip signal if we're still on the candle it was born on
+            if current_candle_ts and sig.get("entry_candle_ts") == current_candle_ts:
                 continue
 
             is_long = sig["side"] == "LONG"
@@ -167,9 +172,6 @@ class SignalTracker:
 
         if changed:
             self._save()
-
-        # Clear new-this-tick set so next tick evaluates all signals normally
-        self._new_this_tick.clear()
 
         return events
 
