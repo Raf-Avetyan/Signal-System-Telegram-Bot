@@ -94,7 +94,7 @@ STRONG_THRESHOLD  = 3    # Confirmed Confluence (3+ systems)
 EXTREME_THRESHOLD = 4    # High-Alpha Confluence (4+ systems)
 
 # ─── TIMING ──────────────────────────────────
-POLL_INTERVAL = 0       # Seconds between data fetches
+POLL_INTERVAL = 1       # Seconds between data fetches
 CONFIRMATION_WINDOW = 1800  # 30 min window to aggregate signals
 
 # ─── FUNDING RATE ALERTS ─────────────────────
@@ -155,5 +155,5 @@ COMMAND_POLL_INTERVAL = 2   # Seconds between getUpdates polls
 ALERT_BATCH_WINDOW = 10     # Seconds to wait for multiple alerts before batching
 
 # ─── REGISTRATION & ONBOARDING ───────────────
-BITUNIX_REG_LINK = "https://www.bitunix.com/register?vipCode=mrleverage"
+BITUNIX_REG_LINK = "https://www.bitunix.com/register?vipCode=mrponch"
 INVITE_LINK = "https://t.me/+3Jm5r3Jd0rxiOGUy"
