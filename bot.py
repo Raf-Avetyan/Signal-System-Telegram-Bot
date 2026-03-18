@@ -428,9 +428,10 @@ class PonchBot:
         if now.hour == 8 and now.minute == 0:
             today_str = now.strftime("%d.%m.%Y")
             if self.last_summary_date != today_str:
-                # Send summary for the previous day recap
-                yesterday = now - timedelta(days=1)
-                self._send_performance_summary(yesterday.strftime("%Y-%m-%d"))
+                # Cover all signals from yesterday 12:00 UTC to today 12:00 UTC
+                window_until = now.replace(hour=8, minute=0, second=0, microsecond=0)
+                window_since = window_until - timedelta(days=1)
+                self._send_performance_summary(since=window_since, until=window_until)
                 self.last_summary_date = today_str
                 self._save_state()
 
@@ -957,7 +958,9 @@ class PonchBot:
 
         # --- Performance Summary first ---
         try:
-            stats = self.tracker.get_daily_summary()
+            from datetime import timedelta
+            yesterday_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+            stats = self.tracker.get_daily_summary(yesterday_str)
             if stats:
                 if not self.is_booting:
                     tg.send_performance_summary(stats, chat_id=PRIVATE_CHAT_ID)
@@ -1082,17 +1085,18 @@ class PonchBot:
             # Save state after each update to avoid re-processing on crash
             self._save_state()
 
-    def _send_performance_summary(self, target_date_str=None):
-        """Fetch and send the performance summary for a specific date."""
+    def _send_performance_summary(self, target_date_str=None, since=None, until=None):
+        """Fetch and send the performance summary for a date or time range."""
         try:
-            stats = self.tracker.get_daily_summary(target_date_str)
+            stats = self.tracker.get_daily_summary(target_date_str, since=since, until=until)
             if stats:
                 if not self.is_booting:
                     tg.send_performance_summary(stats, chat_id=PRIVATE_CHAT_ID)
                 else:
                     print(f"  [TG] Skipped sending performance summary (booting)")
             else:
-                print(f"  [TRACKER] No signals found for {target_date_str or 'today'}. Skipping summary.")
+                label = f"{since} → {until}" if since else (target_date_str or "today")
+                print(f"  [TRACKER] No signals found for {label}. Skipping summary.")
             
             # Clean up old signals (keep 7 days)
             self.tracker.cleanup_old(7)

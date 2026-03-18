@@ -162,14 +162,27 @@ class SignalTracker:
         
         return events
 
-    def get_daily_summary(self, date_str=None):
-        """Get performance stats for signals on a specific date (YYYY-MM-DD)."""
-        target_date = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    def get_daily_summary(self, date_str=None, since=None, until=None):
+        """Get performance stats for signals in a time range.
 
-        today_signals = [
-            s for s in self.signals
-            if s["logged_at"].startswith(target_date)
-        ]
+        - since/until: datetime objects (UTC) for range filtering.
+        - date_str: fallback full-day filter (YYYY-MM-DD) if since/until not provided.
+        """
+        if since is not None and until is not None:
+            today_signals = []
+            for s in self.signals:
+                try:
+                    logged = datetime.fromisoformat(s["logged_at"])
+                    if since <= logged < until:
+                        today_signals.append(s)
+                except Exception:
+                    continue
+        else:
+            target_date = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            today_signals = [
+                s for s in self.signals
+                if s["logged_at"].startswith(target_date)
+            ]
 
         total = len(today_signals)
         if total == 0:
