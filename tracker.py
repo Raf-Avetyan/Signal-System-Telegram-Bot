@@ -93,10 +93,11 @@ class SignalTracker:
 
             # Skip signal if we're still on the candle it was born on
             entry_ts = sig.get("entry_candle_ts")
+            is_entry_candle = False
             if current_candle_ts_set and entry_ts and entry_ts in current_candle_ts_set:
-                continue
+                is_entry_candle = True
             if current_candle_ts and entry_ts and entry_ts == current_candle_ts:
-                continue
+                is_entry_candle = True
 
             is_long = sig["side"] == "LONG"
             sl_touched = (p_low <= sig["sl"]) if is_long else (p_high >= sig["sl"])
@@ -105,7 +106,7 @@ class SignalTracker:
             # Ambiguous one-candle case: TP1 and SL both touched for a fresh trade.
             # We treat this as TP reached and then return to entry (breakeven close),
             # never as direct SL, to preserve scalp lifecycle semantics.
-            if not sig["tp1_hit"] and tp1_touched and sl_touched:
+            if not is_entry_candle and not sig["tp1_hit"] and tp1_touched and sl_touched:
                 sig["tp1_hit"] = True
                 sig["status"] = "TP1"
                 changed = True
@@ -120,42 +121,43 @@ class SignalTracker:
             # Longs use High to hit TP, Shorts use Low to hit TP
             tp_price = p_high if is_long else p_low
 
-            if is_long:
-                if not sig["tp1_hit"] and tp_price >= sig["tp1"]:
-                    sig["tp1_hit"] = True
-                    sig["status"] = "TP1"
-                    changed = True
-                    events.append({"type": "TP1", "sig": sig})
-                if not sig["tp2_hit"] and tp_price >= sig["tp2"]:
-                    sig["tp2_hit"] = True
-                    sig["status"] = "TP2"
-                    changed = True
-                    events.append({"type": "TP2", "sig": sig})
-                if not sig["tp3_hit"] and tp_price >= sig["tp3"]:
-                    sig["tp3_hit"] = True
-                    sig["status"] = "TP3"
-                    sig["closed_at"] = datetime.now(timezone.utc).isoformat()
-                    changed = True
-                    events.append({"type": "TP3", "sig": sig})
-                    continue
-            else:
-                if not sig["tp1_hit"] and tp_price <= sig["tp1"]:
-                    sig["tp1_hit"] = True
-                    sig["status"] = "TP1"
-                    changed = True
-                    events.append({"type": "TP1", "sig": sig})
-                if not sig["tp2_hit"] and tp_price <= sig["tp2"]:
-                    sig["tp2_hit"] = True
-                    sig["status"] = "TP2"
-                    changed = True
-                    events.append({"type": "TP2", "sig": sig})
-                if not sig["tp3_hit"] and tp_price <= sig["tp3"]:
-                    sig["tp3_hit"] = True
-                    sig["status"] = "TP3"
-                    sig["closed_at"] = datetime.now(timezone.utc).isoformat()
-                    changed = True
-                    events.append({"type": "TP3", "sig": sig})
-                    continue
+            if not is_entry_candle:
+                if is_long:
+                    if not sig["tp1_hit"] and tp_price >= sig["tp1"]:
+                        sig["tp1_hit"] = True
+                        sig["status"] = "TP1"
+                        changed = True
+                        events.append({"type": "TP1", "sig": sig})
+                    if not sig["tp2_hit"] and tp_price >= sig["tp2"]:
+                        sig["tp2_hit"] = True
+                        sig["status"] = "TP2"
+                        changed = True
+                        events.append({"type": "TP2", "sig": sig})
+                    if not sig["tp3_hit"] and tp_price >= sig["tp3"]:
+                        sig["tp3_hit"] = True
+                        sig["status"] = "TP3"
+                        sig["closed_at"] = datetime.now(timezone.utc).isoformat()
+                        changed = True
+                        events.append({"type": "TP3", "sig": sig})
+                        continue
+                else:
+                    if not sig["tp1_hit"] and tp_price <= sig["tp1"]:
+                        sig["tp1_hit"] = True
+                        sig["status"] = "TP1"
+                        changed = True
+                        events.append({"type": "TP1", "sig": sig})
+                    if not sig["tp2_hit"] and tp_price <= sig["tp2"]:
+                        sig["tp2_hit"] = True
+                        sig["status"] = "TP2"
+                        changed = True
+                        events.append({"type": "TP2", "sig": sig})
+                    if not sig["tp3_hit"] and tp_price <= sig["tp3"]:
+                        sig["tp3_hit"] = True
+                        sig["status"] = "TP3"
+                        sig["closed_at"] = datetime.now(timezone.utc).isoformat()
+                        changed = True
+                        events.append({"type": "TP3", "sig": sig})
+                        continue
 
             # 2. Check Entry Return (Breakeven after TP)
             # If TP1 hit, and we touch entry again, close as ENTRY_CLOSE
