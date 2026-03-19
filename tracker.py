@@ -7,7 +7,7 @@ Persists data to signals_log.json for restart survival.
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 LOG_FILE = os.path.join(os.path.dirname(__file__), "signals_log.json")
 
@@ -99,6 +99,22 @@ class SignalTracker:
                 continue
 
             is_long = sig["side"] == "LONG"
+            sl_touched = (p_low <= sig["sl"]) if is_long else (p_high >= sig["sl"])
+            tp1_touched = (p_high >= sig["tp1"]) if is_long else (p_low <= sig["tp1"])
+
+            # Ambiguous one-candle case: TP1 and SL both touched for a fresh trade.
+            # We treat this as TP reached and then return to entry (breakeven close),
+            # never as direct SL, to preserve scalp lifecycle semantics.
+            if not sig["tp1_hit"] and tp1_touched and sl_touched:
+                sig["tp1_hit"] = True
+                sig["status"] = "TP1"
+                changed = True
+                events.append({"type": "TP1", "sig": sig})
+
+                sig["status"] = "ENTRY_CLOSE"
+                sig["closed_at"] = datetime.now(timezone.utc).isoformat()
+                events.append({"type": "ENTRY_CLOSE", "sig": sig})
+                continue
 
             # 1. Check TPs (progressive)
             # Longs use High to hit TP, Shorts use Low to hit TP
@@ -214,16 +230,34 @@ class SignalTracker:
     def get_session_stats(self, session_start_hour, session_end_hour):
         """Get stats for signals fired during a specific session window."""
         now = datetime.now(timezone.utc)
-        today = now.strftime("%Y-%m-%d")
+        today = now.date()
+        yesterday = today - timedelta(days=1)
 
         session_signals = []
         for s in self.signals:
-            if not s["logged_at"].startswith(today):
-                continue
             try:
                 logged = datetime.fromisoformat(s["logged_at"])
-                if session_start_hour <= logged.hour < session_end_hour:
-                    session_signals.append(s)
+                if logged.tzinfo is None:
+                    logged = logged.replace(tzinfo=timezone.utc)
+                else:
+                    logged = logged.astimezone(timezone.utc)
+
+                logged_hour = (
+                    logged.hour
+                    + logged.minute / 60.0
+                    + logged.second / 3600.0
+                )
+
+                if session_start_hour < session_end_hour:
+                    # Session is within today's UTC date window.
+                    if logged.date() == today and session_start_hour <= logged_hour < session_end_hour:
+                        session_signals.append(s)
+                else:
+                    # Overnight session: yesterday[start..24) + today[0..end).
+                    in_prev_leg = logged.date() == yesterday and logged_hour >= session_start_hour
+                    in_today_leg = logged.date() == today and logged_hour < session_end_hour
+                    if in_prev_leg or in_today_leg:
+                        session_signals.append(s)
             except Exception:
                 continue
 

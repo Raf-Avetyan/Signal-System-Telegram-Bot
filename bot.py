@@ -194,13 +194,14 @@ class PonchBot:
                 return None, None, None, None
             
             today = datetime.now(timezone.utc).date()
+            yesterday = today - timedelta(days=1)
             df["float_hour"] = df.index.hour + df.index.minute / 60.0
 
             # Filter session candles
             if start_hour < end_hour:
                 mask = (df.index.date == today) & (df["float_hour"] >= start_hour - 0.01) & (df["float_hour"] < end_hour - 0.01)
             else: # Crosses midnight
-                mask = ((df.index.date == today) & (df["float_hour"] >= start_hour - 0.01)) | \
+                mask = ((df.index.date == yesterday) & (df["float_hour"] >= start_hour - 0.01)) | \
                        ((df.index.date == today) & (df["float_hour"] < end_hour - 0.01))
             
             session_df = df[mask]
@@ -482,6 +483,9 @@ class PonchBot:
         latest_price = None
         current_candle_high = 0
         current_candle_low = 9999999
+        base_candle_high = None
+        base_candle_low = None
+        base_candle_ts = None
 
         # Track reference values for confluence alerts
         ref_atr = 0
@@ -498,16 +502,21 @@ class PonchBot:
             last_c = df.iloc[-1]
             current_candle_high = max(current_candle_high, float(last_c["High"]))
             current_candle_low = min(current_candle_low, float(last_c["Low"]))
+            if tf == "5m":
+                base_candle_high = float(last_c["High"])
+                base_candle_low = float(last_c["Low"])
 
             if latest_price is None:
                 latest_price = float(df.iloc[-1]["Close"])
 
             # Process timeframe and capture ATR/TS for confluence reference
-            tf_atr, tf_ts = self._process_timeframe(tf, df, now)
+            tf_atr, tf_ts = self._process_timeframe(tf, df, now, entry_protection_ts=base_candle_ts)
 
             # Collect this TF's current candle ts for TP skip protection
             if tf_ts:
                 current_candle_ts_set.add(tf_ts)
+                if tf == "5m":
+                    base_candle_ts = tf_ts
 
             # Use 1h ATR for confluence targets if available, otherwise fallback
             if tf == "1h" or ref_atr == 0:
@@ -587,7 +596,7 @@ class PonchBot:
                         msg_id = resp.get("result", {}).get("message_id") if resp else None
                         self.tracker.log_signal(
                             side=ce["side"], entry=latest_price, sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
-                            tf="Confluence", timestamp=ref_ts,
+                            tf="Confluence", timestamp=base_candle_ts or conf_ts,
                             msg_id=msg_id, chat_id=PRIVATE_CHAT_ID, signal_type="STRONG",
                             meta={"indicators": ce["indicators"], "size": strong_size}
                         )
@@ -609,7 +618,7 @@ class PonchBot:
                         msg_id = resp.get("result", {}).get("message_id") if resp else None
                         self.tracker.log_signal(
                             side=ce["side"], entry=latest_price, sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
-                            tf="Confluence", timestamp=ref_ts,
+                            tf="Confluence", timestamp=base_candle_ts or conf_ts,
                             msg_id=msg_id, chat_id=PRIVATE_CHAT_ID, signal_type="EXTREME",
                             meta={"indicators": ce["indicators"], "size": extreme_size}
                         )
@@ -619,8 +628,16 @@ class PonchBot:
         # ─── Update Performance Tracker & Success Teasers ────
         if latest_price is not None:
             # 1. Success Teasers (Public Marketing FOMO)
-            # Use aggregated high/low from current candle wicks for better accuracy
-            trade_events = self.tracker.check_outcomes(latest_price, high=current_candle_high, low=current_candle_low, current_candle_ts_set=current_candle_ts_set)
+            # Use the base 5m candle wick range when available to avoid
+            # cross-timeframe false hits from long-duration candles (1h/4h).
+            outcome_high = base_candle_high if base_candle_high is not None else current_candle_high
+            outcome_low = base_candle_low if base_candle_low is not None else current_candle_low
+            trade_events = self.tracker.check_outcomes(
+                latest_price,
+                high=outcome_high,
+                low=outcome_low,
+                current_candle_ts_set=current_candle_ts_set
+            )
             today_str = now.strftime("%Y-%m-%d")
 
             for event in trade_events:
@@ -939,7 +956,7 @@ class PonchBot:
             self.approach_alerts.clear() # Reset level approach tracking
             self._save_state()
         
-        self._reconstruct_session_history(now.hour)
+        self._reconstruct_session_history(now.hour + now.minute / 60.0)
 
     def _update_levels(self):
         """Fetch daily/weekly/monthly/hourly data and calculate levels."""
@@ -1102,7 +1119,7 @@ class PonchBot:
             print(f"[TRACKER ERROR] Failed to send performance summary: {e}")
 
 
-    def _process_timeframe(self, tf, df, now):
+    def _process_timeframe(self, tf, df, now, entry_protection_ts=None):
         """Process one timeframe: channels, momentum, signals."""
 
         # ─── Calculate indicators ────────────────────────
@@ -1347,16 +1364,16 @@ class PonchBot:
             self.sent_signals.add(evt_key)
 
             if evt["type"] == "OPEN":
-                tg.send_scalp_open(tf, evt["side"], evt["price"], emoji=emoji, chat_id=PRIVATE_CHAT_ID)
-                self.sent_signals.add(evt_key)
+                if not self.is_booting:
+                    tg.send_scalp_open(tf, evt["side"], evt["price"], emoji=emoji, chat_id=PRIVATE_CHAT_ID)
                 self._save_state()
-                print(f"  [TG] Scalp Open [{tf}] {evt['side']}")
+                print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Scalp Open [{tf}] {evt['side']}")
 
             elif evt["type"] == "PREPARE":
-                tg.send_scalp_prepare(tf, evt["side"], emoji=emoji, chat_id=PRIVATE_CHAT_ID)
-                self.sent_signals.add(evt_key)
+                if not self.is_booting:
+                    tg.send_scalp_prepare(tf, evt["side"], emoji=emoji, chat_id=PRIVATE_CHAT_ID)
                 self._save_state()
-                print(f"  [TG] Prepare [{tf}] {evt['side']}")
+                print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Prepare [{tf}] {evt['side']}")
 
             elif evt["type"] == "CONFIRMED":
                 # --- Calculate Signal Strength Score ---
@@ -1367,24 +1384,26 @@ class PonchBot:
                 # Dynamic size: scale base size by score, min 0.5%
                 dyn_size = round(max(0.5, (score / 10) * profile["size"]), 1) if score else profile["size"]
 
-                resp = tg.send_scalp_confirmed(
-                    timeframe=tf,
-                    side=evt["side"],
-                    entry=evt["entry"],
-                    sl=evt["sl"],
-                    tp1=evt["tp1"],
-                    tp2=evt["tp2"],
-                    tp3=evt["tp3"],
-                    strength=profile["strength"],
-                    size=dyn_size,
-                    score=score,
-                    trend=self.macro_trend,
-                    reasons=reasons,
-                    chat_id=PRIVATE_CHAT_ID
-                )
+                resp = None
+                if not self.is_booting:
+                    resp = tg.send_scalp_confirmed(
+                        timeframe=tf,
+                        side=evt["side"],
+                        entry=evt["entry"],
+                        sl=evt["sl"],
+                        tp1=evt["tp1"],
+                        tp2=evt["tp2"],
+                        tp3=evt["tp3"],
+                        strength=profile["strength"],
+                        size=dyn_size,
+                        score=score,
+                        trend=self.macro_trend,
+                        reasons=reasons,
+                        chat_id=PRIVATE_CHAT_ID
+                    )
                 msg_id = resp.get("result", {}).get("message_id") if resp else None
                 self._save_state()
-                print(f"  [TG] Scalp Confirmed [{tf}] {evt['side']} @ {evt['entry']:,.2f}")
+                print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Scalp Confirmed [{tf}] {evt['side']} @ {evt['entry']:,.2f}")
 
                 # Log signal for performance tracking
                 self.tracker.log_signal(
@@ -1395,7 +1414,7 @@ class PonchBot:
                     tp2=evt["tp2"],
                     tp3=evt["tp3"],
                     tf=tf,
-                    timestamp=candle_ts,
+                    timestamp=entry_protection_ts or candle_ts,
                     msg_id=msg_id,
                     chat_id=PRIVATE_CHAT_ID,
                     signal_type="SCALP",
@@ -1403,9 +1422,10 @@ class PonchBot:
                 )
 
             elif evt["type"] == "CLOSED":
-                tg.send_scalp_closed(tf, evt["side"], evt["price"], emoji=emoji, chat_id=PRIVATE_CHAT_ID)
+                if not self.is_booting:
+                    tg.send_scalp_closed(tf, evt["side"], evt["price"], emoji=emoji, chat_id=PRIVATE_CHAT_ID)
                 self._save_state()
-                print(f"  [TG] Scalp Closed [{tf}] {evt['side']}")
+                print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Scalp Closed [{tf}] {evt['side']}")
 
 
         # ─── Store prev candle data ──────────────────────
