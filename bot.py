@@ -1166,15 +1166,37 @@ class PonchBot:
                         days = max(1, min(180, int(parts[1])))
                     stats = self.tracker.get_analytics(days=days)
                     totals = stats["totals"]
+                    by_type = stats.get("by_signal_type", {})
+
+                    def fmt_type_line(name):
+                        b = by_type.get(name, {})
+                        generated = int(b.get("generated", 0))
+                        closed = int(b.get("trades", 0))
+                        wr = float(b.get("win_rate", 0.0))
+                        hit = float(b.get("hit_rate", 0.0))
+                        avg_r = float(b.get("avg_r", 0.0))
+                        return (
+                            f"{name:<7} g={generated:<3} c={closed:<3} "
+                            f"wr={wr:>5.1f}% hit={hit:>5.1f}% avgR={avg_r:+.2f}"
+                        )
+
                     msg = (
-                        f"📊 <b>SCALP ANALYTICS ({days}d)</b>\n\n"
+                        f"📊 <b>SIGNAL ANALYTICS ({days}d)</b>\n\n"
                         f"<pre>"
-                        f"Trades:      {totals['trades']}\n"
+                        f"Generated:   {totals['generated']}\n"
+                        f"Closed:      {totals['trades']}\n"
+                        f"Open:        {totals['open']}\n"
                         f"Wins:        {totals['wins']}\n"
                         f"Losses:      {totals['losses']}\n"
                         f"Breakeven:   {totals['breakeven']}\n"
+                        f"Win Rate:    {totals['win_rate']:.1f}%\n"
+                        f"Hit Rate:    {totals['hit_rate']:.1f}%\n"
                         f"Avg R:       {totals['avg_r']:.2f}\n"
-                        f"Expectancy:  {totals['expectancy_r']:.2f}R"
+                        f"Expectancy:  {totals['expectancy_r']:.2f}R\n"
+                        f"------------------------------\n"
+                        f"{fmt_type_line('SCALP')}\n"
+                        f"{fmt_type_line('STRONG')}\n"
+                        f"{fmt_type_line('EXTREME')}"
                         f"</pre>"
                     )
                     tg.send(msg, parse_mode="HTML", chat_id=user_id)

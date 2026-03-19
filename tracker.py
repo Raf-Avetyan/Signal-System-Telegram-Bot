@@ -293,30 +293,49 @@ class SignalTracker:
         return "OFF_SESSION"
 
     def get_analytics(self, days=30):
-        """Return analytics dashboard summary for recent closed signals."""
+        """Return analytics dashboard summary for recent signals (all types)."""
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
         totals = {
+            "generated": 0,
             "trades": 0,
+            "open": 0,
             "wins": 0,
             "losses": 0,
             "breakeven": 0,
             "avg_r": 0.0,
             "expectancy_r": 0.0,
+            "win_rate": 0.0,
+            "hit_rate": 0.0,
         }
         by_tf = {}
         by_side = {"LONG": {"trades": 0, "avg_r": 0.0}, "SHORT": {"trades": 0, "avg_r": 0.0}}
         by_session = {}
+        by_type = {}
         r_values = []
 
         def ensure_bucket(bucket, key):
             if key not in bucket:
                 bucket[key] = {"trades": 0, "wins": 0, "losses": 0, "breakeven": 0, "avg_r": 0.0}
 
+        def ensure_type_bucket(key):
+            if key not in by_type:
+                by_type[key] = {
+                    "generated": 0,
+                    "trades": 0,
+                    "open": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "breakeven": 0,
+                    "avg_r": 0.0,
+                    "expectancy_r": 0.0,
+                    "win_rate": 0.0,
+                    "hit_rate": 0.0,
+                    "_r_values": [],
+                }
+
         for sig in self.signals:
             status = sig.get("status")
-            if status not in {"SL", "TP3", "ENTRY_CLOSE", "PROFIT_SL"}:
-                continue
             try:
                 logged = datetime.fromisoformat(sig["logged_at"])
                 if logged.tzinfo is None:
@@ -329,13 +348,22 @@ class SignalTracker:
             if logged < cutoff:
                 continue
 
+            sig_type = str(sig.get("type", "SCALP")).upper()
+            ensure_type_bucket(sig_type)
+            by_type[sig_type]["generated"] += 1
+            totals["generated"] += 1
+
+            closed_statuses = {"SL", "TP3", "ENTRY_CLOSE", "PROFIT_SL"}
+            if status not in closed_statuses:
+                by_type[sig_type]["open"] += 1
+                totals["open"] += 1
+                continue
+
             entry = float(sig.get("entry", 0))
             sl = float(sig.get("sl", 0))
             tp1 = float(sig.get("tp1", entry))
             tp3 = float(sig.get("tp3", entry))
             risk = abs(entry - sl)
-            if risk <= 0:
-                continue
 
             if status == "SL":
                 r_mult = -1.0
@@ -344,15 +372,18 @@ class SignalTracker:
                 r_mult = 0.0
                 outcome = "breakeven"
             elif status == "PROFIT_SL":
-                r_mult = max(0.2, abs(tp1 - entry) / risk * 0.6)
+                r_mult = max(0.2, abs(tp1 - entry) / risk * 0.6) if risk > 0 else 0.2
                 outcome = "wins"
             else:  # TP3
-                r_mult = abs(tp3 - entry) / risk
+                r_mult = (abs(tp3 - entry) / risk) if risk > 0 else 0.0
                 outcome = "wins"
 
             totals["trades"] += 1
             totals[outcome] += 1
             r_values.append(r_mult)
+            by_type[sig_type]["trades"] += 1
+            by_type[sig_type][outcome] += 1
+            by_type[sig_type]["_r_values"].append(r_mult)
 
             tf = sig.get("tf", "N/A")
             side = sig.get("side", "N/A")
@@ -373,10 +404,23 @@ class SignalTracker:
         if totals["trades"] > 0:
             totals["avg_r"] = sum(r_values) / len(r_values)
             totals["expectancy_r"] = totals["avg_r"]
+            closed = totals["wins"] + totals["losses"]
+            totals["win_rate"] = (totals["wins"] / closed * 100.0) if closed else 0.0
+            totals["hit_rate"] = (totals["wins"] / totals["generated"] * 100.0) if totals["generated"] else 0.0
+
+        for key, bucket in by_type.items():
+            if bucket["trades"] > 0 and bucket["_r_values"]:
+                bucket["avg_r"] = sum(bucket["_r_values"]) / len(bucket["_r_values"])
+                bucket["expectancy_r"] = bucket["avg_r"]
+                closed = bucket["wins"] + bucket["losses"]
+                bucket["win_rate"] = (bucket["wins"] / closed * 100.0) if closed else 0.0
+                bucket["hit_rate"] = (bucket["wins"] / bucket["generated"] * 100.0) if bucket["generated"] else 0.0
+            bucket.pop("_r_values", None)
 
         return {
             "period_days": days,
             "totals": totals,
+            "by_signal_type": by_type,
             "by_timeframe": by_tf,
             "by_side": by_side,
             "by_session": by_session,
