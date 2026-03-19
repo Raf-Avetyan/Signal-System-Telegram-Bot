@@ -63,6 +63,13 @@ TIMEFRAME_PROFILES = {
     "4h":  {"strength": "Ultra",  "emoji": "💎", "size": 3.0},
 }
 
+# Scalp trend filter:
+# - "hard": block all counter-trend scalp confirms
+# - "soft": allow counter-trend only if score >= SCALP_COUNTERTREND_MIN_SCORE
+# - "off": no trend gating for scalp confirms
+SCALP_TREND_FILTER_MODE = "hard"
+SCALP_COUNTERTREND_MIN_SCORE = 8
+
 # ─── SIGNAL POINTS ────────────────────────────
 # Trade signal points by entry level
 SIGNAL_POINTS = {

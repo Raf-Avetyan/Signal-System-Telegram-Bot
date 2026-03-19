@@ -17,7 +17,8 @@ from config import (
     APPROACH_LEVELS, SESSIONS, get_adjusted_sessions, ALERT_BATCH_WINDOW,
     OI_CHANGE_THRESHOLD, LIQ_SQUEEZE_THRESHOLD, LIQ_ALERT_COOLDOWN, PRIVATE_CHAT_ID,
     FAST_MOVE_THRESHOLD, FAST_MOVE_WINDOW, FAST_MOVE_COOLDOWN,
-    BITUNIX_REG_LINK, INVITE_LINK, COMMAND_POLL_INTERVAL
+    BITUNIX_REG_LINK, INVITE_LINK, COMMAND_POLL_INTERVAL,
+    SCALP_TREND_FILTER_MODE, SCALP_COUNTERTREND_MIN_SCORE
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
@@ -1380,6 +1381,28 @@ class PonchBot:
                 score, reasons = calculate_signal_score(
                     evt, df, self.levels, self.macro_trend, self.last_oi, self.last_liqs
                 )
+
+                # --- Trend gate for scalp confirms ---
+                trend_name = self.macro_trend or "Ranging"
+                bullish_trends = {"Bullish", "Trending Bullish", "Strong Bullish"}
+                bearish_trends = {"Bearish", "Trending Bearish", "Strong Bearish"}
+                trend_aligned = (
+                    trend_name == "Ranging"
+                    or (evt["side"] == "LONG" and trend_name in bullish_trends)
+                    or (evt["side"] == "SHORT" and trend_name in bearish_trends)
+                )
+                filter_mode = str(SCALP_TREND_FILTER_MODE).strip().lower()
+
+                if not trend_aligned:
+                    if filter_mode == "hard":
+                        print(f"  [SCALP] Blocked {tf} {evt['side']}: counter-trend vs {trend_name} (mode=hard)")
+                        continue
+                    if filter_mode == "soft" and score < SCALP_COUNTERTREND_MIN_SCORE:
+                        print(
+                            f"  [SCALP] Blocked {tf} {evt['side']}: "
+                            f"counter-trend score {score}<{SCALP_COUNTERTREND_MIN_SCORE} vs {trend_name} (mode=soft)"
+                        )
+                        continue
 
                 # Dynamic size: scale base size by score, min 0.5%
                 dyn_size = round(max(0.5, (score / 10) * profile["size"]), 1) if score else profile["size"]
