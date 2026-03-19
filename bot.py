@@ -20,7 +20,16 @@ from config import (
     BITUNIX_REG_LINK, INVITE_LINK, COMMAND_POLL_INTERVAL,
     SCALP_TREND_FILTER_MODE, SCALP_COUNTERTREND_MIN_SCORE,
     SCALP_OPEN_ALERT_COOLDOWN, SCALP_COUNTERTREND_MAX_PER_WINDOW,
-    SCALP_COUNTERTREND_WINDOW_SEC
+    SCALP_COUNTERTREND_WINDOW_SEC, SCALP_LOSS_STREAK_LIMIT,
+    SCALP_LOSS_COOLDOWN_SEC, VOLATILITY_FILTER_ENABLED,
+    VOLATILITY_MIN_ATR_PCT, VOLATILITY_MAX_ATR_PCT,
+    SESSION_SCALP_MODE, ORDERFLOW_SAFETY_ENABLED,
+    ORDERFLOW_ANOMALY_SCORE_MIN, ORDERFLOW_OI_PCT_ANOMALY,
+    ORDERFLOW_LIQ_ANOMALY_USD, SCALP_MIN_SCORE_BY_TF,
+    SCALP_ALLOWED_SESSIONS_BY_TF, SCALP_RELAXED_FILTERS,
+    SCALP_RELAX_MIN_SCORE_DELTA, SCALP_RELAX_VOL_MIN_MULT,
+    SCALP_RELAX_VOL_MAX_MULT, SCALP_RELAX_COUNTERTREND_EXTRA,
+    SCALP_RELAX_ALLOW_OFFSESSION
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
@@ -83,6 +92,8 @@ class PonchBot:
         self.last_summary_date   = state.get("last_summary_date")      # New: Track summary schedule
         self.last_scalp_open_alert = state.get("last_scalp_open_alert", {})
         self.scalp_countertrend_hits = state.get("scalp_countertrend_hits", {"LONG": [], "SHORT": []})
+        self.scalp_loss_streak = state.get("scalp_loss_streak", {"LONG": 0, "SHORT": 0})
+        self.scalp_side_cooldown_until = state.get("scalp_side_cooldown_until", {"LONG": 0, "SHORT": 0})
         self.last_session_update = time.time()
         self.last_daily_update   = time.time()
         self.last_update_id      = state.get("last_update_id", 0)
@@ -119,6 +130,30 @@ class PonchBot:
         
         if self.batch_timer_start is None:
             self.batch_timer_start = time.time()
+
+    def _get_current_session_name(self, now):
+        """Return active session name (ASIA/LONDON/NY) or None."""
+        sessions = get_adjusted_sessions(now)
+        current_float_hour = now.hour + now.minute / 60.0
+        for s_name, s_times in sessions.items():
+            s_open = s_times["open"]
+            s_close = s_times["close"]
+            if s_open < s_close:
+                if s_open <= current_float_hour < s_close:
+                    return s_name
+            else:
+                if current_float_hour >= s_open or current_float_hour < s_close:
+                    return s_name
+        return None
+
+    def _is_orderflow_anomaly(self):
+        """Check if order-flow context is anomalous and risky for fresh scalp entries."""
+        oi_pct = 0.0
+        if self.last_oi and self.last_oi_base:
+            oi_pct = abs((self.last_oi / self.last_oi_base - 1) * 100)
+        liq_spike = self.last_liqs >= ORDERFLOW_LIQ_ANOMALY_USD
+        oi_spike = oi_pct >= ORDERFLOW_OI_PCT_ANOMALY
+        return oi_spike or liq_spike, oi_pct
 
 
     def run(self):
@@ -374,6 +409,8 @@ class PonchBot:
                 "last_summary_date": self.last_summary_date,
                 "last_scalp_open_alert": self.last_scalp_open_alert,
                 "scalp_countertrend_hits": self.scalp_countertrend_hits,
+                "scalp_loss_streak": self.scalp_loss_streak,
+                "scalp_side_cooldown_until": self.scalp_side_cooldown_until,
                 "last_update_id": self.last_update_id,
                 "scalp_trackers": {tf: tracker.to_dict() for tf, tracker in self.scalp_trackers.items()}
             }
@@ -650,6 +687,28 @@ class PonchBot:
             for event in trade_events:
                 sig = event["sig"]
                 evt_type = event["type"] # "TP1", "TP2", "TP3", "SL"
+                side = sig.get("side")
+                risk_state_changed = False
+
+                # --- Loss-streak protection state updates ---
+                if side in ("LONG", "SHORT"):
+                    if evt_type == "SL":
+                        current_streak = int(self.scalp_loss_streak.get(side, 0)) + 1
+                        self.scalp_loss_streak[side] = current_streak
+                        risk_state_changed = True
+                        if current_streak >= SCALP_LOSS_STREAK_LIMIT:
+                            self.scalp_side_cooldown_until[side] = current_time + SCALP_LOSS_COOLDOWN_SEC
+                            risk_state_changed = True
+                            print(
+                                f"  [RISK] {side} cooldown armed for {SCALP_LOSS_COOLDOWN_SEC//60}m "
+                                f"after streak={current_streak}"
+                            )
+                    elif evt_type in ("TP3", "PROFIT_SL"):
+                        self.scalp_loss_streak[side] = 0
+                        risk_state_changed = True
+                    elif evt_type == "ENTRY_CLOSE" and int(self.scalp_loss_streak.get(side, 0)) > 0:
+                        self.scalp_loss_streak[side] = max(0, int(self.scalp_loss_streak.get(side, 0)) - 1)
+                        risk_state_changed = True
                 
                 # --- LIVE MESSAGE UPDATE ---
                 # Update the original signal message with hit markers
@@ -676,6 +735,9 @@ class PonchBot:
                         tg.send_breakeven_alert(sig["chat_id"], sig["msg_id"], sig.get("tf", "Unknown"))
                     elif evt_type == "PROFIT_SL":
                         tg.send_profit_sl_alert(sig["chat_id"], sig["msg_id"], sig.get("tf", "Unknown"))
+
+                if risk_state_changed:
+                    self._save_state()
 
             # 2. Liquidation Squeezes
             if self.last_liqs >= LIQ_SQUEEZE_THRESHOLD:
@@ -974,6 +1036,8 @@ class PonchBot:
             self.session_data.clear()   # Actually clear old sessions data
             self.sent_sessions.clear()   # Reset session recap tracking
             self.approach_alerts.clear() # Reset level approach tracking
+            self.scalp_loss_streak = {"LONG": 0, "SHORT": 0}
+            self.scalp_side_cooldown_until = {"LONG": 0, "SHORT": 0}
             self._save_state()
         
         self._reconstruct_session_history(now.hour + now.minute / 60.0)
@@ -1094,6 +1158,28 @@ class PonchBot:
                     f"3. Once verified, you’ll receive an invite link to join."
                 )
                 tg.send(welcome_msg, parse_mode="HTML", chat_id=user_id)
+            elif text.startswith("/analytics"):
+                try:
+                    days = 30
+                    parts = text.split()
+                    if len(parts) > 1 and parts[1].isdigit():
+                        days = max(1, min(180, int(parts[1])))
+                    stats = self.tracker.get_analytics(days=days)
+                    totals = stats["totals"]
+                    msg = (
+                        f"📊 <b>SCALP ANALYTICS ({days}d)</b>\n\n"
+                        f"<pre>"
+                        f"Trades:      {totals['trades']}\n"
+                        f"Wins:        {totals['wins']}\n"
+                        f"Losses:      {totals['losses']}\n"
+                        f"Breakeven:   {totals['breakeven']}\n"
+                        f"Avg R:       {totals['avg_r']:.2f}\n"
+                        f"Expectancy:  {totals['expectancy_r']:.2f}R"
+                        f"</pre>"
+                    )
+                    tg.send(msg, parse_mode="HTML", chat_id=user_id)
+                except Exception as e:
+                    tg.send(f"Analytics failed: {e}", chat_id=user_id)
 
             elif text.isdigit():
                 # User sent their UID
@@ -1411,6 +1497,65 @@ class PonchBot:
                     evt, df, self.levels, self.macro_trend, self.last_oi, self.last_liqs
                 )
 
+                side = evt["side"]
+                session_name = self._get_current_session_name(now) or "ASIA"
+                session_cfg = SESSION_SCALP_MODE.get(session_name, {})
+                session_countertrend_max = session_cfg.get("countertrend_max", SCALP_COUNTERTREND_MAX_PER_WINDOW)
+                session_score_boost = session_cfg.get("score_boost", 0)
+                relaxed_filters = bool(SCALP_RELAXED_FILTERS)
+
+                # --- Losing streak cooldown per side ---
+                cooldown_until = self.scalp_side_cooldown_until.get(side, 0)
+                if current_time < cooldown_until:
+                    wait_m = int((cooldown_until - current_time) / 60) + 1
+                    print(f"  [SCALP] Blocked {tf} {side}: side cooldown active ({wait_m}m left)")
+                    continue
+
+                # --- Volatility regime filter ---
+                if VOLATILITY_FILTER_ENABLED and close > 0 and atr_val > 0:
+                    atr_pct = atr_val / close * 100
+                    min_pct = VOLATILITY_MIN_ATR_PCT.get(tf, 0.0)
+                    max_pct = VOLATILITY_MAX_ATR_PCT.get(tf, 99.0)
+                    if relaxed_filters:
+                        min_pct *= float(SCALP_RELAX_VOL_MIN_MULT)
+                        max_pct *= float(SCALP_RELAX_VOL_MAX_MULT)
+                    if atr_pct < min_pct or atr_pct > max_pct:
+                        print(
+                            f"  [SCALP] Blocked {tf} {side}: ATR% {atr_pct:.3f} "
+                            f"outside [{min_pct:.3f}, {max_pct:.3f}]"
+                        )
+                        continue
+
+                # --- Order-flow safety filter ---
+                if ORDERFLOW_SAFETY_ENABLED:
+                    anomaly, oi_pct = self._is_orderflow_anomaly()
+                    if anomaly and score < ORDERFLOW_ANOMALY_SCORE_MIN:
+                        print(
+                            f"  [SCALP] Blocked {tf} {side}: order-flow anomaly "
+                            f"(OI {oi_pct:.2f}%, LIQ ${self.last_liqs:,.0f}) and score {score}"
+                        )
+                        continue
+
+                # --- Session whitelist per timeframe ---
+                allowed_sessions = SCALP_ALLOWED_SESSIONS_BY_TF.get(tf)
+                if allowed_sessions and session_name not in allowed_sessions and not (relaxed_filters and SCALP_RELAX_ALLOW_OFFSESSION):
+                    print(
+                        f"  [SCALP] Blocked {tf} {side}: session {session_name} "
+                        f"not in {allowed_sessions}"
+                    )
+                    continue
+
+                # --- Minimum score gate by timeframe ---
+                min_score_tf = SCALP_MIN_SCORE_BY_TF.get(tf, 0)
+                if relaxed_filters:
+                    min_score_tf = max(0, int(min_score_tf) - int(SCALP_RELAX_MIN_SCORE_DELTA))
+                if score < min_score_tf:
+                    print(
+                        f"  [SCALP] Blocked {tf} {side}: score {score}<{min_score_tf} "
+                        f"(tf quality gate)"
+                    )
+                    continue
+
                 # --- Trend gate for scalp confirms ---
                 trend_name = self.macro_trend or "Ranging"
                 bullish_trends = {"Bullish", "Trending Bullish", "Strong Bullish"}
@@ -1424,17 +1569,24 @@ class PonchBot:
 
                 if not trend_aligned:
                     if filter_mode == "hard":
-                        print(f"  [SCALP] Blocked {tf} {evt['side']}: counter-trend vs {trend_name} (mode=hard)")
-                        continue
-                    if filter_mode == "soft":
-                        if score < SCALP_COUNTERTREND_MIN_SCORE:
+                        if relaxed_filters:
                             print(
-                                f"  [SCALP] Blocked {tf} {evt['side']}: "
-                                f"counter-trend score {score}<{SCALP_COUNTERTREND_MIN_SCORE} vs {trend_name} (mode=soft)"
+                                f"  [SCALP] Relaxed override {tf} {side}: "
+                                f"counter-trend allowed in hard mode vs {trend_name}"
+                            )
+                        else:
+                            print(f"  [SCALP] Blocked {tf} {side}: counter-trend vs {trend_name} (mode=hard)")
+                            continue
+                    if filter_mode == "soft":
+                        required_score = SCALP_COUNTERTREND_MIN_SCORE + session_score_boost
+                        if score < required_score:
+                            print(
+                                f"  [SCALP] Blocked {tf} {side}: "
+                                f"counter-trend score {score}<{required_score} vs {trend_name} (mode=soft)"
                             )
                             continue
 
-                        side_hits = self.scalp_countertrend_hits.get(evt["side"], [])
+                        side_hits = self.scalp_countertrend_hits.get(side, [])
                         if not isinstance(side_hits, list):
                             side_hits = []
                         cutoff = current_time - SCALP_COUNTERTREND_WINDOW_SEC
@@ -1442,17 +1594,40 @@ class PonchBot:
                             ts for ts in side_hits
                             if isinstance(ts, (int, float)) and ts >= cutoff
                         ]
-                        if len(side_hits) >= SCALP_COUNTERTREND_MAX_PER_WINDOW:
+                        ct_extra = int(SCALP_RELAX_COUNTERTREND_EXTRA) if relaxed_filters else 0
+                        ct_limit = session_countertrend_max + ct_extra
+                        if len(side_hits) >= ct_limit:
                             print(
-                                f"  [SCALP] Blocked {tf} {evt['side']}: "
+                                f"  [SCALP] Blocked {tf} {side}: "
                                 f"counter-trend quota reached ({len(side_hits)}/"
-                                f"{SCALP_COUNTERTREND_MAX_PER_WINDOW} in {SCALP_COUNTERTREND_WINDOW_SEC}s)"
+                                f"{ct_limit} in {SCALP_COUNTERTREND_WINDOW_SEC}s)"
                             )
-                            self.scalp_countertrend_hits[evt["side"]] = side_hits
+                            self.scalp_countertrend_hits[side] = side_hits
                             continue
 
                         side_hits.append(current_time)
-                        self.scalp_countertrend_hits[evt["side"]] = side_hits
+                        self.scalp_countertrend_hits[side] = side_hits
+                    elif filter_mode == "hard" and relaxed_filters:
+                        side_hits = self.scalp_countertrend_hits.get(side, [])
+                        if not isinstance(side_hits, list):
+                            side_hits = []
+                        cutoff = current_time - SCALP_COUNTERTREND_WINDOW_SEC
+                        side_hits = [
+                            ts for ts in side_hits
+                            if isinstance(ts, (int, float)) and ts >= cutoff
+                        ]
+                        ct_extra = int(SCALP_RELAX_COUNTERTREND_EXTRA)
+                        ct_limit = session_countertrend_max + ct_extra
+                        if len(side_hits) >= ct_limit:
+                            print(
+                                f"  [SCALP] Blocked {tf} {side}: "
+                                f"relaxed hard-mode quota reached ({len(side_hits)}/"
+                                f"{ct_limit} in {SCALP_COUNTERTREND_WINDOW_SEC}s)"
+                            )
+                            self.scalp_countertrend_hits[side] = side_hits
+                            continue
+                        side_hits.append(current_time)
+                        self.scalp_countertrend_hits[side] = side_hits
 
                 # Dynamic size: scale base size by score, min 0.5%
                 dyn_size = round(max(0.5, (score / 10) * profile["size"]), 1) if score else profile["size"]

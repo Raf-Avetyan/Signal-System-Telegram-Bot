@@ -6,7 +6,9 @@ from config import (
     MOMENTUM_RSI_LEN, MOMENTUM_SMOOTH,
     MOMENTUM_OB, MOMENTUM_OS,
     SCALP_CONFIRM_RSI_BUFFER,
+    TIMEFRAME_CONFIRM_RSI_BUFFER,
     SL_ATR_MULT, TP1_ATR_MULT, TP2_ATR_MULT, TP3_ATR_MULT,
+    TIMEFRAME_RISK_MULTIPLIERS,
     TIMEFRAME_PROFILES,
 )
 
@@ -154,6 +156,8 @@ class ScalpTracker:
                 self.entry_rsi = None
                 self.flat_candles = 0
 
+            confirm_buffer = TIMEFRAME_CONFIRM_RSI_BUFFER.get(self.timeframe, SCALP_CONFIRM_RSI_BUFFER)
+
             # 1. TIMEOUT: close stale window after 10 candles
             if self.zone_entry_candles > 10:
                 events.append({"type": "CLOSED", "side": self.side, "price": close})
@@ -162,8 +166,8 @@ class ScalpTracker:
             # 2. CONFIRMED: RSI exits zone with buffer for stronger confirmation
             #    LONG (was OS < 30): RSI rises above (30 + buffer)
             #    SHORT (was OB > 70): RSI drops below (70 - buffer)
-            elif (self.side == "LONG" and raw_rsi > (MOMENTUM_OS + SCALP_CONFIRM_RSI_BUFFER)) or \
-                 (self.side == "SHORT" and raw_rsi < (MOMENTUM_OB - SCALP_CONFIRM_RSI_BUFFER)):
+            elif (self.side == "LONG" and raw_rsi > (MOMENTUM_OS + confirm_buffer)) or \
+                 (self.side == "SHORT" and raw_rsi < (MOMENTUM_OB - confirm_buffer)):
                 entry = close
                 calc = self._calc_sl_tp(entry, atr_value, self.side)
                 events.append({"type": "CONFIRMED", "side": self.side, "entry": entry, **calc})
@@ -272,16 +276,22 @@ class ScalpTracker:
         if pd.isna(atr_val) or atr_val == 0:
             atr_val = entry * 0.007  # Fallback: 0.7% of price
 
+        tf_cfg = TIMEFRAME_RISK_MULTIPLIERS.get(self.timeframe, {})
+        sl_mult = tf_cfg.get("sl", SL_ATR_MULT)
+        tp1_mult = tf_cfg.get("tp1", TP1_ATR_MULT)
+        tp2_mult = tf_cfg.get("tp2", TP2_ATR_MULT)
+        tp3_mult = tf_cfg.get("tp3", TP3_ATR_MULT)
+
         if side == "LONG":
-            sl  = entry - atr_val * SL_ATR_MULT
-            tp1 = entry + atr_val * TP1_ATR_MULT
-            tp2 = entry + atr_val * TP2_ATR_MULT
-            tp3 = entry + atr_val * TP3_ATR_MULT
+            sl  = entry - atr_val * sl_mult
+            tp1 = entry + atr_val * tp1_mult
+            tp2 = entry + atr_val * tp2_mult
+            tp3 = entry + atr_val * tp3_mult
         else:  # SHORT
-            sl  = entry + atr_val * SL_ATR_MULT
-            tp1 = entry - atr_val * TP1_ATR_MULT
-            tp2 = entry - atr_val * TP2_ATR_MULT
-            tp3 = entry - atr_val * TP3_ATR_MULT
+            sl  = entry + atr_val * sl_mult
+            tp1 = entry - atr_val * tp1_mult
+            tp2 = entry - atr_val * tp2_mult
+            tp3 = entry - atr_val * tp3_mult
 
         return {"sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3}
 

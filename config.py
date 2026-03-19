@@ -45,8 +45,8 @@ ADR_LEN = 14       # Average Daily Range lookback
 # ─── MOMENTUM ────────────────────────────────
 MOMENTUM_RSI_LEN  = 14    # RSI length for momentum
 MOMENTUM_SMOOTH   = 3     # Smoothing EMA for momentum (Fast)
-MOMENTUM_OB       = 70    # Overbought threshold
-MOMENTUM_OS       = 30    # Oversold threshold
+MOMENTUM_OB       = 66    # Overbought threshold
+MOMENTUM_OS       = 34    # Oversold threshold
 
 # ─── SCALP PARAMETERS ────────────────────────
 # ATR multipliers for SL/TP calculation
@@ -54,6 +54,14 @@ SL_ATR_MULT  = 1.3
 TP1_ATR_MULT = 0.7   # 30% allocation
 TP2_ATR_MULT = 1.4   # 40% allocation
 TP3_ATR_MULT = 2.1   # 30% allocation
+
+# Per-timeframe risk model (overrides global multipliers above when present)
+TIMEFRAME_RISK_MULTIPLIERS = {
+    "5m":  {"sl": 2.2, "tp1": 0.2, "tp2": 0.3, "tp3": 0.5},
+    "15m": {"sl": 2.2, "tp1": 0.4, "tp2": 0.5, "tp3": 0.6},
+    "1h":  {"sl": 2.5, "tp1": 0.1, "tp2": 0.11, "tp3": 0.12},
+    "4h":  {"sl": 1.8, "tp1": 0.2, "tp2": 0.3, "tp3": 0.35},
+}
 
 # Strength & Sizing per timeframe
 TIMEFRAME_PROFILES = {
@@ -66,20 +74,81 @@ TIMEFRAME_PROFILES = {
 # Scalp confirmation buffer (RSI points beyond zone edge):
 # LONG confirm when RSI > MOMENTUM_OS + buffer
 # SHORT confirm when RSI < MOMENTUM_OB - buffer
-SCALP_CONFIRM_RSI_BUFFER = 3
+SCALP_CONFIRM_RSI_BUFFER = 2
+TIMEFRAME_CONFIRM_RSI_BUFFER = {
+    "5m": 3,
+    "15m": 1,
+    "1h": 0,
+    "4h": 0,
+}
 
 # Min seconds between repeated OPEN alerts for same timeframe+side.
 # Helps reduce alert spam when RSI repeatedly tags OB/OS.
 SCALP_OPEN_ALERT_COOLDOWN = 1800
 
+# Optional live relaxation layer for scalp filters.
+# Keeps core logic unchanged, but softens entry gates when enabled.
+SCALP_RELAXED_FILTERS = True
+SCALP_RELAX_MIN_SCORE_DELTA = 2
+SCALP_RELAX_VOL_MIN_MULT = 0.75
+SCALP_RELAX_VOL_MAX_MULT = 1.25
+SCALP_RELAX_COUNTERTREND_EXTRA = 2
+SCALP_RELAX_ALLOW_OFFSESSION = True
+
 # Scalp trend filter:
 # - "hard": block all counter-trend scalp confirms
 # - "soft": allow counter-trend only if score >= SCALP_COUNTERTREND_MIN_SCORE
 # - "off": no trend gating for scalp confirms
-SCALP_TREND_FILTER_MODE = "soft"
-SCALP_COUNTERTREND_MIN_SCORE = 8
-SCALP_COUNTERTREND_MAX_PER_WINDOW = 2
+SCALP_TREND_FILTER_MODE = "off"
+SCALP_COUNTERTREND_MIN_SCORE = 6
+SCALP_COUNTERTREND_MAX_PER_WINDOW = 3
 SCALP_COUNTERTREND_WINDOW_SEC = 21600  # 6h
+
+# Win-rate-first quality gates
+SCALP_MIN_SCORE_BY_TF = {
+    "5m": 4,
+    "15m": 4,
+    "1h": 3,
+    "4h": 1,
+}
+SCALP_ALLOWED_SESSIONS_BY_TF = {
+    "5m": ["LONDON", "NY"],
+    "15m": ["ASIA", "LONDON", "NY"],
+    "1h": ["ASIA", "LONDON", "NY"],
+    "4h": ["ASIA", "LONDON", "NY"],
+}
+
+# Lose-streak protection
+SCALP_LOSS_STREAK_LIMIT = 3
+SCALP_LOSS_COOLDOWN_SEC = 1800
+
+# Volatility regime filter by timeframe (ATR/Close % bounds)
+VOLATILITY_FILTER_ENABLED = True
+VOLATILITY_MIN_ATR_PCT = {
+    "5m": 0.03,
+    "15m": 0.04,
+    "1h": 0.06,
+    "4h": 0.08,
+}
+VOLATILITY_MAX_ATR_PCT = {
+    "5m": 1.50,
+    "15m": 1.60,
+    "1h": 1.80,
+    "4h": 2.20,
+}
+
+# Session-aware scalp mode tuning
+SESSION_SCALP_MODE = {
+    "ASIA":   {"countertrend_max": 1, "score_boost": 1},
+    "LONDON": {"countertrend_max": 2, "score_boost": 0},
+    "NY":     {"countertrend_max": 2, "score_boost": 0},
+}
+
+# Order-flow safety filter for scalp confirmations
+ORDERFLOW_SAFETY_ENABLED = True
+ORDERFLOW_ANOMALY_SCORE_MIN = 8
+ORDERFLOW_OI_PCT_ANOMALY = 1.5      # absolute OI change (%)
+ORDERFLOW_LIQ_ANOMALY_USD = 1200000 # liquidation spike threshold
 
 # ─── SIGNAL POINTS ────────────────────────────
 # Trade signal points by entry level

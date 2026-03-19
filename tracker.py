@@ -87,8 +87,10 @@ class SignalTracker:
         # Clear new-this-tick set each call
         self._new_this_tick.clear()
 
+        terminal_statuses = {"SL", "TP3", "CLOSED", "ENTRY_CLOSE", "PROFIT_SL"}
+
         for sig in self.signals:
-            if sig["status"] in ("SL", "TP3", "CLOSED"):
+            if sig["status"] in terminal_statuses:
                 continue
 
             # Skip signal if we're still on the candle it was born on
@@ -272,6 +274,112 @@ class SignalTracker:
             "total": total,
             "tp1_hits": tp1_hits,
             "sl_hits": sl_hits,
+        }
+
+    def _session_name_for_dt(self, dt_utc):
+        """Return active session name for a UTC datetime."""
+        from config import get_adjusted_sessions
+        sessions = get_adjusted_sessions(dt_utc)
+        float_hour = dt_utc.hour + dt_utc.minute / 60.0
+        for s_name, s_times in sessions.items():
+            s_open = s_times["open"]
+            s_close = s_times["close"]
+            if s_open < s_close:
+                if s_open <= float_hour < s_close:
+                    return s_name
+            else:
+                if float_hour >= s_open or float_hour < s_close:
+                    return s_name
+        return "OFF_SESSION"
+
+    def get_analytics(self, days=30):
+        """Return analytics dashboard summary for recent closed signals."""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+        totals = {
+            "trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "breakeven": 0,
+            "avg_r": 0.0,
+            "expectancy_r": 0.0,
+        }
+        by_tf = {}
+        by_side = {"LONG": {"trades": 0, "avg_r": 0.0}, "SHORT": {"trades": 0, "avg_r": 0.0}}
+        by_session = {}
+        r_values = []
+
+        def ensure_bucket(bucket, key):
+            if key not in bucket:
+                bucket[key] = {"trades": 0, "wins": 0, "losses": 0, "breakeven": 0, "avg_r": 0.0}
+
+        for sig in self.signals:
+            status = sig.get("status")
+            if status not in {"SL", "TP3", "ENTRY_CLOSE", "PROFIT_SL"}:
+                continue
+            try:
+                logged = datetime.fromisoformat(sig["logged_at"])
+                if logged.tzinfo is None:
+                    logged = logged.replace(tzinfo=timezone.utc)
+                else:
+                    logged = logged.astimezone(timezone.utc)
+            except Exception:
+                continue
+
+            if logged < cutoff:
+                continue
+
+            entry = float(sig.get("entry", 0))
+            sl = float(sig.get("sl", 0))
+            tp1 = float(sig.get("tp1", entry))
+            tp3 = float(sig.get("tp3", entry))
+            risk = abs(entry - sl)
+            if risk <= 0:
+                continue
+
+            if status == "SL":
+                r_mult = -1.0
+                outcome = "losses"
+            elif status == "ENTRY_CLOSE":
+                r_mult = 0.0
+                outcome = "breakeven"
+            elif status == "PROFIT_SL":
+                r_mult = max(0.2, abs(tp1 - entry) / risk * 0.6)
+                outcome = "wins"
+            else:  # TP3
+                r_mult = abs(tp3 - entry) / risk
+                outcome = "wins"
+
+            totals["trades"] += 1
+            totals[outcome] += 1
+            r_values.append(r_mult)
+
+            tf = sig.get("tf", "N/A")
+            side = sig.get("side", "N/A")
+            session = self._session_name_for_dt(logged)
+
+            ensure_bucket(by_tf, tf)
+            ensure_bucket(by_session, session)
+            for bucket in (by_tf[tf], by_session[session]):
+                bucket["trades"] += 1
+                bucket[outcome] += 1
+                bucket["avg_r"] = ((bucket["avg_r"] * (bucket["trades"] - 1)) + r_mult) / bucket["trades"]
+
+            if side in by_side:
+                prev = by_side[side]
+                prev["trades"] += 1
+                prev["avg_r"] = ((prev["avg_r"] * (prev["trades"] - 1)) + r_mult) / prev["trades"]
+
+        if totals["trades"] > 0:
+            totals["avg_r"] = sum(r_values) / len(r_values)
+            totals["expectancy_r"] = totals["avg_r"]
+
+        return {
+            "period_days": days,
+            "totals": totals,
+            "by_timeframe": by_tf,
+            "by_side": by_side,
+            "by_session": by_session,
         }
 
     def cleanup_old(self, days=7):
