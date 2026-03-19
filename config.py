@@ -174,4 +174,4 @@ ALERT_BATCH_WINDOW = 10     # Seconds to wait for multiple alerts before batchin
 
 # ─── REGISTRATION & ONBOARDING ───────────────
 BITUNIX_REG_LINK = "https://www.bitunix.com/register?vipCode=mrponch"
-INVITE_LINK = "https://t.me/+3Jm5r3Jd0rxiOGUy"
+INVITE_LINK = "https://t.me/+Z0rG8WJK58RlN2Ey"
