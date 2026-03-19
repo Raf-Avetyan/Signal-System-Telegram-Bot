@@ -18,7 +18,8 @@ from config import (
     OI_CHANGE_THRESHOLD, LIQ_SQUEEZE_THRESHOLD, LIQ_ALERT_COOLDOWN, PRIVATE_CHAT_ID,
     FAST_MOVE_THRESHOLD, FAST_MOVE_WINDOW, FAST_MOVE_COOLDOWN,
     BITUNIX_REG_LINK, INVITE_LINK, COMMAND_POLL_INTERVAL,
-    SCALP_TREND_FILTER_MODE, SCALP_COUNTERTREND_MIN_SCORE
+    SCALP_TREND_FILTER_MODE, SCALP_COUNTERTREND_MIN_SCORE,
+    SCALP_OPEN_ALERT_COOLDOWN
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
@@ -79,6 +80,7 @@ class PonchBot:
         self.last_funding_alert  = state.get("last_funding_alert", 0)   
         self.last_market_alert   = state.get("last_market_alert", 0)
         self.last_summary_date   = state.get("last_summary_date")      # New: Track summary schedule
+        self.last_scalp_open_alert = state.get("last_scalp_open_alert", {})
         self.last_session_update = time.time()
         self.last_daily_update   = time.time()
         self.last_update_id      = state.get("last_update_id", 0)
@@ -368,6 +370,7 @@ class PonchBot:
                 "last_funding_alert": self.last_funding_alert,
                 "last_market_alert": self.last_market_alert,
                 "last_summary_date": self.last_summary_date,
+                "last_scalp_open_alert": self.last_scalp_open_alert,
                 "last_update_id": self.last_update_id,
                 "scalp_trackers": {tf: tracker.to_dict() for tf, tracker in self.scalp_trackers.items()}
             }
@@ -1365,10 +1368,20 @@ class PonchBot:
             self.sent_signals.add(evt_key)
 
             if evt["type"] == "OPEN":
-                if not self.is_booting:
+                open_key = f"{tf}_{evt['side']}"
+                last_open_alert_ts = self.last_scalp_open_alert.get(open_key, 0)
+                can_send_open = (current_time - last_open_alert_ts) >= SCALP_OPEN_ALERT_COOLDOWN
+
+                if not self.is_booting and can_send_open:
                     tg.send_scalp_open(tf, evt["side"], evt["price"], emoji=emoji, chat_id=PRIVATE_CHAT_ID)
+                    self.last_scalp_open_alert[open_key] = current_time
                 self._save_state()
-                print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Scalp Open [{tf}] {evt['side']}")
+                if self.is_booting:
+                    print(f"  [TG] Skipped Scalp Open [{tf}] {evt['side']} (booting)")
+                elif not can_send_open:
+                    print(f"  [SCALP] Suppressed Open [{tf}] {evt['side']} (cooldown)")
+                else:
+                    print(f"  [TG] Sent Scalp Open [{tf}] {evt['side']}")
 
             elif evt["type"] == "PREPARE":
                 if not self.is_booting:

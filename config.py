@@ -63,6 +63,15 @@ TIMEFRAME_PROFILES = {
     "4h":  {"strength": "Ultra",  "emoji": "💎", "size": 3.0},
 }
 
+# Scalp confirmation buffer (RSI points beyond zone edge):
+# LONG confirm when RSI > MOMENTUM_OS + buffer
+# SHORT confirm when RSI < MOMENTUM_OB - buffer
+SCALP_CONFIRM_RSI_BUFFER = 4
+
+# Min seconds between repeated OPEN alerts for same timeframe+side.
+# Helps reduce alert spam when RSI repeatedly tags OB/OS.
+SCALP_OPEN_ALERT_COOLDOWN = 1800
+
 # Scalp trend filter:
 # - "hard": block all counter-trend scalp confirms
 # - "soft": allow counter-trend only if score >= SCALP_COUNTERTREND_MIN_SCORE

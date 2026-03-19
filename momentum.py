@@ -5,6 +5,7 @@ import numpy as np
 from config import (
     MOMENTUM_RSI_LEN, MOMENTUM_SMOOTH,
     MOMENTUM_OB, MOMENTUM_OS,
+    SCALP_CONFIRM_RSI_BUFFER,
     SL_ATR_MULT, TP1_ATR_MULT, TP2_ATR_MULT, TP3_ATR_MULT,
     TIMEFRAME_PROFILES,
 )
@@ -158,11 +159,11 @@ class ScalpTracker:
                 events.append({"type": "CLOSED", "side": self.side, "price": close})
                 _reset()
 
-            # 2. CONFIRMED: RSI exits the zone
-            #    LONG (was OS < 30): RSI rises above 30
-            #    SHORT (was OB > 70): RSI drops below 70
-            elif (self.side == "LONG" and raw_rsi > MOMENTUM_OS) or \
-                 (self.side == "SHORT" and raw_rsi < MOMENTUM_OB):
+            # 2. CONFIRMED: RSI exits zone with buffer for stronger confirmation
+            #    LONG (was OS < 30): RSI rises above (30 + buffer)
+            #    SHORT (was OB > 70): RSI drops below (70 - buffer)
+            elif (self.side == "LONG" and raw_rsi > (MOMENTUM_OS + SCALP_CONFIRM_RSI_BUFFER)) or \
+                 (self.side == "SHORT" and raw_rsi < (MOMENTUM_OB - SCALP_CONFIRM_RSI_BUFFER)):
                 entry = close
                 calc = self._calc_sl_tp(entry, atr_value, self.side)
                 events.append({"type": "CONFIRMED", "side": self.side, "entry": entry, **calc})
