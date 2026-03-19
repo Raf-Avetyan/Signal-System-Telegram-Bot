@@ -66,7 +66,7 @@ TIMEFRAME_PROFILES = {
 # Scalp confirmation buffer (RSI points beyond zone edge):
 # LONG confirm when RSI > MOMENTUM_OS + buffer
 # SHORT confirm when RSI < MOMENTUM_OB - buffer
-SCALP_CONFIRM_RSI_BUFFER = 4
+SCALP_CONFIRM_RSI_BUFFER = 3
 
 # Min seconds between repeated OPEN alerts for same timeframe+side.
 # Helps reduce alert spam when RSI repeatedly tags OB/OS.
