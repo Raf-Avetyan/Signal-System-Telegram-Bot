@@ -658,11 +658,24 @@ class PonchBot:
 
                     # NEW: Reply if TP2 or TP3 targets hit
                     if evt_type == "TP2":
-                        tg.send_tp2_hit_congrats(sig["chat_id"], sig["msg_id"], sig.get("tf", "Unknown"))
+                        tg.send_tp2_hit_congrats(
+                            sig["chat_id"],
+                            sig["msg_id"],
+                            sig.get("tf", "Unknown"),
+                            side=sig.get("side"),
+                            lock_price=sig.get("tp1"),
+                            entry=sig.get("entry"),
+                            sl=sig.get("sl"),
+                            tp1=sig.get("tp1"),
+                            tp2=sig.get("tp2"),
+                            size=(sig.get("meta", {}) or {}).get("size")
+                        )
                     elif evt_type == "TP3":
                         tg.send_tp3_hit_congrats(sig["chat_id"], sig["msg_id"], sig.get("tf", "Unknown"))
                     elif evt_type == "ENTRY_CLOSE":
                         tg.send_breakeven_alert(sig["chat_id"], sig["msg_id"], sig.get("tf", "Unknown"))
+                    elif evt_type == "PROFIT_SL":
+                        tg.send_profit_sl_alert(sig["chat_id"], sig["msg_id"], sig.get("tf", "Unknown"))
 
             # 2. Liquidation Squeezes
             if self.last_liqs >= LIQ_SQUEEZE_THRESHOLD:

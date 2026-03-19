@@ -51,7 +51,7 @@ class SignalTracker:
             "timestamp": timestamp,
             "entry_candle_ts": timestamp,  # candle that produced this signal — skip TP checks on this candle
             "logged_at": datetime.now(timezone.utc).isoformat(),
-            "status": "OPEN",       # OPEN, TP1, TP2, TP3, SL, CLOSED
+            "status": "OPEN",       # OPEN, TP1, TP2, TP3, SL, PROFIT_SL, CLOSED
             "tp1_hit": False,
             "tp2_hit": False,
             "tp3_hit": False,
@@ -181,10 +181,11 @@ class SignalTracker:
 
             if (is_long and sl_price <= sig["sl"]) or (not is_long and sl_price >= sig["sl"]):
                 if sig["tp1_hit"]:
-                    # Fallback — usually ENTRY_CLOSE should hit first if checked before SL
-                    sig["status"] = "CLOSED" 
+                    # Stop was moved into profit after targets; this is a protected win.
+                    sig["status"] = "PROFIT_SL"
                     sig["closed_at"] = datetime.now(timezone.utc).isoformat()
                     changed = True
+                    events.append({"type": "PROFIT_SL", "sig": sig})
                 else:
                     sig["sl_hit"] = True
                     sig["status"] = "SL"

@@ -47,8 +47,11 @@ def send(text, parse_mode=None, chat_id=None, reply_markup=None, reply_to_messag
         print(f"[TG ERROR] {e}")
         return None
 
-def send_tp2_hit_congrats(chat_id, message_id, tf):
-    """Send a reply for hitting TP2."""
+def send_tp2_hit_congrats(
+    chat_id, message_id, tf, side=None, lock_price=None,
+    entry=None, sl=None, tp1=None, tp2=None, size=None
+):
+    """Send a reply for hitting TP2 with dynamic profit-lock suggestion."""
     import random
     messages = [
         f"⚡️ <b>TARGET 2 SMACKED!</b> [{tf}] Moving fast! Final goal in sight. 🚀",
@@ -56,6 +59,41 @@ def send_tp2_hit_congrats(chat_id, message_id, tf):
         f"🔥 <b>MID-TARGET HIT!</b> [{tf}] 2/3 TPs done. Pure momentum! 💰",
     ]
     txt = random.choice(messages)
+
+    dynamic_lock = lock_price
+    mode_label = "Standard"
+    if side in ("LONG", "SHORT") and entry is not None and sl is not None and tp1 is not None:
+        risk_r = abs(entry - sl)
+        if risk_r > 0:
+            # Position-size aware safety profile:
+            # - Larger size -> tighter protection
+            # - Smaller size -> more breathing room
+            if size is not None and size >= 2.0:
+                r_mult = 0.8
+                mode_label = "Tight (size-aware)"
+            elif size is not None and size >= 1.0:
+                r_mult = 0.6
+                mode_label = "Balanced (size-aware)"
+            else:
+                r_mult = 0.4
+                mode_label = "Loose (size-aware)"
+
+            if side == "LONG":
+                candidate = entry + risk_r * r_mult
+                # keep lock in profit but not above TP1
+                dynamic_lock = min(tp1, max(entry, candidate))
+            else:
+                candidate = entry - risk_r * r_mult
+                # keep lock in profit but not below TP1 for shorts
+                dynamic_lock = max(tp1, min(entry, candidate))
+
+    if dynamic_lock is not None:
+        side_txt = side if side else "POSITION"
+        txt += (
+            f"\n\n🛡 <b>Safety Update</b>\n"
+            f"Set SL in profit for <b>{side_txt}</b> at <b>{fmt_price(dynamic_lock)}</b>\n"
+            f"<i>Mode: {mode_label}</i>"
+        )
     return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
 
 def send_tp3_hit_congrats(chat_id, message_id, tf):
@@ -73,6 +111,14 @@ def send_tp3_hit_congrats(chat_id, message_id, tf):
 def send_breakeven_alert(chat_id, message_id, tf):
     """Send a reply when price returns to entry after TPs hit."""
     txt = f"📉 <b>REVERSAL ALERT!</b> [{tf}] Price returned to Entry level after hitting targets. Signal closed at Breakeven. ⚖️"
+    return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
+
+def send_profit_sl_alert(chat_id, message_id, tf):
+    """Send a reply when protected stop is hit in profit after targets."""
+    txt = (
+        f"🛡 <b>PROTECTED EXIT!</b> [{tf}] Stop-loss was hit in <b>profit</b> "
+        f"after targets. Trade closed safely with locked gains. ✅"
+    )
     return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
 
 def edit_message_text(message_id, text, chat_id=None, parse_mode="HTML"):
@@ -355,6 +401,8 @@ def get_signal_html(signal_type, side, timeframe, entry, sl, tp1, tp2, tp3,
         msg += f"\n<b>💰 ALL TARGETS HIT</b>"
     elif status == "SL":
         msg += f"\n<b>❌ STOP LOSS HIT</b>"
+    elif status == "PROFIT_SL":
+        msg += f"\n<b>🛡 STOP HIT IN PROFIT</b>"
     elif status == "CLOSED":
         msg += f"\n<b>🛡 CLOSED AFTER TP</b>"
 

@@ -50,7 +50,7 @@ MOMENTUM_OS       = 30    # Oversold threshold
 
 # ─── SCALP PARAMETERS ────────────────────────
 # ATR multipliers for SL/TP calculation
-SL_ATR_MULT  = 1.1
+SL_ATR_MULT  = 1.3
 TP1_ATR_MULT = 0.7   # 30% allocation
 TP2_ATR_MULT = 1.4   # 40% allocation
 TP3_ATR_MULT = 2.1   # 30% allocation
