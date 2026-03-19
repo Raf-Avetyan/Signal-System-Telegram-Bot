@@ -76,8 +76,10 @@ SCALP_OPEN_ALERT_COOLDOWN = 1800
 # - "hard": block all counter-trend scalp confirms
 # - "soft": allow counter-trend only if score >= SCALP_COUNTERTREND_MIN_SCORE
 # - "off": no trend gating for scalp confirms
-SCALP_TREND_FILTER_MODE = "hard"
+SCALP_TREND_FILTER_MODE = "soft"
 SCALP_COUNTERTREND_MIN_SCORE = 8
+SCALP_COUNTERTREND_MAX_PER_WINDOW = 2
+SCALP_COUNTERTREND_WINDOW_SEC = 21600  # 6h
 
 # ─── SIGNAL POINTS ────────────────────────────
 # Trade signal points by entry level

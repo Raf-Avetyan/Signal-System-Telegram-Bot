@@ -19,7 +19,8 @@ from config import (
     FAST_MOVE_THRESHOLD, FAST_MOVE_WINDOW, FAST_MOVE_COOLDOWN,
     BITUNIX_REG_LINK, INVITE_LINK, COMMAND_POLL_INTERVAL,
     SCALP_TREND_FILTER_MODE, SCALP_COUNTERTREND_MIN_SCORE,
-    SCALP_OPEN_ALERT_COOLDOWN
+    SCALP_OPEN_ALERT_COOLDOWN, SCALP_COUNTERTREND_MAX_PER_WINDOW,
+    SCALP_COUNTERTREND_WINDOW_SEC
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
@@ -81,6 +82,7 @@ class PonchBot:
         self.last_market_alert   = state.get("last_market_alert", 0)
         self.last_summary_date   = state.get("last_summary_date")      # New: Track summary schedule
         self.last_scalp_open_alert = state.get("last_scalp_open_alert", {})
+        self.scalp_countertrend_hits = state.get("scalp_countertrend_hits", {"LONG": [], "SHORT": []})
         self.last_session_update = time.time()
         self.last_daily_update   = time.time()
         self.last_update_id      = state.get("last_update_id", 0)
@@ -371,6 +373,7 @@ class PonchBot:
                 "last_market_alert": self.last_market_alert,
                 "last_summary_date": self.last_summary_date,
                 "last_scalp_open_alert": self.last_scalp_open_alert,
+                "scalp_countertrend_hits": self.scalp_countertrend_hits,
                 "last_update_id": self.last_update_id,
                 "scalp_trackers": {tf: tracker.to_dict() for tf, tracker in self.scalp_trackers.items()}
             }
@@ -1410,12 +1413,33 @@ class PonchBot:
                     if filter_mode == "hard":
                         print(f"  [SCALP] Blocked {tf} {evt['side']}: counter-trend vs {trend_name} (mode=hard)")
                         continue
-                    if filter_mode == "soft" and score < SCALP_COUNTERTREND_MIN_SCORE:
-                        print(
-                            f"  [SCALP] Blocked {tf} {evt['side']}: "
-                            f"counter-trend score {score}<{SCALP_COUNTERTREND_MIN_SCORE} vs {trend_name} (mode=soft)"
-                        )
-                        continue
+                    if filter_mode == "soft":
+                        if score < SCALP_COUNTERTREND_MIN_SCORE:
+                            print(
+                                f"  [SCALP] Blocked {tf} {evt['side']}: "
+                                f"counter-trend score {score}<{SCALP_COUNTERTREND_MIN_SCORE} vs {trend_name} (mode=soft)"
+                            )
+                            continue
+
+                        side_hits = self.scalp_countertrend_hits.get(evt["side"], [])
+                        if not isinstance(side_hits, list):
+                            side_hits = []
+                        cutoff = current_time - SCALP_COUNTERTREND_WINDOW_SEC
+                        side_hits = [
+                            ts for ts in side_hits
+                            if isinstance(ts, (int, float)) and ts >= cutoff
+                        ]
+                        if len(side_hits) >= SCALP_COUNTERTREND_MAX_PER_WINDOW:
+                            print(
+                                f"  [SCALP] Blocked {tf} {evt['side']}: "
+                                f"counter-trend quota reached ({len(side_hits)}/"
+                                f"{SCALP_COUNTERTREND_MAX_PER_WINDOW} in {SCALP_COUNTERTREND_WINDOW_SEC}s)"
+                            )
+                            self.scalp_countertrend_hits[evt["side"]] = side_hits
+                            continue
+
+                        side_hits.append(current_time)
+                        self.scalp_countertrend_hits[evt["side"]] = side_hits
 
                 # Dynamic size: scale base size by score, min 0.5%
                 dyn_size = round(max(0.5, (score / 10) * profile["size"]), 1) if score else profile["size"]
