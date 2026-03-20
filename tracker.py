@@ -426,6 +426,77 @@ class SignalTracker:
             "by_session": by_session,
         }
 
+    def get_open_signal_counts(self, signal_type="SCALP"):
+        """Count currently open signals for exposure control."""
+        terminal = {"SL", "TP3", "CLOSED", "ENTRY_CLOSE", "PROFIT_SL"}
+        counts = {"total": 0, "by_side": {}, "by_tf": {}}
+        target_type = str(signal_type).upper()
+
+        for sig in self.signals:
+            if str(sig.get("type", "")).upper() != target_type:
+                continue
+            if sig.get("status") in terminal:
+                continue
+
+            counts["total"] += 1
+            side = str(sig.get("side", "N/A")).upper()
+            tf = str(sig.get("tf", "N/A"))
+            counts["by_side"][side] = counts["by_side"].get(side, 0) + 1
+            counts["by_tf"][tf] = counts["by_tf"].get(tf, 0) + 1
+
+        return counts
+
+    def get_recent_signal_health(self, signal_type="SCALP", limit=25):
+        """Return recent closed performance for adaptive scalp tuning."""
+        target_type = str(signal_type).upper()
+        closed = []
+        for sig in reversed(self.signals):
+            if str(sig.get("type", "")).upper() != target_type:
+                continue
+            status = sig.get("status")
+            if status not in {"SL", "TP3", "ENTRY_CLOSE", "PROFIT_SL"}:
+                continue
+            closed.append(sig)
+            if len(closed) >= limit:
+                break
+
+        trades = len(closed)
+        if trades == 0:
+            return {"trades": 0, "wins": 0, "losses": 0, "breakeven": 0, "win_rate": 0.0, "avg_r": 0.0}
+
+        wins = losses = breakeven = 0
+        r_values = []
+        for sig in closed:
+            entry = float(sig.get("entry", 0))
+            sl = float(sig.get("sl", 0))
+            tp1 = float(sig.get("tp1", entry))
+            tp3 = float(sig.get("tp3", entry))
+            risk = abs(entry - sl)
+            status = sig.get("status")
+
+            if status == "SL":
+                losses += 1
+                r_values.append(-1.0)
+            elif status == "ENTRY_CLOSE":
+                breakeven += 1
+                r_values.append(0.0)
+            elif status == "PROFIT_SL":
+                wins += 1
+                r_values.append(max(0.2, abs(tp1 - entry) / risk * 0.6) if risk > 0 else 0.2)
+            else:
+                wins += 1
+                r_values.append((abs(tp3 - entry) / risk) if risk > 0 else 0.0)
+
+        closed_only = wins + losses
+        return {
+            "trades": trades,
+            "wins": wins,
+            "losses": losses,
+            "breakeven": breakeven,
+            "win_rate": (wins / closed_only * 100.0) if closed_only else 0.0,
+            "avg_r": (sum(r_values) / len(r_values)) if r_values else 0.0,
+        }
+
     def cleanup_old(self, days=7):
         """Remove signals older than N days."""
         cutoff = datetime.now(timezone.utc)

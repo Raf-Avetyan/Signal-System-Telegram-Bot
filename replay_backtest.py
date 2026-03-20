@@ -19,12 +19,27 @@ from config import (
     SCALP_LOSS_STREAK_LIMIT,
     SCALP_MIN_SCORE_BY_TF,
     SCALP_TREND_FILTER_MODE,
+    SCALP_TREND_FILTER_MODE_BY_TF,
+    SCALP_COUNTERTREND_MIN_SCORE_BY_TF,
     SCALP_RELAX_MIN_SCORE_DELTA,
     SCALP_RELAX_VOL_MIN_MULT,
     SCALP_RELAX_VOL_MAX_MULT,
     SCALP_RELAX_COUNTERTREND_EXTRA,
     SCALP_RELAX_ALLOW_OFFSESSION,
     SCALP_RELAXED_FILTERS,
+    SCALP_REGIME_SWITCHING,
+    SCALP_REGIME_PROFILES,
+    SCALP_SELF_TUNING_ENABLED,
+    SCALP_SELF_TUNE_LOOKBACK,
+    SCALP_SELF_TUNE_MIN_CLOSED,
+    SCALP_SELF_TUNE_LOW_WR,
+    SCALP_SELF_TUNE_HIGH_WR,
+    SCALP_SELF_TUNE_LOW_AVGR,
+    SCALP_SELF_TUNE_HIGH_AVGR,
+    SCALP_EXPOSURE_ENABLED,
+    SCALP_MAX_OPEN_TOTAL,
+    SCALP_MAX_OPEN_PER_SIDE,
+    SCALP_MAX_OPEN_PER_TF,
     SESSION_SCALP_MODE,
     SIGNAL_TIMEFRAMES,
     SYMBOL,
@@ -200,6 +215,41 @@ def _orderflow_anomaly_placeholder():
     return False, 0.0, 0.0
 
 
+def _detect_regime_from_df(df_slice: pd.DataFrame):
+    if df_slice is None or df_slice.empty or len(df_slice) < 80:
+        return "RANGE"
+    close = df_slice["Close"]
+    ema21 = close.ewm(span=21, adjust=False).mean()
+    ema55 = close.ewm(span=55, adjust=False).mean()
+    curr_close = float(close.iloc[-1])
+    atr_pct = float(df_slice["ATR"].iloc[-1] / curr_close * 100) if curr_close else 0.0
+    spread_pct = abs(float(ema21.iloc[-1] - ema55.iloc[-1])) / curr_close * 100 if curr_close else 0.0
+    slope_pct = abs(float(ema21.iloc[-1] - ema21.iloc[-6])) / curr_close * 100 if len(ema21) >= 6 and curr_close else 0.0
+    if atr_pct >= 1.2:
+        return "HIGH_VOL"
+    if spread_pct >= 0.35 and slope_pct >= 0.20:
+        return "TREND"
+    return "RANGE"
+
+
+def _recent_health_from_results(results, lookback: int):
+    sample = results[-lookback:]
+    if not sample:
+        return "NEUTRAL"
+    trades = len(sample)
+    if trades < SCALP_SELF_TUNE_MIN_CLOSED:
+        return "NEUTRAL"
+    wins = sum(1 for val in sample if val > 0)
+    losses = sum(1 for val in sample if val < 0)
+    win_rate = (wins / (wins + losses) * 100.0) if (wins + losses) else 0.0
+    avg_r = sum(sample) / len(sample)
+    if win_rate <= SCALP_SELF_TUNE_LOW_WR or avg_r <= SCALP_SELF_TUNE_LOW_AVGR:
+        return "TIGHTEN"
+    if win_rate >= SCALP_SELF_TUNE_HIGH_WR and avg_r >= SCALP_SELF_TUNE_HIGH_AVGR:
+        return "LOOSEN"
+    return "NEUTRAL"
+
+
 def _build_proxy_levels(df: pd.DataFrame, i: int, idx):
     """Build lightweight historical level proxies for score calculation."""
     hist = df.iloc[: i + 1]
@@ -295,6 +345,13 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, relaxe
                     macro_trend = mt
             levels_proxy = _build_proxy_levels(df, i, idx)
             score, _ = calculate_signal_score(evt, df.loc[:idx], levels_proxy, macro_trend, None, 0)
+            regime_name = _detect_regime_from_df(df.loc[:idx]) if SCALP_REGIME_SWITCHING else "RANGE"
+            regime_cfg = SCALP_REGIME_PROFILES.get(regime_name, {})
+            score_delta = int(regime_cfg.get("score_delta", 0))
+            regime_vol_min_mult = float(regime_cfg.get("vol_min_mult", 1.0))
+            regime_vol_max_mult = float(regime_cfg.get("vol_max_mult", 1.0))
+            tuning_state = _recent_health_from_results(results, SCALP_SELF_TUNE_LOOKBACK) if SCALP_SELF_TUNING_ENABLED else "NEUTRAL"
+            tuning_delta = 1 if tuning_state == "TIGHTEN" else (-1 if tuning_state == "LOOSEN" else 0)
 
             # Volatility gate
             if VOLATILITY_FILTER_ENABLED and close > 0 and atr > 0:
@@ -304,6 +361,8 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, relaxe
                 if relaxed:
                     min_pct *= float(SCALP_RELAX_VOL_MIN_MULT)
                     max_pct *= float(SCALP_RELAX_VOL_MAX_MULT)
+                min_pct *= regime_vol_min_mult
+                max_pct *= regime_vol_max_mult
                 if atr_pct < min_pct or atr_pct > max_pct:
                     continue
 
@@ -322,8 +381,21 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, relaxe
             min_score_tf = SCALP_MIN_SCORE_BY_TF.get(tf, 0)
             if relaxed:
                 min_score_tf = max(0, int(min_score_tf) - int(SCALP_RELAX_MIN_SCORE_DELTA))
+            min_score_tf = max(0, int(min_score_tf) + score_delta + tuning_delta)
             if score < min_score_tf:
                 continue
+
+            if SCALP_EXPOSURE_ENABLED:
+                open_total = len(active)
+                open_side = sum(1 for tr in active if tr["side"] == side)
+                open_tf = sum(1 for tr in active if tr["tf"] == tf)
+                tf_limit = int(SCALP_MAX_OPEN_PER_TF.get(tf, 1))
+                if open_total >= SCALP_MAX_OPEN_TOTAL:
+                    continue
+                if open_side >= SCALP_MAX_OPEN_PER_SIDE:
+                    continue
+                if open_tf >= tf_limit:
+                    continue
 
             # Trend gate and countertrend quota
             bullish = {"Bullish", "Trending Bullish", "Strong Bullish"}
@@ -333,7 +405,8 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, relaxe
                 or (side == "LONG" and macro_trend in bullish)
                 or (side == "SHORT" and macro_trend in bearish)
             )
-            mode = str(SCALP_TREND_FILTER_MODE).strip().lower()
+            mode = str(SCALP_TREND_FILTER_MODE_BY_TF.get(tf, SCALP_TREND_FILTER_MODE)).strip().lower()
+            countertrend_min_score = int(SCALP_COUNTERTREND_MIN_SCORE_BY_TF.get(tf, SCALP_COUNTERTREND_MIN_SCORE))
             session_cfg = SESSION_SCALP_MODE.get(session_name, {})
             session_countertrend_max = session_cfg.get("countertrend_max", SCALP_COUNTERTREND_MAX_PER_WINDOW)
             session_score_boost = session_cfg.get("score_boost", 0)
@@ -342,7 +415,7 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, relaxe
                 if mode == "hard":
                     continue
                 if mode == "soft":
-                    if score < SCALP_COUNTERTREND_MIN_SCORE + session_score_boost:
+                    if score < countertrend_min_score + session_score_boost:
                         continue
                     cutoff_ts = now_ts - SCALP_COUNTERTREND_WINDOW_SEC
                     side_hits[side] = [t for t in side_hits[side] if t >= cutoff_ts]
@@ -368,6 +441,7 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, relaxe
                     "tp1_hit": False,
                     "tp2_hit": False,
                     "tp3_hit": False,
+                    "tf": tf,
                     "entry_candle_ts": candle_ts,
                 }
             )

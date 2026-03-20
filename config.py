@@ -60,7 +60,7 @@ TIMEFRAME_RISK_MULTIPLIERS = {
     "5m":  {"sl": 2.2, "tp1": 0.25, "tp2": 0.35, "tp3": 0.6},
     "15m": {"sl": 2.2, "tp1": 0.45, "tp2": 0.6, "tp3": 0.75},
     "1h":  {"sl": 2.5, "tp1": 0.12, "tp2": 0.14, "tp3": 0.16},
-    "4h":  {"sl": 1.8, "tp1": 0.25, "tp2": 0.35, "tp3": 0.45},
+    "4h":  {"sl": 2.2, "tp1": 0.18, "tp2": 0.28, "tp3": 0.36},
 }
 
 # Strength & Sizing per timeframe
@@ -103,6 +103,12 @@ SCALP_TREND_FILTER_MODE = "off"
 SCALP_COUNTERTREND_MIN_SCORE = 6
 SCALP_COUNTERTREND_MAX_PER_WINDOW = 3
 SCALP_COUNTERTREND_WINDOW_SEC = 21600  # 6h
+SCALP_TREND_FILTER_MODE_BY_TF = {
+    "4h": "soft",
+}
+SCALP_COUNTERTREND_MIN_SCORE_BY_TF = {
+    "4h": 6,
+}
 
 # Win-rate-first quality gates
 SCALP_MIN_SCORE_BY_TF = {
@@ -116,6 +122,37 @@ SCALP_ALLOWED_SESSIONS_BY_TF = {
     "15m": ["ASIA", "LONDON", "NY"],
     "1h": ["ASIA", "LONDON", "NY"],
     "4h": ["ASIA", "LONDON", "NY"],
+}
+
+# Market regime switcher for scalp logic.
+# - score_delta: adjusts min score gate
+# - vol_min_mult / vol_max_mult: reshapes acceptable ATR% band
+# - size_mult: scales displayed position size
+SCALP_REGIME_SWITCHING = True
+SCALP_REGIME_PROFILES = {
+    "TREND":    {"score_delta": -1, "vol_min_mult": 0.9, "vol_max_mult": 1.15, "size_mult": 1.10},
+    "RANGE":    {"score_delta": 0,  "vol_min_mult": 1.0, "vol_max_mult": 1.0,  "size_mult": 1.00},
+    "HIGH_VOL": {"score_delta": 1,  "vol_min_mult": 1.0, "vol_max_mult": 0.9,  "size_mult": 0.85},
+}
+
+# Rolling self-tuning for scalp quality.
+SCALP_SELF_TUNING_ENABLED = True
+SCALP_SELF_TUNE_LOOKBACK = 25
+SCALP_SELF_TUNE_MIN_CLOSED = 8
+SCALP_SELF_TUNE_LOW_WR = 58.0
+SCALP_SELF_TUNE_HIGH_WR = 72.0
+SCALP_SELF_TUNE_LOW_AVGR = -0.05
+SCALP_SELF_TUNE_HIGH_AVGR = 0.08
+
+# Exposure control for overlapping scalp positions.
+SCALP_EXPOSURE_ENABLED = True
+SCALP_MAX_OPEN_TOTAL = 6
+SCALP_MAX_OPEN_PER_SIDE = 4
+SCALP_MAX_OPEN_PER_TF = {
+    "5m": 2,
+    "15m": 2,
+    "1h": 1,
+    "4h": 1,
 }
 
 # Lose-streak protection

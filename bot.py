@@ -27,9 +27,16 @@ from config import (
     ORDERFLOW_ANOMALY_SCORE_MIN, ORDERFLOW_OI_PCT_ANOMALY,
     ORDERFLOW_LIQ_ANOMALY_USD, SCALP_MIN_SCORE_BY_TF,
     SCALP_ALLOWED_SESSIONS_BY_TF, SCALP_RELAXED_FILTERS,
+    SCALP_TREND_FILTER_MODE_BY_TF, SCALP_COUNTERTREND_MIN_SCORE_BY_TF,
     SCALP_RELAX_MIN_SCORE_DELTA, SCALP_RELAX_VOL_MIN_MULT,
     SCALP_RELAX_VOL_MAX_MULT, SCALP_RELAX_COUNTERTREND_EXTRA,
-    SCALP_RELAX_ALLOW_OFFSESSION
+    SCALP_RELAX_ALLOW_OFFSESSION, SCALP_REGIME_SWITCHING,
+    SCALP_REGIME_PROFILES, SCALP_SELF_TUNING_ENABLED,
+    SCALP_SELF_TUNE_LOOKBACK, SCALP_SELF_TUNE_MIN_CLOSED,
+    SCALP_SELF_TUNE_LOW_WR, SCALP_SELF_TUNE_HIGH_WR,
+    SCALP_SELF_TUNE_LOW_AVGR, SCALP_SELF_TUNE_HIGH_AVGR,
+    SCALP_EXPOSURE_ENABLED, SCALP_MAX_OPEN_TOTAL,
+    SCALP_MAX_OPEN_PER_SIDE, SCALP_MAX_OPEN_PER_TF
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
@@ -101,6 +108,8 @@ class PonchBot:
 
         # Macro Trend & Context
         self.macro_trend = "Ranging"
+        self.market_regime = "RANGE"
+        self.scalp_tuning_state = "NEUTRAL"
         self.last_oi = 0
         self.last_oi_base = 0
         self.last_liqs = 0
@@ -154,6 +163,45 @@ class PonchBot:
         liq_spike = self.last_liqs >= ORDERFLOW_LIQ_ANOMALY_USD
         oi_spike = oi_pct >= ORDERFLOW_OI_PCT_ANOMALY
         return oi_spike or liq_spike, oi_pct
+
+    def _detect_market_regime(self, df_1h):
+        """Classify current market regime for scalp filters."""
+        if df_1h is None or df_1h.empty or len(df_1h) < 80:
+            return "RANGE"
+        close = df_1h["Close"]
+        ema21 = close.ewm(span=21, adjust=False).mean()
+        ema55 = close.ewm(span=55, adjust=False).mean()
+        atr_series = df_1h["ATR"] if "ATR" in df_1h.columns else None
+
+        curr_close = float(close.iloc[-1])
+        spread_pct = abs(float(ema21.iloc[-1] - ema55.iloc[-1])) / curr_close * 100 if curr_close else 0.0
+        slope_pct = abs(float(ema21.iloc[-1] - ema21.iloc[-6])) / curr_close * 100 if len(ema21) >= 6 and curr_close else 0.0
+        atr_pct = float(atr_series.iloc[-1] / curr_close * 100) if atr_series is not None and curr_close else 0.0
+
+        if atr_pct >= 1.2:
+            return "HIGH_VOL"
+        if spread_pct >= 0.35 and slope_pct >= 0.20:
+            return "TREND"
+        return "RANGE"
+
+    def _get_scalp_tuning_state(self):
+        """Adapt scalp strictness from recent closed scalp performance."""
+        if not SCALP_SELF_TUNING_ENABLED:
+            return "NEUTRAL", {"trades": 0, "win_rate": 0.0, "avg_r": 0.0}
+        health = self.tracker.get_recent_signal_health("SCALP", limit=SCALP_SELF_TUNE_LOOKBACK)
+        if health["trades"] < SCALP_SELF_TUNE_MIN_CLOSED:
+            return "NEUTRAL", health
+        if health["win_rate"] <= SCALP_SELF_TUNE_LOW_WR or health["avg_r"] <= SCALP_SELF_TUNE_LOW_AVGR:
+            return "TIGHTEN", health
+        if health["win_rate"] >= SCALP_SELF_TUNE_HIGH_WR and health["avg_r"] >= SCALP_SELF_TUNE_HIGH_AVGR:
+            return "LOOSEN", health
+        return "NEUTRAL", health
+
+    def _get_scalp_exposure(self):
+        """Return currently open scalp exposure counts."""
+        if not SCALP_EXPOSURE_ENABLED:
+            return {"total": 0, "by_side": {}, "by_tf": {}}
+        return self.tracker.get_open_signal_counts("SCALP")
 
 
     def run(self):
@@ -507,7 +555,13 @@ class PonchBot:
         # 4. Update Macro Trend (1h baseline)
         if "1h" in data:
             self.macro_trend = detect_trend(data["1h"])
-            print(f"  Trend: {self.macro_trend}")
+            self.market_regime = self._detect_market_regime(data["1h"])
+            self.scalp_tuning_state, tuning_stats = self._get_scalp_tuning_state()
+            print(
+                f"  Trend: {self.macro_trend} | Regime: {self.market_regime} | "
+                f"SelfTune: {self.scalp_tuning_state} "
+                f"(wr={tuning_stats['win_rate']:.1f}% avgR={tuning_stats['avg_r']:+.2f} n={tuning_stats['trades']})"
+            )
 
         # 5. Check Funding Rate
         if current_time - self.last_funding_check > FUNDING_CHECK_INTERVAL:
@@ -1525,6 +1579,17 @@ class PonchBot:
                 session_countertrend_max = session_cfg.get("countertrend_max", SCALP_COUNTERTREND_MAX_PER_WINDOW)
                 session_score_boost = session_cfg.get("score_boost", 0)
                 relaxed_filters = bool(SCALP_RELAXED_FILTERS)
+                regime_name = self.market_regime if SCALP_REGIME_SWITCHING else "RANGE"
+                regime_cfg = SCALP_REGIME_PROFILES.get(regime_name, {})
+                score_delta = int(regime_cfg.get("score_delta", 0))
+                regime_vol_min_mult = float(regime_cfg.get("vol_min_mult", 1.0))
+                regime_vol_max_mult = float(regime_cfg.get("vol_max_mult", 1.0))
+                size_mult = float(regime_cfg.get("size_mult", 1.0))
+                tuning_delta = 0
+                if self.scalp_tuning_state == "TIGHTEN":
+                    tuning_delta = 1
+                elif self.scalp_tuning_state == "LOOSEN":
+                    tuning_delta = -1
 
                 # --- Losing streak cooldown per side ---
                 cooldown_until = self.scalp_side_cooldown_until.get(side, 0)
@@ -1541,6 +1606,8 @@ class PonchBot:
                     if relaxed_filters:
                         min_pct *= float(SCALP_RELAX_VOL_MIN_MULT)
                         max_pct *= float(SCALP_RELAX_VOL_MAX_MULT)
+                    min_pct *= regime_vol_min_mult
+                    max_pct *= regime_vol_max_mult
                     if atr_pct < min_pct or atr_pct > max_pct:
                         print(
                             f"  [SCALP] Blocked {tf} {side}: ATR% {atr_pct:.3f} "
@@ -1571,12 +1638,30 @@ class PonchBot:
                 min_score_tf = SCALP_MIN_SCORE_BY_TF.get(tf, 0)
                 if relaxed_filters:
                     min_score_tf = max(0, int(min_score_tf) - int(SCALP_RELAX_MIN_SCORE_DELTA))
+                min_score_tf = max(0, int(min_score_tf) + score_delta + tuning_delta)
                 if score < min_score_tf:
                     print(
                         f"  [SCALP] Blocked {tf} {side}: score {score}<{min_score_tf} "
                         f"(tf quality gate)"
                     )
                     continue
+
+                # --- Exposure control ---
+                if SCALP_EXPOSURE_ENABLED:
+                    exposure = self._get_scalp_exposure()
+                    open_total = int(exposure["total"])
+                    open_side = int(exposure["by_side"].get(side, 0))
+                    open_tf = int(exposure["by_tf"].get(tf, 0))
+                    tf_limit = int(SCALP_MAX_OPEN_PER_TF.get(tf, 1))
+                    if open_total >= SCALP_MAX_OPEN_TOTAL:
+                        print(f"  [SCALP] Blocked {tf} {side}: total exposure {open_total}/{SCALP_MAX_OPEN_TOTAL}")
+                        continue
+                    if open_side >= SCALP_MAX_OPEN_PER_SIDE:
+                        print(f"  [SCALP] Blocked {tf} {side}: side exposure {open_side}/{SCALP_MAX_OPEN_PER_SIDE}")
+                        continue
+                    if open_tf >= tf_limit:
+                        print(f"  [SCALP] Blocked {tf} {side}: tf exposure {open_tf}/{tf_limit}")
+                        continue
 
                 # --- Trend gate for scalp confirms ---
                 trend_name = self.macro_trend or "Ranging"
@@ -1587,7 +1672,8 @@ class PonchBot:
                     or (evt["side"] == "LONG" and trend_name in bullish_trends)
                     or (evt["side"] == "SHORT" and trend_name in bearish_trends)
                 )
-                filter_mode = str(SCALP_TREND_FILTER_MODE).strip().lower()
+                filter_mode = str(SCALP_TREND_FILTER_MODE_BY_TF.get(tf, SCALP_TREND_FILTER_MODE)).strip().lower()
+                countertrend_min_score = int(SCALP_COUNTERTREND_MIN_SCORE_BY_TF.get(tf, SCALP_COUNTERTREND_MIN_SCORE))
 
                 if not trend_aligned:
                     if filter_mode == "hard":
@@ -1600,7 +1686,7 @@ class PonchBot:
                             print(f"  [SCALP] Blocked {tf} {side}: counter-trend vs {trend_name} (mode=hard)")
                             continue
                     if filter_mode == "soft":
-                        required_score = SCALP_COUNTERTREND_MIN_SCORE + session_score_boost
+                        required_score = countertrend_min_score + session_score_boost
                         if score < required_score:
                             print(
                                 f"  [SCALP] Blocked {tf} {side}: "
@@ -1652,7 +1738,8 @@ class PonchBot:
                         self.scalp_countertrend_hits[side] = side_hits
 
                 # Dynamic size: scale base size by score, min 0.5%
-                dyn_size = round(max(0.5, (score / 10) * profile["size"]), 1) if score else profile["size"]
+                dyn_base = max(0.5, (score / 10) * profile["size"]) if score else profile["size"]
+                dyn_size = round(max(0.5, dyn_base * size_mult), 1)
 
                 resp = None
                 if not self.is_booting:
