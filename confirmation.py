@@ -7,7 +7,12 @@ When 3+ indicators agree → 🔥 EXTREME
 """
 
 import time
-from config import STRONG_THRESHOLD, EXTREME_THRESHOLD, CONFIRMATION_WINDOW
+from config import (
+    STRONG_THRESHOLD,
+    EXTREME_THRESHOLD,
+    CONFIRMATION_WINDOW,
+    CONFIRMATION_FRESH_WINDOW,
+)
 
 
 class ConfirmationTracker:
@@ -56,11 +61,20 @@ class ConfirmationTracker:
         if not active:
             return []
 
+        # Confluence should be built from recent signals, not stale leftovers.
+        fresh_cutoff = time.time() - CONFIRMATION_FRESH_WINDOW
+        fresh_active = [
+            s for s in active
+            if s.get("timestamp", 0) > fresh_cutoff
+        ]
+        if not fresh_active:
+            return []
+
         events = []
 
         # Deduplicate by indicator name (keep highest point version)
         by_indicator = {}
-        for sig in active:
+        for sig in fresh_active:
             name = sig["indicator"]
             if name not in by_indicator or sig["points"] > by_indicator[name]["points"]:
                 by_indicator[name] = sig

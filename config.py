@@ -220,6 +220,9 @@ EXTREME_THRESHOLD = 4    # High-Alpha Confluence (4+ systems)
 # ─── TIMING ──────────────────────────────────
 POLL_INTERVAL = 1       # Seconds between data fetches
 CONFIRMATION_WINDOW = 1800  # 30 min window to aggregate signals
+CONFIRMATION_FRESH_WINDOW = 480  # 8 min: confirmations must be recent to count
+CONFIRMATION_RSI_EXHAUSTION_BUFFER = 6  # block SHORT if RSI too low, LONG if RSI too high
+CONFLUENCE_OPPOSITE_LOCK_SEC = 900  # 15 min opposite-side confluence lock after a fire
 
 # ─── FUNDING RATE ALERTS ─────────────────────
 FUNDING_THRESHOLD = 0.0005       # 0.05% — trigger alert above this

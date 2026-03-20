@@ -36,7 +36,9 @@ from config import (
     SCALP_SELF_TUNE_LOW_WR, SCALP_SELF_TUNE_HIGH_WR,
     SCALP_SELF_TUNE_LOW_AVGR, SCALP_SELF_TUNE_HIGH_AVGR,
     SCALP_EXPOSURE_ENABLED, SCALP_MAX_OPEN_TOTAL,
-    SCALP_MAX_OPEN_PER_SIDE, SCALP_MAX_OPEN_PER_TF
+    SCALP_MAX_OPEN_PER_SIDE, SCALP_MAX_OPEN_PER_TF,
+    MOMENTUM_OS, MOMENTUM_OB,
+    CONFIRMATION_RSI_EXHAUSTION_BUFFER, CONFLUENCE_OPPOSITE_LOCK_SEC
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
@@ -101,6 +103,7 @@ class PonchBot:
         self.scalp_countertrend_hits = state.get("scalp_countertrend_hits", {"LONG": [], "SHORT": []})
         self.scalp_loss_streak = state.get("scalp_loss_streak", {"LONG": 0, "SHORT": 0})
         self.scalp_side_cooldown_until = state.get("scalp_side_cooldown_until", {"LONG": 0, "SHORT": 0})
+        self.confluence_side_lock_until = state.get("confluence_side_lock_until", {"LONG": 0, "SHORT": 0})
         self.last_session_update = time.time()
         self.last_daily_update   = time.time()
         self.last_update_id      = state.get("last_update_id", 0)
@@ -459,6 +462,7 @@ class PonchBot:
                 "scalp_countertrend_hits": self.scalp_countertrend_hits,
                 "scalp_loss_streak": self.scalp_loss_streak,
                 "scalp_side_cooldown_until": self.scalp_side_cooldown_until,
+                "confluence_side_lock_until": self.confluence_side_lock_until,
                 "last_update_id": self.last_update_id,
                 "scalp_trackers": {tf: tracker.to_dict() for tf, tracker in self.scalp_trackers.items()}
             }
@@ -589,6 +593,7 @@ class PonchBot:
         ref_atr = 0
         conf_ts = now.strftime("%Y-%m-%d %H:%M")  # Minute-level key for alerts
         ref_ts  = conf_ts
+        confluence_rsi = None
         # Collect current candle timestamps for ALL timeframes (for TP protection)
         current_candle_ts_set: set = set()
 
@@ -608,13 +613,14 @@ class PonchBot:
                 latest_price = float(df.iloc[-1]["Close"])
 
             # Process timeframe and capture ATR/TS for confluence reference
-            tf_atr, tf_ts = self._process_timeframe(tf, df, now, entry_protection_ts=base_candle_ts)
+            tf_atr, tf_ts, tf_rsi = self._process_timeframe(tf, df, now, entry_protection_ts=base_candle_ts)
 
             # Collect this TF's current candle ts for TP skip protection
             if tf_ts:
                 current_candle_ts_set.add(tf_ts)
                 if tf == "5m":
                     base_candle_ts = tf_ts
+                    confluence_rsi = tf_rsi
 
             # Use 1h ATR for confluence targets if available, otherwise fallback
             if tf == "1h" or ref_atr == 0:
@@ -625,6 +631,12 @@ class PonchBot:
         # ─── Check Confirmation Aggregation (Once per Tick) ──────
         if latest_price is not None:
             for side in ["LONG", "SHORT"]:
+                lock_until = float(self.confluence_side_lock_until.get(side, 0) or 0)
+                if current_time < lock_until:
+                    wait_m = int((lock_until - current_time) / 60) + 1
+                    print(f"  [CONFLUENCE] Blocked {side}: opposite lock active ({wait_m}m left)")
+                    continue
+
                 conf_events = self.confirmations.check_confirmations(side)
                 for ce in conf_events:
                     # BLOCK DUPLICATES: use a minute-level key for confluence
@@ -644,7 +656,23 @@ class PonchBot:
                         print(f"  [CONFLUENCE] Blocked {side} {ce['type']}: Against Macro Trend ({self.macro_trend})")
                         continue
 
-                    # 2. Proximity Protection: Don't enter Long near levels, etc.
+                    # 2. Momentum exhaustion guard: avoid SHORT when RSI already very low
+                    # and LONG when RSI already very high.
+                    if confluence_rsi is not None:
+                        if side == "SHORT" and confluence_rsi <= (MOMENTUM_OS + CONFIRMATION_RSI_EXHAUSTION_BUFFER):
+                            print(
+                                f"  [CONFLUENCE] Blocked SHORT {ce['type']}: "
+                                f"RSI exhausted low ({confluence_rsi:.1f})"
+                            )
+                            continue
+                        if side == "LONG" and confluence_rsi >= (MOMENTUM_OB - CONFIRMATION_RSI_EXHAUSTION_BUFFER):
+                            print(
+                                f"  [CONFLUENCE] Blocked LONG {ce['type']}: "
+                                f"RSI exhausted high ({confluence_rsi:.1f})"
+                            )
+                            continue
+
+                    # 3. Proximity Protection: Don't enter Long near levels, etc.
                     proximity_blocked = False
                     block_threshold = 0.0015 # 0.15%
                     if side == "LONG":
@@ -722,6 +750,12 @@ class PonchBot:
                         )
                         self._save_state()
                         print(f"  [CONFLUENCE] 🔥 EXTREME {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
+
+                    # Prevent immediate opposite-side flip from stale queued confirmations.
+                    opposite_side = "SHORT" if ce["side"] == "LONG" else "LONG"
+                    self.confirmations.reset(opposite_side)
+                    self.confluence_side_lock_until[opposite_side] = current_time + CONFLUENCE_OPPOSITE_LOCK_SEC
+                    self._save_state()
 
         # ─── Update Performance Tracker & Success Teasers ────
         if latest_price is not None:
@@ -1092,6 +1126,7 @@ class PonchBot:
             self.approach_alerts.clear() # Reset level approach tracking
             self.scalp_loss_streak = {"LONG": 0, "SHORT": 0}
             self.scalp_side_cooldown_until = {"LONG": 0, "SHORT": 0}
+            self.confluence_side_lock_until = {"LONG": 0, "SHORT": 0}
             self._save_state()
         
         self._reconstruct_session_history(now.hour + now.minute / 60.0)
@@ -1309,7 +1344,7 @@ class PonchBot:
         df = calculate_momentum(df)
 
         if df.empty or len(df) < 2:
-            return 0, ""
+            return 0, "", None
 
         curr = df.iloc[-1]
         prev = df.iloc[-2]
@@ -1791,7 +1826,7 @@ class PonchBot:
             "Low":  price_low,
         }
 
-        return atr_val, candle_ts
+        return atr_val, candle_ts, rsi_raw
 
 
 # ═══════════════════════════════════════════════════════════════
