@@ -636,7 +636,7 @@ class PonchBot:
                     
                     # --- CONFLUENCE FILTERS & QUALITY CONTROL ---
                     # 1. Trend Alignment: Confluence must match the macro trend
-                    trend_ok = False
+                    trend_ok = self.macro_trend == "Ranging"
                     if side == "LONG" and self.macro_trend in ["Bullish", "Trending Bullish", "Strong Bullish"]: trend_ok = True
                     if side == "SHORT" and self.macro_trend in ["Bearish", "Trending Bearish", "Strong Bearish"]: trend_ok = True
                     
@@ -646,7 +646,7 @@ class PonchBot:
 
                     # 2. Proximity Protection: Don't enter Long near levels, etc.
                     proximity_blocked = False
-                    block_threshold = 0.002 # 0.2%
+                    block_threshold = 0.0015 # 0.15%
                     if side == "LONG":
                         # Block if near major resistance
                         for l_key in ["PDH", "PWH", "PMH", "PumpMax"]:

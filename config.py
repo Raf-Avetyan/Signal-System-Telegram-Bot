@@ -132,26 +132,26 @@ SCALP_REGIME_SWITCHING = True
 SCALP_REGIME_PROFILES = {
     "TREND":    {"score_delta": -1, "vol_min_mult": 0.9, "vol_max_mult": 1.15, "size_mult": 1.10},
     "RANGE":    {"score_delta": 0,  "vol_min_mult": 1.0, "vol_max_mult": 1.0,  "size_mult": 1.00},
-    "HIGH_VOL": {"score_delta": 1,  "vol_min_mult": 1.0, "vol_max_mult": 0.9,  "size_mult": 0.85},
+    "HIGH_VOL": {"score_delta": 0,  "vol_min_mult": 1.0, "vol_max_mult": 0.95, "size_mult": 0.90},
 }
 
 # Rolling self-tuning for scalp quality.
 SCALP_SELF_TUNING_ENABLED = True
 SCALP_SELF_TUNE_LOOKBACK = 25
-SCALP_SELF_TUNE_MIN_CLOSED = 8
-SCALP_SELF_TUNE_LOW_WR = 58.0
-SCALP_SELF_TUNE_HIGH_WR = 72.0
-SCALP_SELF_TUNE_LOW_AVGR = -0.05
-SCALP_SELF_TUNE_HIGH_AVGR = 0.08
+SCALP_SELF_TUNE_MIN_CLOSED = 12
+SCALP_SELF_TUNE_LOW_WR = 54.0
+SCALP_SELF_TUNE_HIGH_WR = 75.0
+SCALP_SELF_TUNE_LOW_AVGR = -0.08
+SCALP_SELF_TUNE_HIGH_AVGR = 0.10
 
 # Exposure control for overlapping scalp positions.
 SCALP_EXPOSURE_ENABLED = True
-SCALP_MAX_OPEN_TOTAL = 6
-SCALP_MAX_OPEN_PER_SIDE = 4
+SCALP_MAX_OPEN_TOTAL = 8
+SCALP_MAX_OPEN_PER_SIDE = 5
 SCALP_MAX_OPEN_PER_TF = {
-    "5m": 2,
+    "5m": 3,
     "15m": 2,
-    "1h": 1,
+    "1h": 2,
     "4h": 1,
 }
 
