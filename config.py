@@ -57,10 +57,10 @@ TP3_ATR_MULT = 2.1   # 30% allocation
 
 # Per-timeframe risk model (overrides global multipliers above when present)
 TIMEFRAME_RISK_MULTIPLIERS = {
-    "5m":  {"sl": 2.2, "tp1": 0.2, "tp2": 0.3, "tp3": 0.5},
-    "15m": {"sl": 2.2, "tp1": 0.4, "tp2": 0.5, "tp3": 0.6},
-    "1h":  {"sl": 2.5, "tp1": 0.1, "tp2": 0.11, "tp3": 0.12},
-    "4h":  {"sl": 1.8, "tp1": 0.2, "tp2": 0.3, "tp3": 0.35},
+    "5m":  {"sl": 2.2, "tp1": 0.25, "tp2": 0.35, "tp3": 0.6},
+    "15m": {"sl": 2.2, "tp1": 0.45, "tp2": 0.6, "tp3": 0.75},
+    "1h":  {"sl": 2.5, "tp1": 0.12, "tp2": 0.14, "tp3": 0.16},
+    "4h":  {"sl": 1.8, "tp1": 0.25, "tp2": 0.35, "tp3": 0.45},
 }
 
 # Strength & Sizing per timeframe
