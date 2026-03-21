@@ -158,23 +158,39 @@ class ScalpTracker:
 
             confirm_buffer = TIMEFRAME_CONFIRM_RSI_BUFFER.get(self.timeframe, SCALP_CONFIRM_RSI_BUFFER)
 
+            # 1.5 FAST CONFIRM: if reversal happens immediately after OPEN,
+            # confirm on first follow-up candle without extra buffer.
+            # This prevents missing valid quick bounces/rejections.
+            if self.zone_entry_candles <= 1:
+                fast_confirm = (
+                    (self.side == "LONG" and raw_rsi > MOMENTUM_OS) or
+                    (self.side == "SHORT" and raw_rsi < MOMENTUM_OB)
+                )
+                if fast_confirm:
+                    entry = close
+                    calc = self._calc_sl_tp(entry, atr_value, self.side)
+                    events.append({"type": "CONFIRMED", "side": self.side, "entry": entry, **calc})
+                    _reset()
+
             # 1. TIMEOUT: close stale window after 10 candles
-            if self.zone_entry_candles > 10:
+            if self.state == "ZONE_ENTRY" and self.zone_entry_candles > 10:
                 events.append({"type": "CLOSED", "side": self.side, "price": close})
                 _reset()
 
             # 2. CONFIRMED: RSI exits zone with buffer for stronger confirmation
             #    LONG (was OS < 30): RSI rises above (30 + buffer)
             #    SHORT (was OB > 70): RSI drops below (70 - buffer)
-            elif (self.side == "LONG" and raw_rsi > (MOMENTUM_OS + confirm_buffer)) or \
-                 (self.side == "SHORT" and raw_rsi < (MOMENTUM_OB - confirm_buffer)):
+            elif self.state == "ZONE_ENTRY" and (
+                (self.side == "LONG" and raw_rsi > (MOMENTUM_OS + confirm_buffer)) or
+                (self.side == "SHORT" and raw_rsi < (MOMENTUM_OB - confirm_buffer))
+            ):
                 entry = close
                 calc = self._calc_sl_tp(entry, atr_value, self.side)
                 events.append({"type": "CONFIRMED", "side": self.side, "entry": entry, **calc})
                 _reset()
 
             # 3. OPPOSITE ZONE: crossed directly → CLOSED
-            elif zone == opposite_zone:
+            elif self.state == "ZONE_ENTRY" and zone == opposite_zone:
                 events.append({"type": "CLOSED", "side": self.side, "price": close})
                 _reset()
 
