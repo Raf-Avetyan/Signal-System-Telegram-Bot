@@ -203,6 +203,38 @@ def fetch_liquidations(symbol=SYMBOL):
     return 0
 
 
+def fetch_order_book(symbol=SYMBOL, depth=400):
+    """
+    Fetch current L2 order book from OKX.
+    Returns {"bids": [[px, sz], ...], "asks": [[px, sz], ...]} or None on failure.
+    """
+    okx_symbol = symbol.replace("USDT", "-USDT-SWAP")
+    url = f"{OKX_BASE}/api/v5/market/books"
+    params = {
+        "instId": okx_symbol,
+        "sz": min(max(int(depth), 1), 400),
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        payload = resp.json()
+        if payload.get("code") != "0" or not payload.get("data"):
+            return None
+        book = payload["data"][0]
+        bids = []
+        asks = []
+        for row in book.get("bids", []):
+            if len(row) >= 2:
+                bids.append([float(row[0]), float(row[1])])
+        for row in book.get("asks", []):
+            if len(row) >= 2:
+                asks.append([float(row[0]), float(row[1])])
+        return {"bids": bids, "asks": asks}
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch order book: {e}")
+        return None
+
+
 def fetch_global_indicators():
     """
     Fetch BTC Dominance and DXY Index approximate values.

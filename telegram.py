@@ -229,6 +229,29 @@ def send_liquidity_sweep(side, level, price, points, strength, note="", chat_id=
     send(msg, parse_mode="HTML", chat_id=chat_id)
 
 
+def send_liquidity_pool_alert(timeframe, side, level_price, size_usd, probability_pct, distance_pct, current_price, chat_id=None):
+    """
+    Alert about large visible order-book liquidity pool likely to be swept.
+    side LONG -> pool above price, SHORT -> pool below price.
+    """
+    side_emoji = "🟢" if side == "LONG" else "🔴"
+    code_part = (
+        f"Timeframe:   {timeframe}\n"
+        f"Direction:   {side}\n"
+        f"Pool Price:  {fmt_price(level_price)}\n"
+        f"Current:     {fmt_price(current_price)}\n"
+        f"Pool Size:   ${size_usd:,.0f}\n"
+        f"Distance:    {distance_pct:.2f}%\n"
+        f"Sweep Prob:  {probability_pct:.0f}%"
+    )
+    msg = (
+        f"<b>🧲 Liquidity Pool Alert</b>\n"
+        f"<b>{side_emoji} {side}</b>\n"
+        f"<pre>{code_part}</pre>"
+    )
+    send(msg, parse_mode="HTML", chat_id=chat_id)
+
+
 # ═══════════════════════════════════════════════════════════════
 # VOLATILITY ZONE TOUCH
 # ═══════════════════════════════════════════════════════════════

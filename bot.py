@@ -38,7 +38,9 @@ from config import (
     SCALP_EXPOSURE_ENABLED, SCALP_MAX_OPEN_TOTAL,
     SCALP_MAX_OPEN_PER_SIDE, SCALP_MAX_OPEN_PER_TF,
     MOMENTUM_OS, MOMENTUM_OB,
-    CONFIRMATION_RSI_EXHAUSTION_BUFFER, CONFLUENCE_OPPOSITE_LOCK_SEC
+    CONFIRMATION_RSI_EXHAUSTION_BUFFER, CONFLUENCE_OPPOSITE_LOCK_SEC,
+    LIQ_POOL_ALERT_ENABLED, LIQ_POOL_MIN_USD, LIQ_POOL_ALERT_COOLDOWN,
+    LIQ_POOL_BIAS_SCORE_BONUS, LIQ_POOL_MAX_DISTANCE_ATR_MULT
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
@@ -49,10 +51,11 @@ from confirmation import ConfirmationTracker
 from charting import generate_daily_levels_chart
 from data import (
     fetch_klines, fetch_all_timeframes, fetch_daily, fetch_weekly, fetch_monthly, 
-    fetch_funding_rate, fetch_open_interest, fetch_liquidations, fetch_global_indicators
+    fetch_funding_rate, fetch_open_interest, fetch_liquidations, fetch_global_indicators, fetch_order_book
 )
 from tracker import SignalTracker
 from bitunix import verify_bitunix_user
+from liquidity_map import detect_liquidity_event
 import telegram as tg
 
 
@@ -104,6 +107,8 @@ class PonchBot:
         self.scalp_loss_streak = state.get("scalp_loss_streak", {"LONG": 0, "SHORT": 0})
         self.scalp_side_cooldown_until = state.get("scalp_side_cooldown_until", {"LONG": 0, "SHORT": 0})
         self.confluence_side_lock_until = state.get("confluence_side_lock_until", {"LONG": 0, "SHORT": 0})
+        self.liq_pool_alerts = state.get("liq_pool_alerts", {})
+        self.liquidity_bias = state.get("liquidity_bias", {})
         self.last_session_update = time.time()
         self.last_daily_update   = time.time()
         self.last_update_id      = state.get("last_update_id", 0)
@@ -186,6 +191,72 @@ class PonchBot:
         if spread_pct >= 0.35 and slope_pct >= 0.20:
             return "TREND"
         return "RANGE"
+
+    def _update_liquidity_pool_context(self, data, latest_price, now_ts):
+        """
+        Build 4h/1d liquidity-pool context from OKX order book, send alerts, and update bias.
+        """
+        self.liquidity_bias = {}
+        if not LIQ_POOL_ALERT_ENABLED or latest_price is None or latest_price <= 0:
+            return
+
+        order_book = fetch_order_book()
+        if not order_book:
+            return
+
+        best_event = None
+        for tf in ("4h", "1d"):
+            df_tf = data.get(tf)
+            if df_tf is None or df_tf.empty:
+                continue
+            try:
+                df_tf_ch = calculate_channels(df_tf)
+                atr_val = float(df_tf_ch.iloc[-1].get("ATR", 0) or 0)
+            except Exception:
+                atr_val = 0
+            if atr_val <= 0:
+                continue
+
+            event = detect_liquidity_event(
+                order_book=order_book,
+                price=float(latest_price),
+                atr=atr_val,
+                timeframe=tf,
+                min_usd=float(LIQ_POOL_MIN_USD),
+                max_distance_atr_mult=float(LIQ_POOL_MAX_DISTANCE_ATR_MULT.get(tf, 1.5)),
+            )
+            if not event:
+                continue
+
+            # Alert cooldown keyed by tf/side/price-bucket.
+            px_bucket = int(round(float(event["level_price"]) / 50.0) * 50)
+            alert_key = f"{event['timeframe']}_{event['side']}_{px_bucket}"
+            last_alert_ts = float(self.liq_pool_alerts.get(alert_key, 0) or 0)
+            if (now_ts - last_alert_ts) >= LIQ_POOL_ALERT_COOLDOWN:
+                if not self.is_booting:
+                    tg.send_liquidity_pool_alert(
+                        timeframe=event["timeframe"],
+                        side=event["side"],
+                        level_price=event["level_price"],
+                        size_usd=event["size_usd"],
+                        probability_pct=event["probability_pct"],
+                        distance_pct=event["distance_pct"],
+                        current_price=float(latest_price),
+                        chat_id=PRIVATE_CHAT_ID,
+                    )
+                self.liq_pool_alerts[alert_key] = now_ts
+
+            if best_event is None or event["score"] > best_event["score"]:
+                best_event = event
+
+        if best_event:
+            self.liquidity_bias = {
+                "side": best_event["side"],
+                "timeframe": best_event["timeframe"],
+                "level_price": best_event["level_price"],
+                "probability_pct": best_event["probability_pct"],
+                "size_usd": best_event["size_usd"],
+            }
 
     def _get_scalp_tuning_state(self):
         """Adapt scalp strictness from recent closed scalp performance."""
@@ -463,6 +534,8 @@ class PonchBot:
                 "scalp_loss_streak": self.scalp_loss_streak,
                 "scalp_side_cooldown_until": self.scalp_side_cooldown_until,
                 "confluence_side_lock_until": self.confluence_side_lock_until,
+                "liq_pool_alerts": self.liq_pool_alerts,
+                "liquidity_bias": self.liquidity_bias,
                 "last_update_id": self.last_update_id,
                 "scalp_trackers": {tf: tracker.to_dict() for tf, tracker in self.scalp_trackers.items()}
             }
@@ -536,8 +609,9 @@ class PonchBot:
         self.last_oi = fetch_open_interest()
         self.last_liqs = fetch_liquidations()
 
-        # 3. Fetch all timeframes (only Signal TFs to avoid lag)
-        data = fetch_all_timeframes(timeframes=SIGNAL_TIMEFRAMES)
+        # 3. Fetch all timeframes (+1d for liquidity-pool context)
+        fetch_tfs = list(dict.fromkeys(SIGNAL_TIMEFRAMES + ["1d"]))
+        data = fetch_all_timeframes(timeframes=fetch_tfs)
         if not data: return
 
         # 3.1 Market Alert (Fast Move)
@@ -630,6 +704,7 @@ class PonchBot:
 
         # ─── Check Confirmation Aggregation (Once per Tick) ──────
         if latest_price is not None:
+            self._update_liquidity_pool_context(data, latest_price, current_time)
             for side in ["LONG", "SHORT"]:
                 lock_until = float(self.confluence_side_lock_until.get(side, 0) or 0)
                 if current_time < lock_until:
@@ -1127,6 +1202,8 @@ class PonchBot:
             self.scalp_loss_streak = {"LONG": 0, "SHORT": 0}
             self.scalp_side_cooldown_until = {"LONG": 0, "SHORT": 0}
             self.confluence_side_lock_until = {"LONG": 0, "SHORT": 0}
+            self.liq_pool_alerts = {}
+            self.liquidity_bias = {}
             self._save_state()
         
         self._reconstruct_session_history(now.hour + now.minute / 60.0)
@@ -1607,6 +1684,17 @@ class PonchBot:
                 score, reasons = calculate_signal_score(
                     evt, df, self.levels, self.macro_trend, self.last_oi, self.last_liqs
                 )
+                # Small directional bias toward strongest nearby liquidity pool.
+                lb_side = self.liquidity_bias.get("side")
+                if lb_side in ("LONG", "SHORT"):
+                    lb_tf = self.liquidity_bias.get("timeframe", "N/A")
+                    lb_prob = float(self.liquidity_bias.get("probability_pct", 0) or 0)
+                    if side == lb_side:
+                        score += int(LIQ_POOL_BIAS_SCORE_BONUS)
+                        reasons.append(f"Liquidity Pull {lb_tf} ({lb_prob:.0f}%)")
+                    else:
+                        score -= int(LIQ_POOL_BIAS_SCORE_BONUS)
+                        reasons.append(f"Against Liquidity Pull {lb_tf}")
 
                 side = evt["side"]
                 session_name = self._get_current_session_name(now) or "ASIA"

@@ -57,10 +57,10 @@ TP3_ATR_MULT = 2.1   # 30% allocation
 
 # Per-timeframe risk model (overrides global multipliers above when present)
 TIMEFRAME_RISK_MULTIPLIERS = {
-    "5m":  {"sl": 2.2, "tp1": 0.25, "tp2": 0.35, "tp3": 0.6},
-    "15m": {"sl": 2.2, "tp1": 0.45, "tp2": 0.6, "tp3": 0.75},
-    "1h":  {"sl": 1.6, "tp1": 0.35, "tp2": 0.55, "tp3": 0.85},
-    "4h":  {"sl": 1.8, "tp1": 0.2, "tp2": 0.35, "tp3": 0.55},
+    "5m":  {"sl": 2.0, "tp1": 0.7, "tp2": 1.1, "tp3": 1.6},
+    "15m": {"sl": 2.0, "tp1": 0.8, "tp2": 1.2, "tp3": 1.8},
+    "1h":  {"sl": 2.0, "tp1": 0.9, "tp2": 1.4, "tp3": 2.0},
+    "4h":  {"sl": 2.0, "tp1": 1.0, "tp2": 1.6, "tp3": 2.4},
 }
 
 # Strength & Sizing per timeframe
@@ -244,6 +244,16 @@ APPROACH_LEVELS = ["PDH", "PDL", "DO", "PWH", "PWL", "PMH", "PML", "Pump", "Dump
 OI_CHANGE_THRESHOLD = 0.015      # 1.5% change in OI to trigger divergence check
 LIQ_SQUEEZE_THRESHOLD = 500000   # $500k in liquidations to trigger squeeze alert
 LIQ_ALERT_COOLDOWN = 600         # 10 min cooldown for squeeze alerts
+
+# Order-book liquidity pool alerts (4h/1d context)
+LIQ_POOL_ALERT_ENABLED = True
+LIQ_POOL_MIN_USD = 15000000            # minimum visible liquidity pool notional
+LIQ_POOL_ALERT_COOLDOWN = 1800         # 30 min per tf/side/price bucket
+LIQ_POOL_BIAS_SCORE_BONUS = 1          # small score tilt toward liquidity pull side
+LIQ_POOL_MAX_DISTANCE_ATR_MULT = {
+    "4h": 1.5,
+    "1d": 2.5,
+}
 
 # ─── MARKET ALERTS (FAST MOVE) ────────────────
 FAST_MOVE_THRESHOLD = 0.03       # 3% move
