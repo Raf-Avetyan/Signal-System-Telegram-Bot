@@ -40,7 +40,9 @@ from config import (
     MOMENTUM_OS, MOMENTUM_OB,
     CONFIRMATION_RSI_EXHAUSTION_BUFFER, CONFLUENCE_OPPOSITE_LOCK_SEC,
     LIQ_POOL_ALERT_ENABLED, LIQ_POOL_MIN_USD, LIQ_POOL_ALERT_COOLDOWN,
-    LIQ_POOL_BIAS_SCORE_BONUS, LIQ_POOL_MAX_DISTANCE_ATR_MULT
+    LIQ_POOL_BIAS_SCORE_BONUS, LIQ_POOL_MAX_DISTANCE_ATR_MULT,
+    LIQ_POOL_MIN_DISTANCE_PCT, LIQ_POOL_HUGE_USD_OVERRIDE,
+    TP_LIQUIDITY_MIN_USD, TP_LIQUIDITY_BAND_PCT
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
@@ -109,6 +111,7 @@ class PonchBot:
         self.confluence_side_lock_until = state.get("confluence_side_lock_until", {"LONG": 0, "SHORT": 0})
         self.liq_pool_alerts = state.get("liq_pool_alerts", {})
         self.liquidity_bias = state.get("liquidity_bias", {})
+        self.last_order_book = None
         self.last_session_update = time.time()
         self.last_daily_update   = time.time()
         self.last_update_id      = state.get("last_update_id", 0)
@@ -203,8 +206,9 @@ class PonchBot:
         order_book = fetch_order_book()
         if not order_book:
             return
+        self.last_order_book = order_book
 
-        best_event = None
+        candidates = []
         for tf in ("4h", "1d"):
             df_tf = data.get(tf)
             if df_tf is None or df_tf.empty:
@@ -224,30 +228,34 @@ class PonchBot:
                 timeframe=tf,
                 min_usd=float(LIQ_POOL_MIN_USD),
                 max_distance_atr_mult=float(LIQ_POOL_MAX_DISTANCE_ATR_MULT.get(tf, 1.5)),
+                min_distance_pct=float(LIQ_POOL_MIN_DISTANCE_PCT),
+                huge_usd_override=float(LIQ_POOL_HUGE_USD_OVERRIDE),
             )
             if not event:
                 continue
+            candidates.append(event)
 
-            # Alert cooldown keyed by tf/side/price-bucket.
-            px_bucket = int(round(float(event["level_price"]) / 50.0) * 50)
-            alert_key = f"{event['timeframe']}_{event['side']}_{px_bucket}"
-            last_alert_ts = float(self.liq_pool_alerts.get(alert_key, 0) or 0)
-            if (now_ts - last_alert_ts) >= LIQ_POOL_ALERT_COOLDOWN:
-                if not self.is_booting:
-                    tg.send_liquidity_pool_alert(
-                        timeframe=event["timeframe"],
-                        side=event["side"],
-                        level_price=event["level_price"],
-                        size_usd=event["size_usd"],
-                        probability_pct=event["probability_pct"],
-                        distance_pct=event["distance_pct"],
-                        current_price=float(latest_price),
-                        chat_id=PRIVATE_CHAT_ID,
-                    )
-                self.liq_pool_alerts[alert_key] = now_ts
+        if not candidates:
+            return
 
-            if best_event is None or event["score"] > best_event["score"]:
-                best_event = event
+        # Send only the strongest pool event to avoid alert floods.
+        best_event = max(candidates, key=lambda e: e.get("score", 0))
+        px_bucket = int(round(float(best_event["level_price"]) / 100.0) * 100)
+        alert_key = f"{best_event['timeframe']}_{px_bucket}"
+        last_alert_ts = float(self.liq_pool_alerts.get(alert_key, 0) or 0)
+        if (now_ts - last_alert_ts) >= LIQ_POOL_ALERT_COOLDOWN:
+            if not self.is_booting:
+                tg.send_liquidity_pool_alert(
+                    timeframe=best_event["timeframe"],
+                    side=best_event["side"],
+                    level_price=best_event["level_price"],
+                    size_usd=best_event["size_usd"],
+                    probability_pct=best_event["probability_pct"],
+                    distance_pct=best_event["distance_pct"],
+                    current_price=float(latest_price),
+                    chat_id=PRIVATE_CHAT_ID,
+                )
+            self.liq_pool_alerts[alert_key] = now_ts
 
         if best_event:
             self.liquidity_bias = {
@@ -257,6 +265,38 @@ class PonchBot:
                 "probability_pct": best_event["probability_pct"],
                 "size_usd": best_event["size_usd"],
             }
+
+    def _estimate_tp_liquidity(self, side, entry, tp1, tp2, tp3):
+        """
+        Estimate TP hit confidence from visible liquidity around TP levels.
+        Returns {"prob": float, "size_usd": float, "target": "TPx"} or None.
+        """
+        book = self.last_order_book
+        if not isinstance(book, dict):
+            return None
+        rows = book.get("asks", []) if side == "LONG" else book.get("bids", [])
+        if not rows:
+            return None
+
+        targets = [("TP1", tp1), ("TP2", tp2), ("TP3", tp3)]
+        best = None
+        for name, tp in targets:
+            if not tp or tp <= 0:
+                continue
+            band = max(tp * (TP_LIQUIDITY_BAND_PCT / 100.0), entry * 0.0004)
+            near_usd = 0.0
+            for px, sz in rows:
+                if abs(float(px) - float(tp)) <= band:
+                    near_usd += float(px) * float(sz)
+            if near_usd < TP_LIQUIDITY_MIN_USD:
+                continue
+
+            size_ratio = min(3.0, near_usd / TP_LIQUIDITY_MIN_USD)
+            prob = max(35.0, min(95.0, 30.0 + size_ratio * 22.0))
+            item = {"prob": prob, "size_usd": near_usd, "target": name}
+            if best is None or item["size_usd"] > best["size_usd"]:
+                best = item
+        return best
 
     def _get_scalp_tuning_state(self):
         """Adapt scalp strictness from recent closed scalp performance."""
@@ -784,6 +824,7 @@ class PonchBot:
 
                     if ce["type"] == "STRONG":
                         strong_size = round(min(ce["points"] * 0.3, 5.0), 1)
+                        tp_liq = self._estimate_tp_liquidity(side, latest_price, tp1_c, tp2_c, tp3_c)
                         resp = tg.send_strong(
                             side=ce["side"],
                             total_points=ce["points"],
@@ -792,6 +833,9 @@ class PonchBot:
                             price=latest_price,
                             sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
                             size=strong_size,
+                            tp_liq_prob=tp_liq["prob"] if tp_liq else None,
+                            tp_liq_usd=tp_liq["size_usd"] if tp_liq else None,
+                            tp_liq_target=tp_liq["target"] if tp_liq else None,
                             chat_id=PRIVATE_CHAT_ID
                         )
                         msg_id = resp.get("result", {}).get("message_id") if resp else None
@@ -799,13 +843,20 @@ class PonchBot:
                             side=ce["side"], entry=latest_price, sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
                             tf="Confluence", timestamp=base_candle_ts or conf_ts,
                             msg_id=msg_id, chat_id=PRIVATE_CHAT_ID, signal_type="STRONG",
-                            meta={"indicators": ce["indicators"], "size": strong_size}
+                            meta={
+                                "indicators": ce["indicators"],
+                                "size": strong_size,
+                                "tp_liq_prob": tp_liq["prob"] if tp_liq else None,
+                                "tp_liq_usd": tp_liq["size_usd"] if tp_liq else None,
+                                "tp_liq_target": tp_liq["target"] if tp_liq else None,
+                            }
                         )
                         self._save_state()
                         print(f"  [CONFLUENCE] ✅ STRONG {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
 
                     elif ce["type"] == "EXTREME":
                         extreme_size = round(min(ce["points"] * 0.3, 5.0), 1)
+                        tp_liq = self._estimate_tp_liquidity(side, latest_price, tp1_c, tp2_c, tp3_c)
                         resp = tg.send_extreme(
                             side=ce["side"],
                             total_points=ce["points"],
@@ -814,6 +865,9 @@ class PonchBot:
                             price=latest_price,
                             sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
                             size=extreme_size,
+                            tp_liq_prob=tp_liq["prob"] if tp_liq else None,
+                            tp_liq_usd=tp_liq["size_usd"] if tp_liq else None,
+                            tp_liq_target=tp_liq["target"] if tp_liq else None,
                             chat_id=PRIVATE_CHAT_ID
                         )
                         msg_id = resp.get("result", {}).get("message_id") if resp else None
@@ -821,7 +875,13 @@ class PonchBot:
                             side=ce["side"], entry=latest_price, sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
                             tf="Confluence", timestamp=base_candle_ts or conf_ts,
                             msg_id=msg_id, chat_id=PRIVATE_CHAT_ID, signal_type="EXTREME",
-                            meta={"indicators": ce["indicators"], "size": extreme_size}
+                            meta={
+                                "indicators": ce["indicators"],
+                                "size": extreme_size,
+                                "tp_liq_prob": tp_liq["prob"] if tp_liq else None,
+                                "tp_liq_usd": tp_liq["size_usd"] if tp_liq else None,
+                                "tp_liq_target": tp_liq["target"] if tp_liq else None,
+                            }
                         )
                         self._save_state()
                         print(f"  [CONFLUENCE] 🔥 EXTREME {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
@@ -1863,6 +1923,7 @@ class PonchBot:
                 # Dynamic size: scale base size by score, min 0.5%
                 dyn_base = max(0.5, (score / 10) * profile["size"]) if score else profile["size"]
                 dyn_size = round(max(0.5, dyn_base * size_mult), 1)
+                tp_liq = self._estimate_tp_liquidity(evt["side"], evt["entry"], evt["tp1"], evt["tp2"], evt["tp3"])
 
                 resp = None
                 if not self.is_booting:
@@ -1879,6 +1940,9 @@ class PonchBot:
                         score=score,
                         trend=self.macro_trend,
                         reasons=reasons,
+                        tp_liq_prob=tp_liq["prob"] if tp_liq else None,
+                        tp_liq_usd=tp_liq["size_usd"] if tp_liq else None,
+                        tp_liq_target=tp_liq["target"] if tp_liq else None,
                         chat_id=PRIVATE_CHAT_ID
                     )
                 msg_id = resp.get("result", {}).get("message_id") if resp else None
@@ -1898,7 +1962,15 @@ class PonchBot:
                     msg_id=msg_id,
                     chat_id=PRIVATE_CHAT_ID,
                     signal_type="SCALP",
-                    meta={"score": score, "trend": self.macro_trend, "reasons": reasons, "size": dyn_size}
+                    meta={
+                        "score": score,
+                        "trend": self.macro_trend,
+                        "reasons": reasons,
+                        "size": dyn_size,
+                        "tp_liq_prob": tp_liq["prob"] if tp_liq else None,
+                        "tp_liq_usd": tp_liq["size_usd"] if tp_liq else None,
+                        "tp_liq_target": tp_liq["target"] if tp_liq else None,
+                    }
                 )
 
             elif evt["type"] == "CLOSED":

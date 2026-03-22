@@ -247,13 +247,19 @@ LIQ_ALERT_COOLDOWN = 600         # 10 min cooldown for squeeze alerts
 
 # Order-book liquidity pool alerts (4h/1d context)
 LIQ_POOL_ALERT_ENABLED = True
-LIQ_POOL_MIN_USD = 15000000            # minimum visible liquidity pool notional
-LIQ_POOL_ALERT_COOLDOWN = 1800         # 30 min per tf/side/price bucket
+LIQ_POOL_MIN_USD = 100000000           # alert only on large pools (>= $100M)
+LIQ_POOL_HUGE_USD_OVERRIDE = 180000000 # if huge, allow shorter distance
+LIQ_POOL_MIN_DISTANCE_PCT = 0.12       # avoid near-price noise (middle/long distance)
+LIQ_POOL_ALERT_COOLDOWN = 3600         # 60 min cooldown
 LIQ_POOL_BIAS_SCORE_BONUS = 1          # small score tilt toward liquidity pull side
 LIQ_POOL_MAX_DISTANCE_ATR_MULT = {
     "4h": 1.5,
     "1d": 2.5,
 }
+
+# TP-near liquidity confidence for entry messages
+TP_LIQUIDITY_MIN_USD = 25000000   # minimum near-TP liquidity to annotate probability
+TP_LIQUIDITY_BAND_PCT = 0.12      # "near TP" band size (% around TP level)
 
 # ─── MARKET ALERTS (FAST MOVE) ────────────────
 FAST_MOVE_THRESHOLD = 0.03       # 3% move

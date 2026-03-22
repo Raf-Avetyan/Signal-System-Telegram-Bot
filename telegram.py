@@ -367,7 +367,8 @@ def get_signal_levels_code(entry, sl, tp1, tp2, tp3, status="OPEN", tp1_h=False,
 
 def get_signal_html(signal_type, side, timeframe, entry, sl, tp1, tp2, tp3,
                     status="OPEN", tp1_h=False, tp2_h=False, tp3_h=False, sl_h=False,
-                    score=None, trend=None, indicators=None, reasons=None, size=None):
+                    score=None, trend=None, indicators=None, reasons=None, size=None,
+                    tp_liq_prob=None, tp_liq_usd=None, tp_liq_target=None):
     """Generate HTML for Scalp, Strong, or Extreme signals."""
     side_emoji = "🟢" if side == "LONG" else "🔴"
     
@@ -396,16 +397,23 @@ def get_signal_html(signal_type, side, timeframe, entry, sl, tp1, tp2, tp3,
         trend_display = f"Trend:   {trend}\n" if trend else ""
         reasons_display = f"Confl:   {', '.join(reasons)}\n" if reasons else ""
         size_display = f"Size:    {size}%\n" if size is not None else ""
-        details = f"<pre>Trigger: Momentum Exit\n{score_display}{trend_display}{reasons_display}{size_display}</pre>\n"
+        liq_display = ""
+        if tp_liq_prob is not None and tp_liq_usd is not None and tp_liq_target:
+            liq_display = f"TP Liq:  {tp_liq_target} ${tp_liq_usd/1e6:.1f}M | Prob {tp_liq_prob:.0f}%\n"
+        details = f"<pre>Trigger: Momentum Exit\n{score_display}{trend_display}{reasons_display}{size_display}{liq_display}</pre>\n"
     else:
         # Strong/Extreme
         num_systems = len(indicators) if indicators else 0
         total_points = sum(ind['points'] for ind in indicators) if indicators else 0
         size_display = f"\n<b>Risk Size:</b> {size}%" if size is not None else ""
+        liq_display = ""
+        if tp_liq_prob is not None and tp_liq_usd is not None and tp_liq_target:
+            liq_display = f"\n<b>TP Liquidity:</b> {tp_liq_target} ${tp_liq_usd/1e6:.1f}M | Prob {tp_liq_prob:.0f}%"
         details = (
             f"<b>Confluence:</b> {num_systems} Systems Agree\n"
             f"<b>Total Weight:</b> {total_points} Points"
-            f"{size_display}\n"
+            f"{size_display}"
+            f"{liq_display}\n"
         )
 
     # 3. Levels
@@ -443,30 +451,36 @@ def get_signal_html(signal_type, side, timeframe, entry, sl, tp1, tp2, tp3,
 
 
 def send_scalp_confirmed(timeframe, side, entry, sl, tp1, tp2, tp3,
-                         strength, size, score=None, trend=None, reasons=None, chat_id=None):
+                         strength, size, score=None, trend=None, reasons=None, chat_id=None,
+                         tp_liq_prob=None, tp_liq_usd=None, tp_liq_target=None):
     """⚡️/🚀 SCALP ENTRY CONFIRMED"""
     html = get_signal_html("SCALP", side, timeframe, entry, sl, tp1, tp2, tp3,
-                           score=score, trend=trend, reasons=reasons, size=size)
+                           score=score, trend=trend, reasons=reasons, size=size,
+                           tp_liq_prob=tp_liq_prob, tp_liq_usd=tp_liq_usd, tp_liq_target=tp_liq_target)
     return send(html, parse_mode="HTML", chat_id=chat_id)
 
 
-def send_strong(side, total_points, confirmations, indicators_list, price=None, sl=None, tp1=None, tp2=None, tp3=None, size=None, chat_id=None):
+def send_strong(side, total_points, confirmations, indicators_list, price=None, sl=None, tp1=None, tp2=None, tp3=None, size=None, chat_id=None,
+                tp_liq_prob=None, tp_liq_usd=None, tp_liq_target=None):
     """✅ STRONG CONFLUENCE"""
     tfs = sorted(list(set(ind.get('tf', 'N/A') for ind in indicators_list)))
     tf_summary = ", ".join(tfs)
 
     html = get_signal_html("STRONG", side, tf_summary, price, sl, tp1, tp2, tp3,
-                           indicators=indicators_list, size=size)
+                           indicators=indicators_list, size=size,
+                           tp_liq_prob=tp_liq_prob, tp_liq_usd=tp_liq_usd, tp_liq_target=tp_liq_target)
     return send(html, parse_mode="HTML", chat_id=chat_id)
 
 
-def send_extreme(side, total_points, confirmations, indicators_list, price=None, sl=None, tp1=None, tp2=None, tp3=None, size=None, chat_id=None):
+def send_extreme(side, total_points, confirmations, indicators_list, price=None, sl=None, tp1=None, tp2=None, tp3=None, size=None, chat_id=None,
+                 tp_liq_prob=None, tp_liq_usd=None, tp_liq_target=None):
     """🔥 EXTREME CONFLUENCE"""
     tfs = sorted(list(set(ind.get('tf', 'N/A') for ind in indicators_list)))
     tf_summary = ", ".join(tfs)
 
     html = get_signal_html("EXTREME", side, tf_summary, price, sl, tp1, tp2, tp3,
-                           indicators=indicators_list, size=size)
+                           indicators=indicators_list, size=size,
+                           tp_liq_prob=tp_liq_prob, tp_liq_usd=tp_liq_usd, tp_liq_target=tp_liq_target)
     return send(html, parse_mode="HTML", chat_id=chat_id)
 
 
@@ -501,6 +515,9 @@ def update_signal_message(chat_id, msg_id, sig_data):
         indicators=indicators,
         reasons=meta.get("reasons"),
         size=meta.get("size"),
+        tp_liq_prob=meta.get("tp_liq_prob"),
+        tp_liq_usd=meta.get("tp_liq_usd"),
+        tp_liq_target=meta.get("tp_liq_target"),
     )
     return edit_message_text(msg_id, html, chat_id=chat_id)
 
