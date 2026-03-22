@@ -35,8 +35,11 @@ def detect_liquidity_event(
             if usd < min_usd:
                 continue
             distance_pct = (dist / price) * 100
-            if distance_pct < max(0.0, float(min_distance_pct)) and usd < max(0.0, float(huge_usd_override)):
-                continue
+            min_dist = max(0.0, float(min_distance_pct))
+            huge_override = max(0.0, float(huge_usd_override))
+            if distance_pct < min_dist:
+                if not (huge_override > 0 and usd >= huge_override):
+                    continue
 
             dist_score = 1.0 - (dist / horizon)
             size_score = _clamp(usd / (min_usd * 4.0), 0.0, 1.0)

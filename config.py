@@ -248,8 +248,8 @@ LIQ_ALERT_COOLDOWN = 600         # 10 min cooldown for squeeze alerts
 # Order-book liquidity pool alerts (4h/1d context)
 LIQ_POOL_ALERT_ENABLED = True
 LIQ_POOL_MIN_USD = 100000000           # alert only on large pools (>= $100M)
-LIQ_POOL_HUGE_USD_OVERRIDE = 180000000 # if huge, allow shorter distance
-LIQ_POOL_MIN_DISTANCE_PCT = 0.12       # avoid near-price noise (middle/long distance)
+LIQ_POOL_HUGE_USD_OVERRIDE = 0          # 0 disables near-distance override
+LIQ_POOL_MIN_DISTANCE_PCT = 0.25       # require farther pools (>= 0.25% away)
 LIQ_POOL_ALERT_COOLDOWN = 3600         # 60 min cooldown
 LIQ_POOL_BIAS_SCORE_BONUS = 1          # small score tilt toward liquidity pull side
 LIQ_POOL_MAX_DISTANCE_ATR_MULT = {
