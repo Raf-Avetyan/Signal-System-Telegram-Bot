@@ -501,12 +501,12 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, relaxe
 
 def main():
     parser = argparse.ArgumentParser(description="Replay backtest for scalp logic")
-    parser.add_argument("--days", type=int, default=30, help="Lookback period in days (30-90)")
+    parser.add_argument("--days", type=int, default=30, help="Lookback period in days (30-180)")
     parser.add_argument("--relaxed", action="store_true", help="Force relaxed scalp filters")
     parser.add_argument("--strict", action="store_true", help="Force strict scalp filters")
     args = parser.parse_args()
-    if args.days < 30 or args.days > 90:
-        parser.error("--days must be between 30 and 90")
+    if args.days < 30 or args.days > 180:
+        parser.error("--days must be between 30 and 180")
     if args.relaxed and args.strict:
         parser.error("Use only one of --relaxed or --strict")
 

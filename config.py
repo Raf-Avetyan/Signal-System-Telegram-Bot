@@ -59,8 +59,8 @@ TP3_ATR_MULT = 2.1   # 30% allocation
 TIMEFRAME_RISK_MULTIPLIERS = {
     "5m":  {"sl": 2.2, "tp1": 0.25, "tp2": 0.35, "tp3": 0.6},
     "15m": {"sl": 2.2, "tp1": 0.45, "tp2": 0.6, "tp3": 0.75},
-    "1h":  {"sl": 2.0, "tp1": 0.8, "tp2": 1.2, "tp3": 1.8},
-    "4h":  {"sl": 2.0, "tp1": 0.9, "tp2": 1.4, "tp3": 2.0},
+    "1h":  {"sl": 1.6, "tp1": 0.35, "tp2": 0.55, "tp3": 0.85},
+    "4h":  {"sl": 1.8, "tp1": 0.2, "tp2": 0.35, "tp3": 0.55},
 }
 
 # Strength & Sizing per timeframe
@@ -104,7 +104,8 @@ SCALP_COUNTERTREND_MIN_SCORE = 6
 SCALP_COUNTERTREND_MAX_PER_WINDOW = 3
 SCALP_COUNTERTREND_WINDOW_SEC = 21600  # 6h
 SCALP_TREND_FILTER_MODE_BY_TF = {
-    "4h": "soft",
+    "1h": "off",
+    "4h": "off",
 }
 SCALP_COUNTERTREND_MIN_SCORE_BY_TF = {
     "4h": 6,
@@ -114,7 +115,7 @@ SCALP_COUNTERTREND_MIN_SCORE_BY_TF = {
 SCALP_MIN_SCORE_BY_TF = {
     "5m": 4,
     "15m": 4,
-    "1h": 3,
+    "1h": 2,
     "4h": 1,
 }
 SCALP_ALLOWED_SESSIONS_BY_TF = {
