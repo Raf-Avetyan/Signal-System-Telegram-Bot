@@ -59,8 +59,8 @@ TP3_ATR_MULT = 2.1   # 30% allocation
 TIMEFRAME_RISK_MULTIPLIERS = {
     "5m":  {"sl": 2.2, "tp1": 0.25, "tp2": 0.35, "tp3": 0.6},
     "15m": {"sl": 2.2, "tp1": 0.45, "tp2": 0.6, "tp3": 0.75},
-    "1h":  {"sl": 2.5, "tp1": 0.12, "tp2": 0.14, "tp3": 0.16},
-    "4h":  {"sl": 2.2, "tp1": 0.18, "tp2": 0.28, "tp3": 0.36},
+    "1h":  {"sl": 2.0, "tp1": 0.8, "tp2": 1.2, "tp3": 1.8},
+    "4h":  {"sl": 2.0, "tp1": 0.9, "tp2": 1.4, "tp3": 2.0},
 }
 
 # Strength & Sizing per timeframe
