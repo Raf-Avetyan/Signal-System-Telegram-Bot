@@ -1493,6 +1493,15 @@ class PonchBot:
         zone       = curr["MomentumZone"] if "MomentumZone" in curr else "NEUTRAL"
         rsi_raw    = float(curr["RSI"]) if "RSI" in curr else 50
         rsi_smooth = float(curr["MomentumSmooth"]) if "MomentumSmooth" in curr else 50
+        # Local trend (timeframe-relative): used as directional bias for entries.
+        local_trend = "Ranging"
+        if "EMA2" in curr and "EMA3" in curr:
+            ema_fast = float(curr["EMA2"])
+            ema_slow = float(curr["EMA3"])
+            if close > ema_fast > ema_slow:
+                local_trend = "Bullish"
+            elif close < ema_fast < ema_slow:
+                local_trend = "Bearish"
 
         # ─── REAL-TIME MONITOR (Debug) ───────────────────
 
@@ -1744,6 +1753,21 @@ class PonchBot:
                 score, reasons = calculate_signal_score(
                     evt, df, self.levels, self.macro_trend, self.last_oi, self.last_liqs
                 )
+                side = evt["side"]
+
+                # Local trend bias: prefer signals aligned with current TF direction.
+                if local_trend in ("Bullish", "Bearish"):
+                    aligned_local = (
+                        (side == "LONG" and local_trend == "Bullish") or
+                        (side == "SHORT" and local_trend == "Bearish")
+                    )
+                    if aligned_local:
+                        score += 1
+                        reasons.append(f"Local {local_trend}")
+                    else:
+                        score -= 2
+                        reasons.append(f"Local {local_trend} (counter)")
+
                 # Small directional bias toward strongest nearby liquidity pool.
                 lb_side = self.liquidity_bias.get("side")
                 if lb_side in ("LONG", "SHORT"):
@@ -1756,7 +1780,6 @@ class PonchBot:
                         score -= int(LIQ_POOL_BIAS_SCORE_BONUS)
                         reasons.append(f"Against Liquidity Pull {lb_tf}")
 
-                side = evt["side"]
                 session_name = self._get_current_session_name(now) or "ASIA"
                 session_cfg = SESSION_SCALP_MODE.get(session_name, {})
                 session_countertrend_max = session_cfg.get("countertrend_max", SCALP_COUNTERTREND_MAX_PER_WINDOW)

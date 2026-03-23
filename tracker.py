@@ -56,6 +56,10 @@ class SignalTracker:
             "tp2_hit": False,
             "tp3_hit": False,
             "sl_hit": False,
+            "tp1_at": None,
+            "tp2_at": None,
+            "tp3_at": None,
+            "sl_at": None,
             "msg_id": msg_id,
             "chat_id": chat_id,
             "meta": meta or {},
@@ -110,6 +114,7 @@ class SignalTracker:
             # never as direct SL, to preserve scalp lifecycle semantics.
             if not is_entry_candle and not sig["tp1_hit"] and tp1_touched and sl_touched:
                 sig["tp1_hit"] = True
+                sig["tp1_at"] = sig.get("tp1_at") or datetime.now(timezone.utc).isoformat()
                 sig["status"] = "TP1"
                 changed = True
                 events.append({"type": "TP1", "sig": sig})
@@ -127,16 +132,19 @@ class SignalTracker:
                 if is_long:
                     if not sig["tp1_hit"] and tp_price >= sig["tp1"]:
                         sig["tp1_hit"] = True
+                        sig["tp1_at"] = sig.get("tp1_at") or datetime.now(timezone.utc).isoformat()
                         sig["status"] = "TP1"
                         changed = True
                         events.append({"type": "TP1", "sig": sig})
                     if not sig["tp2_hit"] and tp_price >= sig["tp2"]:
                         sig["tp2_hit"] = True
+                        sig["tp2_at"] = sig.get("tp2_at") or datetime.now(timezone.utc).isoformat()
                         sig["status"] = "TP2"
                         changed = True
                         events.append({"type": "TP2", "sig": sig})
                     if not sig["tp3_hit"] and tp_price >= sig["tp3"]:
                         sig["tp3_hit"] = True
+                        sig["tp3_at"] = sig.get("tp3_at") or datetime.now(timezone.utc).isoformat()
                         sig["status"] = "TP3"
                         sig["closed_at"] = datetime.now(timezone.utc).isoformat()
                         changed = True
@@ -145,16 +153,19 @@ class SignalTracker:
                 else:
                     if not sig["tp1_hit"] and tp_price <= sig["tp1"]:
                         sig["tp1_hit"] = True
+                        sig["tp1_at"] = sig.get("tp1_at") or datetime.now(timezone.utc).isoformat()
                         sig["status"] = "TP1"
                         changed = True
                         events.append({"type": "TP1", "sig": sig})
                     if not sig["tp2_hit"] and tp_price <= sig["tp2"]:
                         sig["tp2_hit"] = True
+                        sig["tp2_at"] = sig.get("tp2_at") or datetime.now(timezone.utc).isoformat()
                         sig["status"] = "TP2"
                         changed = True
                         events.append({"type": "TP2", "sig": sig})
                     if not sig["tp3_hit"] and tp_price <= sig["tp3"]:
                         sig["tp3_hit"] = True
+                        sig["tp3_at"] = sig.get("tp3_at") or datetime.now(timezone.utc).isoformat()
                         sig["status"] = "TP3"
                         sig["closed_at"] = datetime.now(timezone.utc).isoformat()
                         changed = True
@@ -190,6 +201,7 @@ class SignalTracker:
                     events.append({"type": "PROFIT_SL", "sig": sig})
                 else:
                     sig["sl_hit"] = True
+                    sig["sl_at"] = sig.get("sl_at") or datetime.now(timezone.utc).isoformat()
                     sig["status"] = "SL"
                     sig["closed_at"] = datetime.now(timezone.utc).isoformat()
                     changed = True
@@ -205,22 +217,20 @@ class SignalTracker:
         """Get performance stats for signals on a specific date (YYYY-MM-DD)."""
         target_date = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-        today_signals = [
-            s for s in self.signals
-            if s["logged_at"].startswith(target_date)
-        ]
+        generated_today = [s for s in self.signals if str(s.get("logged_at", "")).startswith(target_date)]
+        total = len(generated_today)
 
-        total = len(today_signals)
-        if total == 0:
+        # Count realized outcomes by event date (fixes recap mismatch intraday).
+        tp1_hits = sum(1 for s in self.signals if str(s.get("tp1_at", "")).startswith(target_date))
+        tp2_hits = sum(1 for s in self.signals if str(s.get("tp2_at", "")).startswith(target_date))
+        tp3_hits = sum(1 for s in self.signals if str(s.get("tp3_at", "")).startswith(target_date))
+        sl_hits = sum(1 for s in self.signals if str(s.get("sl_at", "")).startswith(target_date))
+
+        still_open = sum(1 for s in generated_today if s.get("status") == "OPEN")
+        if total == 0 and tp1_hits == 0 and tp2_hits == 0 and tp3_hits == 0 and sl_hits == 0:
             return None
 
-        tp1_hits = sum(1 for s in today_signals if s["tp1_hit"])
-        tp2_hits = sum(1 for s in today_signals if s["tp2_hit"])
-        tp3_hits = sum(1 for s in today_signals if s["tp3_hit"])
-        sl_hits  = sum(1 for s in today_signals if s["sl_hit"])
-        still_open = sum(1 for s in today_signals if s["status"] == "OPEN")
-
-        win_rate = (tp1_hits / total * 100) if total > 0 else 0
+        win_rate = (tp1_hits / total * 100) if total > 0 else 0.0
 
         return {
             "total": total,
