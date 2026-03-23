@@ -44,6 +44,7 @@ class SignalTracker:
             "side": side,
             "entry": entry,
             "sl": sl,
+            "initial_sl": sl,
             "tp1": tp1,
             "tp2": tp2,
             "tp3": tp3,
@@ -139,6 +140,8 @@ class SignalTracker:
                     if not sig["tp2_hit"] and tp_price >= sig["tp2"]:
                         sig["tp2_hit"] = True
                         sig["tp2_at"] = sig.get("tp2_at") or datetime.now(timezone.utc).isoformat()
+                        # After TP2, lock stop in profit at/above TP1 for longs.
+                        sig["sl"] = max(float(sig.get("sl", sig["initial_sl"])), float(sig.get("tp1", sig["entry"])))
                         sig["status"] = "TP2"
                         changed = True
                         events.append({"type": "TP2", "sig": sig})
@@ -160,6 +163,8 @@ class SignalTracker:
                     if not sig["tp2_hit"] and tp_price <= sig["tp2"]:
                         sig["tp2_hit"] = True
                         sig["tp2_at"] = sig.get("tp2_at") or datetime.now(timezone.utc).isoformat()
+                        # After TP2, lock stop in profit at/below TP1 for shorts.
+                        sig["sl"] = min(float(sig.get("sl", sig["initial_sl"])), float(sig.get("tp1", sig["entry"])))
                         sig["status"] = "TP2"
                         changed = True
                         events.append({"type": "TP2", "sig": sig})
@@ -172,10 +177,9 @@ class SignalTracker:
                         events.append({"type": "TP3", "sig": sig})
                         continue
 
-            # 2. Check Entry Return (Breakeven after TP2)
-            # If TP2 hit, and we touch entry again, close as ENTRY_CLOSE.
-            # This avoids premature breakeven closes right after TP1.
-            if sig.get("tp2_hit") and sig["status"] != "ENTRY_CLOSE":
+            # 2. Check Entry Return (Breakeven after TP1)
+            # If TP1 hit, and we touch entry again, close as ENTRY_CLOSE.
+            if sig.get("tp1_hit") and sig["status"] != "ENTRY_CLOSE":
                 entry_hit = False
                 if is_long and p_low <= sig["entry"]:
                     entry_hit = True

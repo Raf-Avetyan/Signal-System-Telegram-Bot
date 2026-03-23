@@ -423,11 +423,11 @@ def get_signal_html(signal_type, side, timeframe, entry, sl, tp1, tp2, tp3,
 
     # 3b. Status Banner (Bold & Outside <pre>)
     if status == "OPEN":
-        msg += f"\n<b>🔵 ACTIVE POSITION</b>"
+        msg += f"\n<b>🔵 POSITION OPEN</b>"
     elif status == "TP1":
-        msg += f"\n<b>🔵 ACTIVE POSITION (TP1 ✅)</b>"
+        msg += f"\n<b>🔵 POSITION OPEN (TP1 ✅)</b>"
     elif status == "TP2":
-        msg += f"\n<b>🔵 ACTIVE POSITION (TP2 ✅)</b>"
+        msg += f"\n<b>🔵 POSITION OPEN (TP2 ✅)</b>"
     elif status == "TP3":
         msg += f"\n<b>💰 ALL TARGETS HIT</b>"
     elif status == "SL":
