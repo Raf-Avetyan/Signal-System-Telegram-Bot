@@ -172,9 +172,10 @@ class SignalTracker:
                         events.append({"type": "TP3", "sig": sig})
                         continue
 
-            # 2. Check Entry Return (Breakeven after TP)
-            # If TP1 hit, and we touch entry again, close as ENTRY_CLOSE
-            if sig.get("tp1_hit") and sig["status"] != "ENTRY_CLOSE":
+            # 2. Check Entry Return (Breakeven after TP2)
+            # If TP2 hit, and we touch entry again, close as ENTRY_CLOSE.
+            # This avoids premature breakeven closes right after TP1.
+            if sig.get("tp2_hit") and sig["status"] != "ENTRY_CLOSE":
                 entry_hit = False
                 if is_long and p_low <= sig["entry"]:
                     entry_hit = True

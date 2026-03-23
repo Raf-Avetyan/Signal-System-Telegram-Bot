@@ -111,6 +111,7 @@ class PonchBot:
         self.confluence_side_lock_until = state.get("confluence_side_lock_until", {"LONG": 0, "SHORT": 0})
         self.liq_pool_alerts = state.get("liq_pool_alerts", {})
         self.liquidity_bias = state.get("liquidity_bias", {})
+        self.last_liq_pool_report_hour = state.get("last_liq_pool_report_hour")
         self.last_order_book = None
         self.last_session_update = time.time()
         self.last_daily_update   = time.time()
@@ -238,12 +239,10 @@ class PonchBot:
         if not candidates:
             return
 
-        # Send only the strongest pool event to avoid alert floods.
+        # Send hourly: only the strongest pool event (4h/1d) once per UTC hour.
         best_event = max(candidates, key=lambda e: e.get("score", 0))
-        px_bucket = int(round(float(best_event["level_price"]) / 100.0) * 100)
-        alert_key = f"{best_event['timeframe']}_{px_bucket}"
-        last_alert_ts = float(self.liq_pool_alerts.get(alert_key, 0) or 0)
-        if (now_ts - last_alert_ts) >= LIQ_POOL_ALERT_COOLDOWN:
+        hour_key = datetime.now(timezone.utc).strftime("%Y-%m-%d %H")
+        if self.last_liq_pool_report_hour != hour_key:
             if not self.is_booting:
                 tg.send_liquidity_pool_alert(
                     timeframe=best_event["timeframe"],
@@ -255,7 +254,8 @@ class PonchBot:
                     current_price=float(latest_price),
                     chat_id=PRIVATE_CHAT_ID,
                 )
-            self.liq_pool_alerts[alert_key] = now_ts
+            self.last_liq_pool_report_hour = hour_key
+            self._save_state()
 
         if best_event:
             self.liquidity_bias = {
@@ -576,6 +576,7 @@ class PonchBot:
                 "confluence_side_lock_until": self.confluence_side_lock_until,
                 "liq_pool_alerts": self.liq_pool_alerts,
                 "liquidity_bias": self.liquidity_bias,
+                "last_liq_pool_report_hour": self.last_liq_pool_report_hour,
                 "last_update_id": self.last_update_id,
                 "scalp_trackers": {tf: tracker.to_dict() for tf, tracker in self.scalp_trackers.items()}
             }
@@ -1264,6 +1265,7 @@ class PonchBot:
             self.confluence_side_lock_until = {"LONG": 0, "SHORT": 0}
             self.liq_pool_alerts = {}
             self.liquidity_bias = {}
+            self.last_liq_pool_report_hour = None
             self._save_state()
         
         self._reconstruct_session_history(now.hour + now.minute / 60.0)

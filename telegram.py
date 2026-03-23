@@ -434,8 +434,10 @@ def get_signal_html(signal_type, side, timeframe, entry, sl, tp1, tp2, tp3,
         msg += f"\n<b>❌ STOP LOSS HIT</b>"
     elif status == "PROFIT_SL":
         msg += f"\n<b>🛡 STOP HIT IN PROFIT</b>"
+    elif status == "ENTRY_CLOSE":
+        msg += f"\n<b>🟡 CLOSED AT BREAKEVEN | NOT ACTIVE</b>"
     elif status == "CLOSED":
-        msg += f"\n<b>🛡 CLOSED AFTER TP</b>"
+        msg += f"\n<b>🛡 CLOSED AFTER TP | NOT ACTIVE</b>"
 
     # 4. Matched Strategies (for Strong/Extreme)
     if (signal_type in ["STRONG", "EXTREME"]) and indicators:
