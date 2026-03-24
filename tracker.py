@@ -235,7 +235,13 @@ class SignalTracker:
         if total == 0 and tp1_hits == 0 and tp2_hits == 0 and tp3_hits == 0 and sl_hits == 0:
             return None
 
-        win_rate = (tp1_hits / total * 100) if total > 0 else 0.0
+        # Recap win-rate preference: TP progress vs SL pressure.
+        # "Wins" = TP1+TP2 hit events on target date; "Losses" = SL hit events.
+        # This matches recap-style interpretation (e.g. 5 TP vs 1 SL => 83.3%).
+        wins = tp1_hits + tp2_hits
+        losses = sl_hits
+        resolved = wins + losses
+        win_rate = (wins / resolved * 100.0) if resolved > 0 else 0.0
 
         return {
             "total": total,
@@ -244,6 +250,8 @@ class SignalTracker:
             "tp3_hits": tp3_hits,
             "sl_hits": sl_hits,
             "still_open": still_open,
+            "wins": wins,
+            "losses": losses,
             "win_rate": win_rate,
         }
 
