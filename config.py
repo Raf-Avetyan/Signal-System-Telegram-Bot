@@ -188,6 +188,13 @@ ORDERFLOW_ANOMALY_SCORE_MIN = 8
 ORDERFLOW_OI_PCT_ANOMALY = 1.5      # absolute OI change (%)
 ORDERFLOW_LIQ_ANOMALY_USD = 1200000 # liquidation spike threshold
 
+# Falling-knife / blow-off safety filter for confluence entries
+FALLING_KNIFE_FILTER_ENABLED = True
+FALLING_KNIFE_LOOKBACK_5M = 6      # 30 min window
+FALLING_KNIFE_LOOKBACK_15M = 4     # 60 min window
+FALLING_KNIFE_MOVE_PCT_5M = 0.7    # block longs if <= -0.7% without stabilization (shorts vice versa)
+FALLING_KNIFE_MOVE_PCT_15M = 1.0   # block longs if <= -1.0% without stabilization (shorts vice versa)
+
 # ─── SIGNAL POINTS ────────────────────────────
 # Trade signal points by entry level
 SIGNAL_POINTS = {

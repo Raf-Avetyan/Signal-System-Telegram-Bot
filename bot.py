@@ -42,7 +42,9 @@ from config import (
     LIQ_POOL_ALERT_ENABLED, LIQ_POOL_MIN_USD, LIQ_POOL_ALERT_COOLDOWN,
     LIQ_POOL_BIAS_SCORE_BONUS, LIQ_POOL_MAX_DISTANCE_ATR_MULT,
     LIQ_POOL_MIN_DISTANCE_PCT, LIQ_POOL_HUGE_USD_OVERRIDE,
-    TP_LIQUIDITY_MIN_USD, TP_LIQUIDITY_BAND_PCT
+    TP_LIQUIDITY_MIN_USD, TP_LIQUIDITY_BAND_PCT,
+    FALLING_KNIFE_FILTER_ENABLED, FALLING_KNIFE_LOOKBACK_5M, FALLING_KNIFE_LOOKBACK_15M,
+    FALLING_KNIFE_MOVE_PCT_5M, FALLING_KNIFE_MOVE_PCT_15M
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
@@ -297,6 +299,52 @@ class PonchBot:
             if best is None or item["size_usd"] > best["size_usd"]:
                 best = item
         return best
+
+    def _is_unstable_impulse(self, data, side):
+        """
+        Block counter-impulse confluence entries:
+        - LONG during sharp downside impulse without stabilization
+        - SHORT during sharp upside impulse without stabilization
+        """
+        if not FALLING_KNIFE_FILTER_ENABLED:
+            return False, ""
+
+        checks = [
+            ("5m", int(FALLING_KNIFE_LOOKBACK_5M), float(FALLING_KNIFE_MOVE_PCT_5M)),
+            ("15m", int(FALLING_KNIFE_LOOKBACK_15M), float(FALLING_KNIFE_MOVE_PCT_15M)),
+        ]
+        for tf, lookback, move_thr in checks:
+            df = data.get(tf)
+            if df is None or df.empty or len(df) < lookback + 1:
+                continue
+
+            closes = df["Close"]
+            opens = df["Open"]
+            prev_close = float(closes.iloc[-(lookback + 1)])
+            curr_close = float(closes.iloc[-1])
+            if prev_close <= 0:
+                continue
+
+            move_pct = (curr_close / prev_close - 1.0) * 100.0
+            c1, c2, c3 = float(closes.iloc[-1]), float(closes.iloc[-2]), float(closes.iloc[-3])
+            o1, o2, o3 = float(opens.iloc[-1]), float(opens.iloc[-2]), float(opens.iloc[-3])
+            red_count = int(c1 < o1) + int(c2 < o2) + int(c3 < o3)
+            green_count = int(c1 > o1) + int(c2 > o2) + int(c3 > o3)
+            down_streak = c1 < c2 < c3
+            up_streak = c1 > c2 > c3
+            bounce = c1 > c2 > c3
+            pullback = c1 < c2 < c3
+
+            if side == "LONG":
+                knife = (move_pct <= -abs(move_thr)) and (down_streak or red_count >= 2)
+                if knife and not bounce:
+                    return True, f"{tf} impulse {move_pct:+.2f}% (no base)"
+            else:  # SHORT
+                blowoff = (move_pct >= abs(move_thr)) and (up_streak or green_count >= 2)
+                if blowoff and not pullback:
+                    return True, f"{tf} impulse {move_pct:+.2f}% (no top)"
+
+        return False, ""
 
     def _get_scalp_tuning_state(self):
         """Adapt scalp strictness from recent closed scalp performance."""
@@ -770,6 +818,12 @@ class PonchBot:
                     
                     if not trend_ok:
                         print(f"  [CONFLUENCE] Blocked {side} {ce['type']}: Against Macro Trend ({self.macro_trend})")
+                        continue
+
+                    # 1.5 Falling-knife / blow-off safety filter.
+                    impulse_blocked, impulse_note = self._is_unstable_impulse(data, side)
+                    if impulse_blocked:
+                        print(f"  [CONFLUENCE] Blocked {side} {ce['type']}: {impulse_note}")
                         continue
 
                     # 2. Momentum exhaustion guard: avoid SHORT when RSI already very low
