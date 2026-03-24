@@ -53,7 +53,7 @@ from levels import calculate_levels, check_liquidity_sweep, check_volatility_tou
 from channels import calculate_channels, check_channel_signals
 from momentum import calculate_momentum, ScalpTracker, detect_trend
 from scoring import calculate_signal_score
-from signals import check_momentum_confirm, check_range_confirm, check_flow_confirm
+from signals import check_momentum_confirm, check_range_confirm, check_flow_confirm, check_rsi_divergence
 from confirmation import ConfirmationTracker
 from charting import generate_daily_levels_chart
 from data import (
@@ -1823,6 +1823,8 @@ class PonchBot:
 
         # 2. Momentum confirmation
         mom_sigs = check_momentum_confirm(df)
+        div_sigs = check_rsi_divergence(df)
+        divergence_sides = {s.get("side") for s in div_sigs}
         for sig in mom_sigs:
             sig_key = f"mom_sig_{tf}_{sig['side']}_{candle_ts}"
             if sig_key not in self.sent_signals:
@@ -1843,6 +1845,14 @@ class PonchBot:
         flow_sigs = check_flow_confirm(df)
         for sig in flow_sigs:
             sig_key = f"flow_sig_{tf}_{sig['side']}_{candle_ts}"
+            if sig_key not in self.sent_signals:
+                self.sent_signals.add(sig_key)
+                sig["tf"] = tf
+                self.confirmations.add_signal(sig)
+
+        # 5. RSI divergence confirmation
+        for sig in div_sigs:
+            sig_key = f"rsi_div_{tf}_{sig['side']}_{candle_ts}"
             if sig_key not in self.sent_signals:
                 self.sent_signals.add(sig_key)
                 sig["tf"] = tf
@@ -1892,6 +1902,9 @@ class PonchBot:
                     evt, df, self.levels, self.macro_trend, self.last_oi, self.last_liqs
                 )
                 side = evt["side"]
+                if side in divergence_sides:
+                    score += 1
+                    reasons.append("RSI Divergence")
 
                 # Local trend bias: prefer signals aligned with current TF direction.
                 if local_trend in ("Bullish", "Bearish"):

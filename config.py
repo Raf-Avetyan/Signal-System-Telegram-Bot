@@ -48,6 +48,14 @@ MOMENTUM_SMOOTH   = 3     # Smoothing EMA for momentum (Fast)
 MOMENTUM_OB       = 66    # Overbought threshold
 MOMENTUM_OS       = 34    # Oversold threshold
 
+# RSI divergence confirmation
+RSI_DIVERGENCE_ENABLED = True
+RSI_DIVERGENCE_LOOKBACK = 36
+RSI_DIVERGENCE_SEGMENT = 12
+RSI_DIVERGENCE_MIN_PRICE_DELTA_PCT = 0.08
+RSI_DIVERGENCE_MIN_RSI_DELTA = 2.0
+RSI_DIVERGENCE_POINTS = 2
+
 # ─── SCALP PARAMETERS ────────────────────────
 # ATR multipliers for SL/TP calculation
 SL_ATR_MULT  = 1.3
