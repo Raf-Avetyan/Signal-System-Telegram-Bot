@@ -278,8 +278,7 @@ class PonchBot:
             if tf not in by_tf or evt.get("score", 0) > by_tf[tf].get("score", 0):
                 by_tf[tf] = evt
 
-        report_events = [by_tf[tf] for tf in LIQ_POOL_REPORT_TIMEFRAMES if tf in by_tf]
-        if not report_events:
+        if not by_tf:
             return
 
         trigger = None
@@ -332,7 +331,11 @@ class PonchBot:
             return
 
         lines = [f"<b>🧲 LIQUIDITY POOL REPORT</b>", f"<pre>Trigger: {trigger}"]
-        for evt in report_events:
+        for tf in LIQ_POOL_REPORT_TIMEFRAMES:
+            evt = by_tf.get(tf)
+            if not evt:
+                lines.append(f"{tf:>3} | {'-':<5} | No valid big pool in range")
+                continue
             lines.append(
                 f"{evt['timeframe']:>3} | {evt['side']:<5} | Px {evt['level_price']:,.0f} | "
                 f"${evt['size_usd']/1e6:,.0f}M | D {evt['distance_pct']:.2f}% | P {evt['probability_pct']:.0f}%"

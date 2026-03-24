@@ -285,11 +285,11 @@ LIQ_POOL_MIN_USD_BY_TF = {
     "1d": 180000000,
 }
 LIQ_POOL_MIN_DISTANCE_PCT_BY_TF = {
-    "5m": 0.03,
-    "15m": 0.08,
-    "1h": 0.15,
-    "4h": 0.25,
-    "1d": 0.40,
+    "5m": 0.10,
+    "15m": 0.15,
+    "1h": 0.25,
+    "4h": 0.40,
+    "1d": 0.70,
 }
 LIQ_POOL_NO_MOVE_RANGE_PCT_1H = 0.8
 LIQ_POOL_EXPANSION_PRICE_MOVE_PCT_1H = 1.0
