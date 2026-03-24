@@ -208,6 +208,34 @@ class PonchBot:
             return "TREND"
         return "RANGE"
 
+    def _trend_side(self, trend_name):
+        t = str(trend_name or "").lower()
+        if "bullish" in t:
+            return "LONG"
+        if "bearish" in t:
+            return "SHORT"
+        return None
+
+    def _get_anchor_trend(self, tf):
+        """
+        Hierarchical trend anchor:
+        5m/15m -> 15m then 1h then 4h then 1d then 1w
+        1h     -> 1h then 4h then 1d then 1w
+        4h     -> 4h then 1d then 1w
+        """
+        order_map = {
+            "5m":  ["15m", "1h", "4h", "1d", "1w"],
+            "15m": ["15m", "1h", "4h", "1d", "1w"],
+            "1h":  ["1h", "4h", "1d", "1w"],
+            "4h":  ["4h", "1d", "1w"],
+        }
+        trends = getattr(self, "tf_trends", {}) or {}
+        for k in order_map.get(tf, [tf, "1h", "4h", "1d", "1w"]):
+            side = self._trend_side(trends.get(k))
+            if side:
+                return trends.get(k), k
+        return "Ranging", None
+
     def _update_liquidity_pool_context(self, data, latest_price, now_ts):
         """
         Build multi-timeframe liquidity-pool context from OKX order book and update bias.
@@ -920,10 +948,17 @@ class PonchBot:
         self.last_oi = fetch_open_interest()
         self.last_liqs = fetch_liquidations()
 
-        # 3. Fetch all timeframes (+1d for liquidity-pool context)
-        fetch_tfs = list(dict.fromkeys(SIGNAL_TIMEFRAMES + ["1d"]))
+        # 3. Fetch all timeframes (+1d/+1w for liquidity-pool and trend hierarchy context)
+        fetch_tfs = list(dict.fromkeys(SIGNAL_TIMEFRAMES + ["1d", "1w"]))
         data = fetch_all_timeframes(timeframes=fetch_tfs)
         if not data: return
+
+        # Build per-timeframe trend map for hierarchical gating.
+        self.tf_trends = {}
+        for tf_key in ["5m", "15m", "1h", "4h", "1d", "1w"]:
+            df_tf = data.get(tf_key)
+            if df_tf is not None and not df_tf.empty:
+                self.tf_trends[tf_key] = detect_trend(df_tf)
 
         # 3.1 Market Alert (Fast Move)
         if "1h" in data:
@@ -1035,12 +1070,17 @@ class PonchBot:
                     
                     # --- CONFLUENCE FILTERS & QUALITY CONTROL ---
                     # 1. Trend Alignment: Confluence must match the macro trend
-                    trend_ok = self.macro_trend == "Ranging"
-                    if side == "LONG" and self.macro_trend in ["Bullish", "Trending Bullish", "Strong Bullish"]: trend_ok = True
-                    if side == "SHORT" and self.macro_trend in ["Bearish", "Trending Bearish", "Strong Bearish"]: trend_ok = True
+                    # Hierarchical trend gate for non-scalp confluence:
+                    # respect 1h->4h->1d->1w direction, avoid counter entries on reversals.
+                    conf_trend, conf_src = self._get_anchor_trend("1h")
+                    conf_side = self._trend_side(conf_trend)
+                    trend_ok = (conf_side is None) or (side == conf_side)
                     
                     if not trend_ok:
-                        print(f"  [CONFLUENCE] Blocked {side} {ce['type']}: Against Macro Trend ({self.macro_trend})")
+                        print(
+                            f"  [CONFLUENCE] Blocked {side} {ce['type']}: "
+                            f"against trend {conf_trend} ({conf_src or 'N/A'})"
+                        )
                         continue
 
                     # 1.5 Falling-knife / blow-off safety filter.
@@ -1775,15 +1815,8 @@ class PonchBot:
         zone       = curr["MomentumZone"] if "MomentumZone" in curr else "NEUTRAL"
         rsi_raw    = float(curr["RSI"]) if "RSI" in curr else 50
         rsi_smooth = float(curr["MomentumSmooth"]) if "MomentumSmooth" in curr else 50
-        # Local trend (timeframe-relative): used as directional bias for entries.
-        local_trend = "Ranging"
-        if "EMA2" in curr and "EMA3" in curr:
-            ema_fast = float(curr["EMA2"])
-            ema_slow = float(curr["EMA3"])
-            if close > ema_fast > ema_slow:
-                local_trend = "Bullish"
-            elif close < ema_fast < ema_slow:
-                local_trend = "Bearish"
+        # Local trend anchor by hierarchy (5m/15m -> 15m, then 1h->4h->1d->1w).
+        local_trend, local_trend_src = self._get_anchor_trend(tf)
 
         # в”Ђв”Ђв”Ђ REAL-TIME MONITOR (Debug) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
@@ -1956,51 +1989,54 @@ class PonchBot:
                         "tf":        tf
                     })
 
-        # в”Ђв”Ђв”Ђ Trade Signals (Channels) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
-        ch_sigs = check_channel_signals(df)
-        for sig in ch_sigs:
-            sig_key = f"tr_sig_{tf}_{sig['signal']}_{candle_ts}"
-            if sig_key not in self.sent_signals:
-                self.sent_signals.add(sig_key)
-                sig["tf"] = tf
-                self.confirmations.add_signal(sig)
+        divergence_sides = set()
+        # 5m is scalp-only: skip non-scalp confirmation engines on this timeframe.
+        if tf != "5m":
+            # 1. Trade Signals (Channels)
+            ch_sigs = check_channel_signals(df)
+            for sig in ch_sigs:
+                sig_key = f"tr_sig_{tf}_{sig['signal']}_{candle_ts}"
+                if sig_key not in self.sent_signals:
+                    self.sent_signals.add(sig_key)
+                    sig["tf"] = tf
+                    self.confirmations.add_signal(sig)
 
-        # 2. Momentum confirmation
-        mom_sigs = check_momentum_confirm(df)
-        div_sigs = check_rsi_divergence(df)
-        divergence_sides = {s.get("side") for s in div_sigs}
-        for sig in mom_sigs:
-            sig_key = f"mom_sig_{tf}_{sig['side']}_{candle_ts}"
-            if sig_key not in self.sent_signals:
-                self.sent_signals.add(sig_key)
-                sig["tf"] = tf
-                self.confirmations.add_signal(sig)
+            # 2. Momentum confirmation
+            mom_sigs = check_momentum_confirm(df)
+            div_sigs = check_rsi_divergence(df)
+            divergence_sides = {s.get("side") for s in div_sigs}
+            for sig in mom_sigs:
+                sig_key = f"mom_sig_{tf}_{sig['side']}_{candle_ts}"
+                if sig_key not in self.sent_signals:
+                    self.sent_signals.add(sig_key)
+                    sig["tf"] = tf
+                    self.confirmations.add_signal(sig)
 
-        # 3. Range trader confirmation
-        rng_sigs = check_range_confirm(df, self.levels)
-        for sig in rng_sigs:
-            sig_key = f"rng_sig_{tf}_{sig['signal']}_{candle_ts}"
-            if sig_key not in self.sent_signals:
-                self.sent_signals.add(sig_key)
-                sig["tf"] = tf
-                self.confirmations.add_signal(sig)
+            # 3. Range trader confirmation
+            rng_sigs = check_range_confirm(df, self.levels)
+            for sig in rng_sigs:
+                sig_key = f"rng_sig_{tf}_{sig['signal']}_{candle_ts}"
+                if sig_key not in self.sent_signals:
+                    self.sent_signals.add(sig_key)
+                    sig["tf"] = tf
+                    self.confirmations.add_signal(sig)
 
-        # 4. Flow confirmation
-        flow_sigs = check_flow_confirm(df)
-        for sig in flow_sigs:
-            sig_key = f"flow_sig_{tf}_{sig['side']}_{candle_ts}"
-            if sig_key not in self.sent_signals:
-                self.sent_signals.add(sig_key)
-                sig["tf"] = tf
-                self.confirmations.add_signal(sig)
+            # 4. Flow confirmation
+            flow_sigs = check_flow_confirm(df)
+            for sig in flow_sigs:
+                sig_key = f"flow_sig_{tf}_{sig['side']}_{candle_ts}"
+                if sig_key not in self.sent_signals:
+                    self.sent_signals.add(sig_key)
+                    sig["tf"] = tf
+                    self.confirmations.add_signal(sig)
 
-        # 5. RSI divergence confirmation
-        for sig in div_sigs:
-            sig_key = f"rsi_div_{tf}_{sig['side']}_{candle_ts}"
-            if sig_key not in self.sent_signals:
-                self.sent_signals.add(sig_key)
-                sig["tf"] = tf
-                self.confirmations.add_signal(sig)
+            # 5. RSI divergence confirmation
+            for sig in div_sigs:
+                sig_key = f"rsi_div_{tf}_{sig['side']}_{candle_ts}"
+                if sig_key not in self.sent_signals:
+                    self.sent_signals.add(sig_key)
+                    sig["tf"] = tf
+                    self.confirmations.add_signal(sig)
 
         # в”Ђв”Ђв”Ђ Scalp Momentum System в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         tracker = self.scalp_trackers[tf]
@@ -2049,6 +2085,16 @@ class PonchBot:
                 if side in divergence_sides:
                     score += 1
                     reasons.append("RSI Divergence")
+
+                # Hard local-trend reversal guard (hierarchical source):
+                # do not SHORT in bullish local trend, do not LONG in bearish local trend.
+                local_side = self._trend_side(local_trend)
+                if local_side and side != local_side:
+                    print(
+                        f"  [SCALP] Blocked {tf} {side}: local trend reversal "
+                        f"({local_trend} from {local_trend_src or tf})"
+                    )
+                    continue
 
                 # Local trend bias: prefer signals aligned with current TF direction.
                 if local_trend in ("Bullish", "Bearish"):
