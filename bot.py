@@ -250,6 +250,24 @@ class PonchBot:
                 huge_usd_override=float(LIQ_POOL_HUGE_USD_OVERRIDE),
             )
             if not event:
+                # Fallback pass: keep distance filtering, relax size/range to avoid empty TF rows.
+                relaxed_min_usd = max(tf_min_usd * 0.35, 10000000.0)
+                relaxed_min_dist = max(tf_min_dist * 0.60, 0.05)
+                relaxed_max_dist = float(LIQ_POOL_MAX_DISTANCE_ATR_MULT.get(tf, 1.5)) * 1.8
+                event = detect_liquidity_event(
+                    order_book=order_book,
+                    price=float(latest_price),
+                    atr=atr_val,
+                    timeframe=tf,
+                    min_usd=relaxed_min_usd,
+                    max_distance_atr_mult=relaxed_max_dist,
+                    min_distance_pct=relaxed_min_dist,
+                    huge_usd_override=0.0,
+                )
+                if event:
+                    event["fallback"] = True
+                    event["score"] = float(event.get("score", 0)) * 0.70
+            if not event:
                 continue
             candidates.append(event)
 
@@ -336,9 +354,11 @@ class PonchBot:
             if not evt:
                 lines.append(f"{tf:>3} | {'-':<5} | No valid big pool in range")
                 continue
+            tag = " ~" if evt.get("fallback") else ""
             lines.append(
                 f"{evt['timeframe']:>3} | {evt['side']:<5} | Px {evt['level_price']:,.0f} | "
                 f"${evt['size_usd']/1e6:,.0f}M | D {evt['distance_pct']:.2f}% | P {evt['probability_pct']:.0f}%"
+                f"{tag}"
             )
         lines.append("</pre>")
         msg = "\n".join(lines)
