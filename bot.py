@@ -46,6 +46,9 @@ from config import (
     FALLING_KNIFE_FILTER_ENABLED, FALLING_KNIFE_LOOKBACK_5M, FALLING_KNIFE_LOOKBACK_15M,
     FALLING_KNIFE_MOVE_PCT_5M, FALLING_KNIFE_MOVE_PCT_15M,
     LIQ_POOL_REPORT_TIMEFRAMES, LIQ_POOL_MIN_USD_BY_TF, LIQ_POOL_MIN_DISTANCE_PCT_BY_TF,
+    LIQ_POOL_TARGET_DISTANCE_PCT_BY_TF, LIQ_POOL_LEVEL_DEDUP_GAP_PCT,
+    LIQ_POOL_PROGRESSIVE_MIN_STEP_PCT,
+    LIQ_POOL_AGG_WINDOW_PCT_BY_TF,
     LIQ_POOL_NO_MOVE_RANGE_PCT_1H, LIQ_POOL_EXPANSION_PRICE_MOVE_PCT_1H,
     LIQ_POOL_EXPANSION_VOLUME_MULT, LIQ_POOL_EXPANSION_BOOK_MULT, LIQ_POOL_EXPANSION_COOLDOWN
 )
@@ -62,7 +65,7 @@ from data import (
 )
 from tracker import SignalTracker
 from bitunix import verify_bitunix_user
-from liquidity_map import detect_liquidity_event
+from liquidity_map import detect_liquidity_event, detect_liquidity_candidates
 import telegram as tg
 
 
@@ -224,7 +227,137 @@ class PonchBot:
             + sum(float(px) * float(sz) for px, sz in order_book.get("asks", []))
         )
 
+        def pick_for_tf(tf_candidates, tf, tf_min_usd, tf_min_dist, used_prices, prev_tf_size, prev_tf_dist):
+            if not tf_candidates:
+                return None
+            target_dist = float(LIQ_POOL_TARGET_DISTANCE_PCT_BY_TF.get(tf, tf_min_dist))
+            dedup_gap = float(LIQ_POOL_LEVEL_DEDUP_GAP_PCT)
+            step_pct = float(LIQ_POOL_PROGRESSIVE_MIN_STEP_PCT)
+            progressive_floor = max(tf_min_dist, prev_tf_dist + step_pct)
+            passes = [
+                {
+                    "usd": tf_min_usd,
+                    "dist": max(progressive_floor, target_dist * 0.80),
+                    "fallback": False,
+                    "force": False
+                },
+                {
+                    "usd": max(tf_min_usd * 0.65, 8_000_000.0),
+                    "dist": max(progressive_floor * 0.85, tf_min_dist * 0.80, 0.05),
+                    "fallback": True,
+                    "force": False
+                },
+                {
+                    "usd": max(tf_min_usd * 0.35, 4_000_000.0),
+                    "dist": max(prev_tf_dist + step_pct * 0.50, 0.03),
+                    "fallback": True,
+                    "force": True
+                },
+            ]
+
+            for p in passes:
+                # Pass A: prefer equal-or-bigger pools than previous TF.
+                for enforce_growth in (True, False):
+                    for enforce_unique in (True, False):
+                        best = None
+                        best_rank = -1.0
+                        for evt in tf_candidates:
+                            usd = float(evt.get("size_usd", 0) or 0)
+                            dist_pct = float(evt.get("distance_pct", 0) or 0)
+                            px = float(evt.get("level_price", 0) or 0)
+                            if usd < p["usd"] or dist_pct < p["dist"] or px <= 0:
+                                continue
+                            if enforce_growth and prev_tf_size > 0 and usd < (prev_tf_size * 0.95):
+                                continue
+
+                            duplicate = False
+                            for upx in used_prices:
+                                dd = abs(px - upx) / float(latest_price) * 100.0
+                                if dd < dedup_gap:
+                                    duplicate = True
+                                    break
+                            if enforce_unique and duplicate:
+                                continue
+
+                            # Prefer bigger pools while nudging each TF toward its own distance target.
+                            rank = usd * (1.0 + dist_pct / max(target_dist, 0.05)) / (1.0 + abs(dist_pct - target_dist) * 2.0)
+                            if rank > best_rank:
+                                best_rank = rank
+                                best = dict(evt)
+                                size_ratio = usd / max(1.0, p["usd"])
+                                dist_fit = max(0.0, 1.0 - (abs(dist_pct - target_dist) / max(target_dist, 0.05)))
+                                prob = min(95.0, max(20.0, 25.0 + min(size_ratio, 6.0) * 10.0 + dist_fit * 20.0))
+                                best["probability_pct"] = prob
+                                best["score"] = rank
+                                best["fallback"] = p["fallback"]
+                                best["force"] = p["force"]
+                        if best:
+                            return best
+            # Last resort: take farthest visible candidate (keeps higher TF farther than lower TF as much as possible).
+            farthest = None
+            farthest_dist = -1.0
+            for evt in tf_candidates:
+                px = float(evt.get("level_price", 0) or 0)
+                dist_pct = float(evt.get("distance_pct", 0) or 0)
+                if px <= 0:
+                    continue
+                if dist_pct > farthest_dist:
+                    farthest = dict(evt)
+                    farthest_dist = dist_pct
+            if farthest:
+                farthest["fallback"] = True
+                farthest["force"] = True
+                farthest["probability_pct"] = max(15.0, 55.0 - farthest_dist * 6.0)
+                farthest["score"] = float(farthest.get("size_usd", 0) or 0) * 0.25
+                return farthest
+            return None
+
+        def pick_structural_for_tf(tf, tf_min_usd, tf_min_dist, prev_tf_dist):
+            levels = self.levels if isinstance(self.levels, dict) else {}
+            step_pct = float(LIQ_POOL_PROGRESSIVE_MIN_STEP_PCT)
+            target_dist = float(LIQ_POOL_TARGET_DISTANCE_PCT_BY_TF.get(tf, tf_min_dist))
+            required_dist = max(tf_min_dist, prev_tf_dist + step_pct)
+
+            raw = []
+            if levels:
+                for key in ["PDH", "PDL", "PWH", "PWL", "PMH", "PML", "PumpMax", "DumpMax"]:
+                    lv = levels.get(key)
+                    if not lv:
+                        continue
+                    px = float(lv)
+                    dist_pct = abs(px - float(latest_price)) / float(latest_price) * 100.0
+                    side = "LONG" if px > float(latest_price) else "SHORT"
+                    raw.append((key, px, dist_pct, side))
+            if not raw:
+                bid_usd = sum(float(px) * float(sz) for px, sz in (order_book.get("bids", []) or []))
+                ask_usd = sum(float(px) * float(sz) for px, sz in (order_book.get("asks", []) or []))
+                side = "LONG" if ask_usd >= bid_usd else "SHORT"
+                px = float(latest_price) * (1.0 + target_dist / 100.0) if side == "LONG" else float(latest_price) * (1.0 - target_dist / 100.0)
+                raw.append(("Projected", px, target_dist, side))
+
+            eligible = [r for r in raw if r[2] >= required_dist]
+            if not eligible:
+                eligible = sorted(raw, key=lambda x: x[2], reverse=True)[:1]
+            chosen = min(eligible, key=lambda x: abs(x[2] - target_dist))
+            key, px, dist_pct, side = chosen
+            return {
+                "timeframe": tf,
+                "side": side,
+                "level_price": px,
+                "size_usd": float(tf_min_usd) * 1.1,
+                "distance_pct": dist_pct,
+                "probability_pct": max(20.0, 60.0 - abs(dist_pct - target_dist) * 8.0),
+                "score": float(tf_min_usd) * (1.0 + dist_pct / 100.0),
+                "fallback": True,
+                "force": True,
+                "synthetic": True,
+                "source": key,
+            }
+
         candidates = []
+        used_prices = []
+        prev_tf_size = 0.0
+        prev_tf_dist = 0.0
         for tf in LIQ_POOL_REPORT_TIMEFRAMES:
             df_tf = data.get(tf)
             if df_tf is None or df_tf.empty:
@@ -239,37 +372,26 @@ class PonchBot:
 
             tf_min_usd = float(LIQ_POOL_MIN_USD_BY_TF.get(tf, LIQ_POOL_MIN_USD))
             tf_min_dist = float(LIQ_POOL_MIN_DISTANCE_PCT_BY_TF.get(tf, LIQ_POOL_MIN_DISTANCE_PCT))
-            event = detect_liquidity_event(
+            required_dist = max(tf_min_dist, prev_tf_dist + float(LIQ_POOL_PROGRESSIVE_MIN_STEP_PCT))
+            tf_candidates = detect_liquidity_candidates(
                 order_book=order_book,
                 price=float(latest_price),
                 atr=atr_val,
                 timeframe=tf,
-                min_usd=tf_min_usd,
-                max_distance_atr_mult=float(LIQ_POOL_MAX_DISTANCE_ATR_MULT.get(tf, 1.5)),
-                min_distance_pct=tf_min_dist,
-                huge_usd_override=float(LIQ_POOL_HUGE_USD_OVERRIDE),
+                max_distance_atr_mult=float(LIQ_POOL_MAX_DISTANCE_ATR_MULT.get(tf, 1.5)) * 2.5,
+                bucket_pct=float(LIQ_POOL_AGG_WINDOW_PCT_BY_TF.get(tf, 0.0)),
             )
-            if not event:
-                # Fallback pass: keep distance filtering, relax size/range to avoid empty TF rows.
-                relaxed_min_usd = max(tf_min_usd * 0.35, 10000000.0)
-                relaxed_min_dist = max(tf_min_dist * 0.60, 0.05)
-                relaxed_max_dist = float(LIQ_POOL_MAX_DISTANCE_ATR_MULT.get(tf, 1.5)) * 1.8
-                event = detect_liquidity_event(
-                    order_book=order_book,
-                    price=float(latest_price),
-                    atr=atr_val,
-                    timeframe=tf,
-                    min_usd=relaxed_min_usd,
-                    max_distance_atr_mult=relaxed_max_dist,
-                    min_distance_pct=relaxed_min_dist,
-                    huge_usd_override=0.0,
-                )
-                if event:
-                    event["fallback"] = True
-                    event["score"] = float(event.get("score", 0)) * 0.70
+            event = pick_for_tf(tf_candidates, tf, tf_min_usd, tf_min_dist, used_prices, prev_tf_size, prev_tf_dist)
+            if tf != "5m" and ((not event) or float(event.get("distance_pct", 0) or 0) < required_dist):
+                structural = pick_structural_for_tf(tf, tf_min_usd, tf_min_dist, prev_tf_dist)
+                if structural:
+                    event = structural
             if not event:
                 continue
             candidates.append(event)
+            used_prices.append(float(event.get("level_price", 0) or 0))
+            prev_tf_size = float(event.get("size_usd", 0) or prev_tf_size)
+            prev_tf_dist = max(prev_tf_dist, float(event.get("distance_pct", 0) or prev_tf_dist))
 
         if not candidates:
             return
@@ -352,13 +474,12 @@ class PonchBot:
         for tf in LIQ_POOL_REPORT_TIMEFRAMES:
             evt = by_tf.get(tf)
             if not evt:
-                lines.append(f"{tf:>3} | {'-':<5} | No valid big pool in range")
+                lines.append(f"{tf:>3} | ⏳ Waiting for clear pool")
                 continue
-            tag = " ~" if evt.get("fallback") else ""
+            quality = "Estimated" if evt.get("synthetic") else ("Approx" if evt.get("force") or evt.get("fallback") else "Live")
             lines.append(
-                f"{evt['timeframe']:>3} | {evt['side']:<5} | Px {evt['level_price']:,.0f} | "
-                f"${evt['size_usd']/1e6:,.0f}M | D {evt['distance_pct']:.2f}% | P {evt['probability_pct']:.0f}%"
-                f"{tag}"
+                f"{evt['timeframe']:>3} | {evt['side']:<5} | Price {evt['level_price']:,.0f} | "
+                f"Pool ${evt['size_usd']/1e6:,.0f}M | Dist {evt['distance_pct']:.2f}% | Chance {evt['probability_pct']:.0f}% | {quality}"
             )
         lines.append("</pre>")
         msg = "\n".join(lines)
