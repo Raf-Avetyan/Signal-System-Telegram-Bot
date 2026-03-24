@@ -254,15 +254,40 @@ LIQ_ALERT_COOLDOWN = 600         # 10 min cooldown for squeeze alerts
 
 # Order-book liquidity pool alerts (4h/1d context)
 LIQ_POOL_ALERT_ENABLED = True
-LIQ_POOL_MIN_USD = 100000000           # alert only on large pools (>= $100M)
+LIQ_POOL_MIN_USD = 100000000           # legacy/global fallback
 LIQ_POOL_HUGE_USD_OVERRIDE = 0          # 0 disables near-distance override
-LIQ_POOL_MIN_DISTANCE_PCT = 0.25       # require farther pools (>= 0.25% away)
-LIQ_POOL_ALERT_COOLDOWN = 3600         # 60 min cooldown
+LIQ_POOL_MIN_DISTANCE_PCT = 0.25       # legacy/global fallback
+LIQ_POOL_ALERT_COOLDOWN = 3600         # legacy/global fallback
 LIQ_POOL_BIAS_SCORE_BONUS = 1          # small score tilt toward liquidity pull side
 LIQ_POOL_MAX_DISTANCE_ATR_MULT = {
+    "5m": 1.0,
+    "15m": 1.2,
+    "1h": 1.4,
     "4h": 1.5,
     "1d": 2.5,
 }
+
+# Multi-timeframe liquidity report controls
+LIQ_POOL_REPORT_TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d"]
+LIQ_POOL_MIN_USD_BY_TF = {
+    "5m": 30000000,
+    "15m": 50000000,
+    "1h": 80000000,
+    "4h": 120000000,
+    "1d": 180000000,
+}
+LIQ_POOL_MIN_DISTANCE_PCT_BY_TF = {
+    "5m": 0.03,
+    "15m": 0.08,
+    "1h": 0.15,
+    "4h": 0.25,
+    "1d": 0.40,
+}
+LIQ_POOL_NO_MOVE_RANGE_PCT_1H = 0.8
+LIQ_POOL_EXPANSION_PRICE_MOVE_PCT_1H = 1.0
+LIQ_POOL_EXPANSION_VOLUME_MULT = 1.8
+LIQ_POOL_EXPANSION_BOOK_MULT = 1.12
+LIQ_POOL_EXPANSION_COOLDOWN = 1800
 
 # TP-near liquidity confidence for entry messages
 TP_LIQUIDITY_MIN_USD = 25000000   # minimum near-TP liquidity to annotate probability

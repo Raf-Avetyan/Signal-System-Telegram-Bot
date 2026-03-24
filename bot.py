@@ -1,4 +1,4 @@
-# ─── Ponch Signal System — Main Bot ───────────────────────────
+﻿# в”Ђв”Ђв”Ђ Ponch Signal System вЂ” Main Bot в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
 """
 Main entry point. Monitors BTCUSDT across multiple timeframes,
@@ -44,7 +44,10 @@ from config import (
     LIQ_POOL_MIN_DISTANCE_PCT, LIQ_POOL_HUGE_USD_OVERRIDE,
     TP_LIQUIDITY_MIN_USD, TP_LIQUIDITY_BAND_PCT,
     FALLING_KNIFE_FILTER_ENABLED, FALLING_KNIFE_LOOKBACK_5M, FALLING_KNIFE_LOOKBACK_15M,
-    FALLING_KNIFE_MOVE_PCT_5M, FALLING_KNIFE_MOVE_PCT_15M
+    FALLING_KNIFE_MOVE_PCT_5M, FALLING_KNIFE_MOVE_PCT_15M,
+    LIQ_POOL_REPORT_TIMEFRAMES, LIQ_POOL_MIN_USD_BY_TF, LIQ_POOL_MIN_DISTANCE_PCT_BY_TF,
+    LIQ_POOL_NO_MOVE_RANGE_PCT_1H, LIQ_POOL_EXPANSION_PRICE_MOVE_PCT_1H,
+    LIQ_POOL_EXPANSION_VOLUME_MULT, LIQ_POOL_EXPANSION_BOOK_MULT, LIQ_POOL_EXPANSION_COOLDOWN
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
@@ -67,7 +70,7 @@ class PonchBot:
     """Main Ponch Signal System bot."""
 
     def __init__(self):
-        # Scalp trackers — one per timeframe
+        # Scalp trackers вЂ” one per timeframe
         self.scalp_trackers = {
             tf: ScalpTracker(tf) for tf in SIGNAL_TIMEFRAMES
         }
@@ -84,7 +87,7 @@ class PonchBot:
         self.levels = {}
         self.last_levels_date = None
 
-        # ─── New Features ─────────────────────────────────
+        # в”Ђв”Ђв”Ђ New Features в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         self.tracker = SignalTracker()
         self.approach_alerts = {}      # { "Pump": timestamp }
         self.last_funding_check = 0
@@ -114,6 +117,10 @@ class PonchBot:
         self.liq_pool_alerts = state.get("liq_pool_alerts", {})
         self.liquidity_bias = state.get("liquidity_bias", {})
         self.last_liq_pool_report_hour = state.get("last_liq_pool_report_hour")
+        self.last_liq_session_reports = state.get("last_liq_session_reports", {})
+        self.last_liq_expansion_alert = float(state.get("last_liq_expansion_alert", 0) or 0)
+        self.last_book_total_usd = float(state.get("last_book_total_usd", 0) or 0)
+        self.last_liq_candidates = []
         self.last_order_book = None
         self.last_session_update = time.time()
         self.last_daily_update   = time.time()
@@ -200,9 +207,11 @@ class PonchBot:
 
     def _update_liquidity_pool_context(self, data, latest_price, now_ts):
         """
-        Build 4h/1d liquidity-pool context from OKX order book, send alerts, and update bias.
+        Build multi-timeframe liquidity-pool context from OKX order book and update bias.
+        Does not send alerts directly; reporting is handled by _maybe_send_liquidity_pool_report().
         """
         self.liquidity_bias = {}
+        self.last_liq_candidates = []
         if not LIQ_POOL_ALERT_ENABLED or latest_price is None or latest_price <= 0:
             return
 
@@ -210,9 +219,13 @@ class PonchBot:
         if not order_book:
             return
         self.last_order_book = order_book
+        self.last_book_total_usd = (
+            sum(float(px) * float(sz) for px, sz in order_book.get("bids", []))
+            + sum(float(px) * float(sz) for px, sz in order_book.get("asks", []))
+        )
 
         candidates = []
-        for tf in ("4h", "1d"):
+        for tf in LIQ_POOL_REPORT_TIMEFRAMES:
             df_tf = data.get(tf)
             if df_tf is None or df_tf.empty:
                 continue
@@ -224,14 +237,16 @@ class PonchBot:
             if atr_val <= 0:
                 continue
 
+            tf_min_usd = float(LIQ_POOL_MIN_USD_BY_TF.get(tf, LIQ_POOL_MIN_USD))
+            tf_min_dist = float(LIQ_POOL_MIN_DISTANCE_PCT_BY_TF.get(tf, LIQ_POOL_MIN_DISTANCE_PCT))
             event = detect_liquidity_event(
                 order_book=order_book,
                 price=float(latest_price),
                 atr=atr_val,
                 timeframe=tf,
-                min_usd=float(LIQ_POOL_MIN_USD),
+                min_usd=tf_min_usd,
                 max_distance_atr_mult=float(LIQ_POOL_MAX_DISTANCE_ATR_MULT.get(tf, 1.5)),
-                min_distance_pct=float(LIQ_POOL_MIN_DISTANCE_PCT),
+                min_distance_pct=tf_min_dist,
                 huge_usd_override=float(LIQ_POOL_HUGE_USD_OVERRIDE),
             )
             if not event:
@@ -241,32 +256,92 @@ class PonchBot:
         if not candidates:
             return
 
-        # Send hourly: only the strongest pool event (4h/1d) once per UTC hour.
+        self.last_liq_candidates = candidates
         best_event = max(candidates, key=lambda e: e.get("score", 0))
-        hour_key = datetime.now(timezone.utc).strftime("%Y-%m-%d %H")
-        if self.last_liq_pool_report_hour != hour_key:
-            if not self.is_booting:
-                tg.send_liquidity_pool_alert(
-                    timeframe=best_event["timeframe"],
-                    side=best_event["side"],
-                    level_price=best_event["level_price"],
-                    size_usd=best_event["size_usd"],
-                    probability_pct=best_event["probability_pct"],
-                    distance_pct=best_event["distance_pct"],
-                    current_price=float(latest_price),
-                    chat_id=PRIVATE_CHAT_ID,
-                )
-            self.last_liq_pool_report_hour = hour_key
-            self._save_state()
+        self.liquidity_bias = {
+            "side": best_event["side"],
+            "timeframe": best_event["timeframe"],
+            "level_price": best_event["level_price"],
+            "probability_pct": best_event["probability_pct"],
+            "size_usd": best_event["size_usd"],
+        }
 
-        if best_event:
-            self.liquidity_bias = {
-                "side": best_event["side"],
-                "timeframe": best_event["timeframe"],
-                "level_price": best_event["level_price"],
-                "probability_pct": best_event["probability_pct"],
-                "size_usd": best_event["size_usd"],
-            }
+    def _maybe_send_liquidity_pool_report(self, data, latest_price, now, now_ts):
+        """Send liquidity pool reports on hourly/range, session open, and expansion triggers."""
+        candidates = list(self.last_liq_candidates or [])
+        if not candidates or latest_price is None or latest_price <= 0:
+            return
+
+        by_tf = {}
+        for evt in candidates:
+            tf = evt.get("timeframe")
+            if tf not in by_tf or evt.get("score", 0) > by_tf[tf].get("score", 0):
+                by_tf[tf] = evt
+
+        report_events = [by_tf[tf] for tf in LIQ_POOL_REPORT_TIMEFRAMES if tf in by_tf]
+        if not report_events:
+            return
+
+        trigger = None
+
+        # 1) Hourly report only when market is relatively flat (no movement).
+        df5 = data.get("5m")
+        if df5 is not None and len(df5) >= 13:
+            hour_range = abs(float(df5["Close"].iloc[-1]) / float(df5["Close"].iloc[-13]) - 1.0) * 100.0
+            hour_key = now.strftime("%Y-%m-%d %H")
+            if hour_range <= float(LIQ_POOL_NO_MOVE_RANGE_PCT_1H) and self.last_liq_pool_report_hour != hour_key:
+                trigger = f"Hourly (Range {hour_range:.2f}%)"
+                self.last_liq_pool_report_hour = hour_key
+
+        # 2) Session open report (ASIA/LONDON/NY), once per session per date.
+        sessions = get_adjusted_sessions(now)
+        now_h = now.hour + now.minute / 60.0
+        for s_name, s_times in sessions.items():
+            s_open = float(s_times["open"])
+            near_open = abs(now_h - s_open) <= (10.0 / 60.0)  # first 10 minutes after open
+            sid = f"{s_name}_{now.strftime('%Y-%m-%d')}"
+            if near_open and self.last_liq_session_reports.get(sid) != 1:
+                trigger = f"{s_name} Session Open"
+                self.last_liq_session_reports[sid] = 1
+                break
+
+        # 3) Expansion trigger: price move + volume spike + order-book growth.
+        if df5 is not None and len(df5) >= 13:
+            move_1h = abs(float(df5["Close"].iloc[-1]) / float(df5["Close"].iloc[-13]) - 1.0) * 100.0
+            vol_now = float(df5["Volume"].iloc[-1])
+            vol_avg = float(df5["Volume"].iloc[-21:-1].mean()) if len(df5) >= 21 else max(1.0, vol_now)
+            vol_mult = (vol_now / vol_avg) if vol_avg > 0 else 1.0
+            prev_book = float(self.last_book_total_usd or 0)
+            # last_book_total_usd already updated in _update_liquidity_pool_context this tick;
+            # for expansion comparison use previous cached value from state var backup.
+            book_mult = 1.0
+            if hasattr(self, "_prev_book_total_usd") and float(getattr(self, "_prev_book_total_usd") or 0) > 0:
+                book_mult = float(self.last_book_total_usd) / float(getattr(self, "_prev_book_total_usd"))
+            self._prev_book_total_usd = float(self.last_book_total_usd)
+
+            if (
+                move_1h >= float(LIQ_POOL_EXPANSION_PRICE_MOVE_PCT_1H)
+                and vol_mult >= float(LIQ_POOL_EXPANSION_VOLUME_MULT)
+                and book_mult >= float(LIQ_POOL_EXPANSION_BOOK_MULT)
+                and (now_ts - float(self.last_liq_expansion_alert or 0)) >= float(LIQ_POOL_EXPANSION_COOLDOWN)
+            ):
+                trigger = f"Expansion (move {move_1h:.2f}% | vol {vol_mult:.1f}x | book {book_mult:.2f}x)"
+                self.last_liq_expansion_alert = now_ts
+
+        if not trigger:
+            return
+
+        lines = [f"<b>🧲 LIQUIDITY POOL REPORT</b>", f"<pre>Trigger: {trigger}"]
+        for evt in report_events:
+            lines.append(
+                f"{evt['timeframe']:>3} | {evt['side']:<5} | Px {evt['level_price']:,.0f} | "
+                f"${evt['size_usd']/1e6:,.0f}M | D {evt['distance_pct']:.2f}% | P {evt['probability_pct']:.0f}%"
+            )
+        lines.append("</pre>")
+        msg = "\n".join(lines)
+        if not self.is_booting:
+            tg.send(msg, parse_mode="HTML", chat_id=PRIVATE_CHAT_ID)
+        self._save_state()
 
     def _estimate_tp_liquidity(self, side, entry, tp1, tp2, tp3):
         """
@@ -367,7 +442,7 @@ class PonchBot:
 
 
     def run(self):
-        """Main loop — fetches data and processes signals."""
+        """Main loop вЂ” fetches data and processes signals."""
 
         print(f"{'='*50}")
         print(f"  Ponch Signal System (v2)")
@@ -625,6 +700,9 @@ class PonchBot:
                 "liq_pool_alerts": self.liq_pool_alerts,
                 "liquidity_bias": self.liquidity_bias,
                 "last_liq_pool_report_hour": self.last_liq_pool_report_hour,
+                "last_liq_session_reports": self.last_liq_session_reports,
+                "last_liq_expansion_alert": self.last_liq_expansion_alert,
+                "last_book_total_usd": self.last_book_total_usd,
                 "last_update_id": self.last_update_id,
                 "scalp_trackers": {tf: tracker.to_dict() for tf, tracker in self.scalp_trackers.items()}
             }
@@ -791,9 +869,10 @@ class PonchBot:
                     ref_atr = tf_atr
                     ref_ts  = tf_ts
 
-        # ─── Check Confirmation Aggregation (Once per Tick) ──────
+        # Check confirmation aggregation (once per tick)
         if latest_price is not None:
             self._update_liquidity_pool_context(data, latest_price, current_time)
+            self._maybe_send_liquidity_pool_report(data, latest_price, now, current_time)
             for side in ["LONG", "SHORT"]:
                 lock_until = float(self.confluence_side_lock_until.get(side, 0) or 0)
                 if current_time < lock_until:
@@ -907,7 +986,7 @@ class PonchBot:
                             }
                         )
                         self._save_state()
-                        print(f"  [CONFLUENCE] ✅ STRONG {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
+                        print(f"  [CONFLUENCE] вњ… STRONG {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
 
                     elif ce["type"] == "EXTREME":
                         extreme_size = round(min(ce["points"] * 0.3, 5.0), 1)
@@ -939,7 +1018,7 @@ class PonchBot:
                             }
                         )
                         self._save_state()
-                        print(f"  [CONFLUENCE] 🔥 EXTREME {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
+                        print(f"  [CONFLUENCE] рџ”Ґ EXTREME {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
 
                     # Prevent immediate opposite-side flip from stale queued confirmations.
                     opposite_side = "SHORT" if ce["side"] == "LONG" else "LONG"
@@ -947,7 +1026,7 @@ class PonchBot:
                     self.confluence_side_lock_until[opposite_side] = current_time + CONFLUENCE_OPPOSITE_LOCK_SEC
                     self._save_state()
 
-        # ─── Update Performance Tracker & Success Teasers ────
+        # в”Ђв”Ђв”Ђ Update Performance Tracker & Success Teasers в”Ђв”Ђв”Ђв”Ђ
         if latest_price is not None:
             # 1. Success Teasers (Public Marketing FOMO)
             # Use the base 5m candle wick range when available to avoid
@@ -1023,7 +1102,7 @@ class PonchBot:
                     if not self.is_booting:
                         tg.send_squeeze_alert(self.last_liqs, latest_price, chat_id=PRIVATE_CHAT_ID)
                     self.last_liq_alert_time = current_time
-                    print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} 🚨 Liquidation Squeeze: ${self.last_liqs/1e6:.1f}M")
+                    print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} рџљЁ Liquidation Squeeze: ${self.last_liqs/1e6:.1f}M")
 
             # 3. OI Divergence
             if self.last_oi and self.last_oi_price:
@@ -1047,7 +1126,7 @@ class PonchBot:
                             if not self.is_booting:
                                 tg.send_oi_divergence(price_chg*100, oi_chg*100, note, chat_id=PRIVATE_CHAT_ID)
                             self._save_state()
-                            print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} ⚠️ OI Divergence: {note}")
+                            print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} вљ пёЏ OI Divergence: {note}")
 
             # Update baselines for next tick comparison
             self.last_oi_price = latest_price
@@ -1191,7 +1270,7 @@ class PonchBot:
                             
                             print(f"[SESSION] {s_name} closed. {'Skipped sending recap' if self.is_booting else 'Recap sent'}.")
 
-        # ─── Flush Batched Alerts ────────────────────────────
+        # в”Ђв”Ђв”Ђ Flush Batched Alerts в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         if self.pending_alerts and self.batch_timer_start:
             # Check if batch window has passed
             if current_time - self.batch_timer_start >= ALERT_BATCH_WINDOW:
@@ -1222,7 +1301,7 @@ class PonchBot:
                 self.pending_alerts = []
                 self.batch_timer_start = None
 
-        # ─── Periodic Chart Updates ──────────────────────────
+        # в”Ђв”Ђв”Ђ Periodic Chart Updates в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         # 1. Session Updates (30s)
         if current_time - self.last_session_update > 30:
             self.last_session_update = current_time
@@ -1254,7 +1333,7 @@ class PonchBot:
                     except: pass
 
         # 2. Daily Levels Update (600s)
-        # ─── End of Tick ─────────────────────────────────────
+        # в”Ђв”Ђв”Ђ End of Tick в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         tick_duration = time.time() - current_time
         if tick_duration > 2.0:
             print(f"[PERF] Tick took {tick_duration:.1f}s (Threshold: 2.0s)")
@@ -1320,6 +1399,9 @@ class PonchBot:
             self.liq_pool_alerts = {}
             self.liquidity_bias = {}
             self.last_liq_pool_report_hour = None
+            self.last_liq_session_reports = {}
+            self.last_liq_expansion_alert = 0
+            self.last_book_total_usd = 0
             self._save_state()
         
         self._reconstruct_session_history(now.hour + now.minute / 60.0)
@@ -1435,9 +1517,9 @@ class PonchBot:
                 welcome_msg = (
                     f"<b>How to Join:</b>\n\n"
                     f"1. Sign up on Bitunix to start trading:\n"
-                    f"🔗 {BITUNIX_REG_LINK}\n\n"
+                    f"рџ”— {BITUNIX_REG_LINK}\n\n"
                     f"2. <b>Send your unique UID here.</b>\n\n"
-                    f"3. Once verified, you’ll receive an invite link to join."
+                    f"3. Once verified, youвЂ™ll receive an invite link to join."
                 )
                 tg.send(welcome_msg, parse_mode="HTML", chat_id=user_id)
             elif text.startswith("/analytics"):
@@ -1463,7 +1545,7 @@ class PonchBot:
                         )
 
                     msg = (
-                        f"📊 <b>SIGNAL ANALYTICS ({days}d)</b>\n\n"
+                        f"рџ“Љ <b>SIGNAL ANALYTICS ({days}d)</b>\n\n"
                         f"<pre>"
                         f"Generated:   {totals['generated']}\n"
                         f"Closed:      {totals['trades']}\n"
@@ -1494,16 +1576,16 @@ class PonchBot:
 
                 if not is_referral:
                     error_msg = (
-                        f"⚠️❗️ Hi there, the account you provided is not under this partner. "
+                        f"вљ пёЏвќ—пёЏ Hi there, the account you provided is not under this partner. "
                         f"please use the link below to sign up\n"
-                        f"🔗: {BITUNIX_REG_LINK}"
+                        f"рџ”—: {BITUNIX_REG_LINK}"
                     )
                     tg.send(error_msg, parse_mode="HTML", chat_id=user_id)
                 else:
                     success_msg = (
-                        f"✅ <b>Verification Successful!</b>\n\n"
+                        f"вњ… <b>Verification Successful!</b>\n\n"
                         f"Welcome to the team. You can now access our private signal channel:\n"
-                        f"🔗 {INVITE_LINK}\n\n"
+                        f"рџ”— {INVITE_LINK}\n\n"
                         f"See you inside!"
                     )
                     tg.send(success_msg, parse_mode="HTML", chat_id=user_id)
@@ -1532,7 +1614,7 @@ class PonchBot:
     def _process_timeframe(self, tf, df, now, entry_protection_ts=None):
         """Process one timeframe: channels, momentum, signals."""
 
-        # ─── Calculate indicators ────────────────────────
+        # в”Ђв”Ђв”Ђ Calculate indicators в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         df = calculate_channels(df)
         df = calculate_momentum(df)
 
@@ -1559,7 +1641,7 @@ class PonchBot:
             elif close < ema_fast < ema_slow:
                 local_trend = "Bearish"
 
-        # ─── REAL-TIME MONITOR (Debug) ───────────────────
+        # в”Ђв”Ђв”Ђ REAL-TIME MONITOR (Debug) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
         prev_high = float(prev["High"])
         prev_low  = float(prev["Low"])
@@ -1590,7 +1672,7 @@ class PonchBot:
                     if session_id in self.session_data:
                         self.session_data[session_id]["levels_tested"].add(lvl)
 
-        # ─── Volume Spike Detection ──────────────────────
+        # в”Ђв”Ђв”Ђ Volume Spike Detection в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         if tf in VOLUME_SPIKE_TIMEFRAMES and len(df) > VOLUME_AVG_PERIOD:
             vol_col = df["Volume"]
             avg_vol = vol_col.iloc[-VOLUME_AVG_PERIOD-1:-1].mean()
@@ -1669,7 +1751,7 @@ class PonchBot:
                         print(f"  [SIG] Approaching Level Triggered: {lvl_name} ({closest_dist*100:.2f}%)")
 
 
-        # ─── Liquidity Sweeps ────────────────────────────
+        # в”Ђв”Ђв”Ђ Liquidity Sweeps в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         if self.levels:
             sweeps = check_liquidity_sweep(
                 price_high, price_low, self.levels,
@@ -1700,7 +1782,7 @@ class PonchBot:
                         "tf":        tf
                     })
 
-        # ─── Volatility Zone Touches ─────────────────────
+        # в”Ђв”Ђв”Ђ Volatility Zone Touches в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         if self.levels:
             touches = check_volatility_touch(
                 price_high, price_low, self.levels,
@@ -1730,7 +1812,7 @@ class PonchBot:
                         "tf":        tf
                     })
 
-        # ─── Trade Signals (Channels) ────────────────────
+        # в”Ђв”Ђв”Ђ Trade Signals (Channels) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         ch_sigs = check_channel_signals(df)
         for sig in ch_sigs:
             sig_key = f"tr_sig_{tf}_{sig['signal']}_{candle_ts}"
@@ -1766,7 +1848,7 @@ class PonchBot:
                 sig["tf"] = tf
                 self.confirmations.add_signal(sig)
 
-        # ─── Scalp Momentum System ───────────────────────
+        # в”Ђв”Ђв”Ђ Scalp Momentum System в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         tracker = self.scalp_trackers[tf]
         events = tracker.update(zone, close, atr_val, candle_ts=candle_ts, rsi_raw=rsi_raw, rsi_smooth=rsi_smooth)
 
@@ -2059,7 +2141,7 @@ class PonchBot:
                 print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Scalp Closed [{tf}] {evt['side']}")
 
 
-        # ─── Store prev candle data ──────────────────────
+        # в”Ђв”Ђв”Ђ Store prev candle data в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         self.prev_candles[tf] = {
             "High": price_high,
             "Low":  price_low,
@@ -2068,9 +2150,9 @@ class PonchBot:
         return atr_val, candle_ts, rsi_raw
 
 
-# ═══════════════════════════════════════════════════════════════
+# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
 # ENTRY POINT
-# ═══════════════════════════════════════════════════════════════
+# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
 
 if __name__ == "__main__":
     import sys
@@ -2126,3 +2208,4 @@ if __name__ == "__main__":
     finally:
         if os.path.exists(lock_file):
             os.remove(lock_file)
+
