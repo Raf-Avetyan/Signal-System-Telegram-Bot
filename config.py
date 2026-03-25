@@ -261,7 +261,7 @@ LIQ_SQUEEZE_THRESHOLD = 500000   # $500k in liquidations to trigger squeeze aler
 LIQ_ALERT_COOLDOWN = 600         # 10 min cooldown for squeeze alerts
 
 # Order-book liquidity pool alerts (4h/1d context)
-LIQ_POOL_ALERT_ENABLED = True
+LIQ_POOL_ALERT_ENABLED = False
 LIQ_POOL_MIN_USD = 100000000           # legacy/global fallback
 LIQ_POOL_HUGE_USD_OVERRIDE = 0          # 0 disables near-distance override
 LIQ_POOL_MIN_DISTANCE_PCT = 0.25       # legacy/global fallback
