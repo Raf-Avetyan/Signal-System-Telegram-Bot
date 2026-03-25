@@ -47,6 +47,12 @@ MOMENTUM_RSI_LEN  = 14    # RSI length for momentum
 MOMENTUM_SMOOTH   = 3     # Smoothing EMA for momentum (Fast)
 MOMENTUM_OB       = 66    # Overbought threshold
 MOMENTUM_OS       = 34    # Oversold threshold
+TIMEFRAME_MOMENTUM_THRESHOLDS = {
+    "5m": {"ob": 66, "os": 34},
+    "15m": {"ob": 62, "os": 38},
+    "1h": {"ob": 66, "os": 34},
+    "4h": {"ob": 64, "os": 36},
+}
 
 # RSI divergence confirmation
 RSI_DIVERGENCE_ENABLED = True
@@ -65,10 +71,10 @@ TP3_ATR_MULT = 2.1   # 30% allocation
 
 # Per-timeframe risk model (overrides global multipliers above when present)
 TIMEFRAME_RISK_MULTIPLIERS = {
-    "5m":  {"sl": 2.0, "tp1": 0.7, "tp2": 1.1, "tp3": 1.6},
-    "15m": {"sl": 2.0, "tp1": 0.8, "tp2": 1.2, "tp3": 1.8},
-    "1h":  {"sl": 2.0, "tp1": 0.9, "tp2": 1.4, "tp3": 2.0},
-    "4h":  {"sl": 2.0, "tp1": 1.0, "tp2": 1.6, "tp3": 2.4},
+    "5m":  {"sl": 2.7, "tp1": 0.35, "tp2": 0.70, "tp3": 1.05},
+    "15m": {"sl": 2.5, "tp1": 0.50, "tp2": 0.90, "tp3": 1.30},
+    "1h":  {"sl": 2.3, "tp1": 0.65, "tp2": 1.10, "tp3": 1.55},
+    "4h":  {"sl": 2.1, "tp1": 0.80, "tp2": 1.30, "tp3": 1.85},
 }
 
 # Strength & Sizing per timeframe
@@ -84,11 +90,55 @@ TIMEFRAME_PROFILES = {
 # SHORT confirm when RSI < MOMENTUM_OB - buffer
 SCALP_CONFIRM_RSI_BUFFER = 2
 TIMEFRAME_CONFIRM_RSI_BUFFER = {
-    "5m": 3,
-    "15m": 1,
+    "5m": 2,
+    "15m": 0,
     "1h": 0,
     "4h": 0,
 }
+TIMEFRAME_ZONE_TIMEOUT_CANDLES = {
+    "5m": 10,
+    "15m": 12,
+    "1h": 16,
+    "4h": 20,
+}
+TIMEFRAME_DEEPER_RSI_DELTA = {
+    "5m": 5,
+    "15m": 6,
+    "1h": 8,
+    "4h": 10,
+}
+TIMEFRAME_FLAT_MAX_CANDLES = {
+    "5m": 5,
+    "15m": 6,
+    "1h": 8,
+    "4h": 10,
+}
+TIMEFRAME_RESTING_RESET_RSI = {
+    "5m": {"long": 32, "short": 68},
+    "15m": {"long": 31, "short": 69},
+    "1h": {"long": 30, "short": 70},
+    "4h": {"long": 30, "short": 70},
+}
+BASE_MOMENTUM_ENABLED_TFS = ["5m", "15m", "1h", "4h"]
+HTF_PULLBACK_ENABLED_TFS = ["4h"]
+HTF_PULLBACK_LOOKBACK = {
+    "1h": 8,
+    "4h": 5,
+}
+HTF_PULLBACK_RSI_LONG_MAX = {
+    "1h": 45,
+    "4h": 44,
+}
+HTF_PULLBACK_RSI_SHORT_MIN = {
+    "1h": 55,
+    "4h": 56,
+}
+HTF_PULLBACK_RSI_CONFIRM = 52
+ONE_H_RECLAIM_ENABLED = False
+ONE_H_RECLAIM_LOOKBACK = 10
+ONE_H_RECLAIM_RSI_LONG_MAX = 44
+ONE_H_RECLAIM_RSI_SHORT_MIN = 56
+ONE_H_RECLAIM_RSI_CONFIRM = 50
 
 # Min seconds between repeated OPEN alerts for same timeframe+side.
 # Helps reduce alert spam when RSI repeatedly tags OB/OS.
@@ -121,9 +171,9 @@ SCALP_COUNTERTREND_MIN_SCORE_BY_TF = {
 
 # Win-rate-first quality gates
 SCALP_MIN_SCORE_BY_TF = {
-    "5m": 4,
+    "5m": 3,
     "15m": 4,
-    "1h": 2,
+    "1h": 1,
     "4h": 1,
 }
 SCALP_ALLOWED_SESSIONS_BY_TF = {

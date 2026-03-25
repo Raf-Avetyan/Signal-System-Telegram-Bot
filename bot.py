@@ -38,6 +38,7 @@ from config import (
     SCALP_EXPOSURE_ENABLED, SCALP_MAX_OPEN_TOTAL,
     SCALP_MAX_OPEN_PER_SIDE, SCALP_MAX_OPEN_PER_TF,
     MOMENTUM_OS, MOMENTUM_OB,
+    BASE_MOMENTUM_ENABLED_TFS,
     CONFIRMATION_RSI_EXHAUSTION_BUFFER, CONFLUENCE_OPPOSITE_LOCK_SEC,
     LIQ_POOL_ALERT_ENABLED, LIQ_POOL_MIN_USD, LIQ_POOL_ALERT_COOLDOWN,
     LIQ_POOL_BIAS_SCORE_BONUS, LIQ_POOL_MAX_DISTANCE_ATR_MULT,
@@ -54,7 +55,7 @@ from config import (
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
-from momentum import calculate_momentum, ScalpTracker, detect_trend
+from momentum import calculate_momentum, ScalpTracker, detect_trend, classify_momentum_zone, check_htf_pullback_entry, check_one_h_reclaim_entry
 from scoring import calculate_signal_score
 from signals import check_momentum_confirm, check_range_confirm, check_flow_confirm, check_rsi_divergence
 from confirmation import ConfirmationTracker
@@ -1812,7 +1813,7 @@ class PonchBot:
         price_low  = float(curr["Low"])
         close      = float(curr["Close"])
         atr_val    = float(curr["ATR"]) if "ATR" in curr else 0
-        zone       = curr["MomentumZone"] if "MomentumZone" in curr else "NEUTRAL"
+        zone       = classify_momentum_zone(float(curr["MomentumSmooth"]) if "MomentumSmooth" in curr else 50, tf)
         rsi_raw    = float(curr["RSI"]) if "RSI" in curr else 50
         rsi_smooth = float(curr["MomentumSmooth"]) if "MomentumSmooth" in curr else 50
         # Local trend anchor by hierarchy (5m/15m -> 15m, then 1h->4h->1d->1w).
@@ -2040,7 +2041,15 @@ class PonchBot:
 
         # в”Ђв”Ђв”Ђ Scalp Momentum System в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         tracker = self.scalp_trackers[tf]
-        events = tracker.update(zone, close, atr_val, candle_ts=candle_ts, rsi_raw=rsi_raw, rsi_smooth=rsi_smooth)
+        events = []
+        if tf in BASE_MOMENTUM_ENABLED_TFS:
+            events.extend(tracker.update(zone, close, atr_val, candle_ts=candle_ts, rsi_raw=rsi_raw, rsi_smooth=rsi_smooth))
+        htf_evt = check_htf_pullback_entry(df, tf)
+        if htf_evt:
+            events.append(htf_evt)
+        one_h_evt = check_one_h_reclaim_entry(df, tf)
+        if one_h_evt:
+            events.append(one_h_evt)
 
         profile = TIMEFRAME_PROFILES.get(tf, TIMEFRAME_PROFILES["5m"])
         emoji = profile["emoji"]

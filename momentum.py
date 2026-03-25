@@ -5,8 +5,24 @@ import numpy as np
 from config import (
     MOMENTUM_RSI_LEN, MOMENTUM_SMOOTH,
     MOMENTUM_OB, MOMENTUM_OS,
+    TIMEFRAME_MOMENTUM_THRESHOLDS,
     SCALP_CONFIRM_RSI_BUFFER,
     TIMEFRAME_CONFIRM_RSI_BUFFER,
+    TIMEFRAME_ZONE_TIMEOUT_CANDLES,
+    TIMEFRAME_DEEPER_RSI_DELTA,
+    TIMEFRAME_FLAT_MAX_CANDLES,
+    TIMEFRAME_RESTING_RESET_RSI,
+    BASE_MOMENTUM_ENABLED_TFS,
+    HTF_PULLBACK_ENABLED_TFS,
+    HTF_PULLBACK_LOOKBACK,
+    HTF_PULLBACK_RSI_LONG_MAX,
+    HTF_PULLBACK_RSI_SHORT_MIN,
+    HTF_PULLBACK_RSI_CONFIRM,
+    ONE_H_RECLAIM_ENABLED,
+    ONE_H_RECLAIM_LOOKBACK,
+    ONE_H_RECLAIM_RSI_LONG_MAX,
+    ONE_H_RECLAIM_RSI_SHORT_MIN,
+    ONE_H_RECLAIM_RSI_CONFIRM,
     SL_ATR_MULT, TP1_ATR_MULT, TP2_ATR_MULT, TP3_ATR_MULT,
     TIMEFRAME_RISK_MULTIPLIERS,
     TIMEFRAME_PROFILES,
@@ -51,6 +67,115 @@ def calculate_momentum(df):
     return df
 
 
+def get_momentum_thresholds(timeframe):
+    cfg = TIMEFRAME_MOMENTUM_THRESHOLDS.get(timeframe, {})
+    return float(cfg.get("ob", MOMENTUM_OB)), float(cfg.get("os", MOMENTUM_OS))
+
+
+def classify_momentum_zone(value, timeframe):
+    ob, os = get_momentum_thresholds(timeframe)
+    if pd.isna(value):
+        return "NEUTRAL"
+    if value >= ob:
+        return "OB"
+    if value <= os:
+        return "OS"
+    return "NEUTRAL"
+
+
+def check_htf_pullback_entry(df, timeframe):
+    if timeframe not in HTF_PULLBACK_ENABLED_TFS:
+        return None
+    if df is None or df.empty or len(df) < 20:
+        return None
+    curr = df.iloc[-1]
+    prev = df.iloc[-2]
+    if "RSI" not in df.columns or "EMA2" not in df.columns or "EMA3" not in df.columns:
+        return None
+
+    lookback = int(HTF_PULLBACK_LOOKBACK.get(timeframe, 6))
+    confirm_rsi = float(HTF_PULLBACK_RSI_CONFIRM)
+    long_max = float(HTF_PULLBACK_RSI_LONG_MAX.get(timeframe, 45))
+    short_min = float(HTF_PULLBACK_RSI_SHORT_MIN.get(timeframe, 55))
+
+    recent = df.iloc[-lookback:]
+    curr_rsi = float(curr["RSI"])
+    prev_rsi = float(prev["RSI"])
+    close = float(curr["Close"])
+    ema2 = float(curr["EMA2"])
+    ema3 = float(curr["EMA3"])
+    atr_val = float(curr.get("ATR", 0) or 0)
+    if atr_val <= 0:
+        return None
+
+    bullish_trend = close > ema2 > ema3
+    bearish_trend = close < ema2 < ema3
+
+    if bullish_trend:
+        dipped = float(recent["RSI"].min()) <= long_max
+        recovered = prev_rsi <= confirm_rsi and curr_rsi > confirm_rsi and close >= ema2
+        if dipped and recovered:
+            tracker = ScalpTracker(timeframe)
+            calc = tracker._calc_sl_tp(close, atr_val, "LONG")
+            return {"type": "CONFIRMED", "side": "LONG", "entry": close, **calc, "trigger": "HTF_PULLBACK"}
+
+    if bearish_trend:
+        popped = float(recent["RSI"].max()) >= short_min
+        rejected = prev_rsi >= confirm_rsi and curr_rsi < confirm_rsi and close <= ema2
+        if popped and rejected:
+            tracker = ScalpTracker(timeframe)
+            calc = tracker._calc_sl_tp(close, atr_val, "SHORT")
+            return {"type": "CONFIRMED", "side": "SHORT", "entry": close, **calc, "trigger": "HTF_PULLBACK"}
+
+    return None
+
+
+def check_one_h_reclaim_entry(df, timeframe):
+    if timeframe != "1h" or not ONE_H_RECLAIM_ENABLED:
+        return None
+    if df is None or df.empty or len(df) < max(20, ONE_H_RECLAIM_LOOKBACK + 2):
+        return None
+    curr = df.iloc[-1]
+    prev = df.iloc[-2]
+    if "RSI" not in df.columns or "EMA2" not in df.columns or "EMA3" not in df.columns:
+        return None
+
+    lookback = int(ONE_H_RECLAIM_LOOKBACK)
+    recent = df.iloc[-lookback:]
+    curr_rsi = float(curr["RSI"])
+    prev_rsi = float(prev["RSI"])
+    close = float(curr["Close"])
+    prev_close = float(prev["Close"])
+    ema2 = float(curr["EMA2"])
+    ema3 = float(curr["EMA3"])
+    atr_val = float(curr.get("ATR", 0) or 0)
+    if atr_val <= 0:
+        return None
+
+    bullish_trend = ema2 > ema3
+    bearish_trend = ema2 < ema3
+
+    if bullish_trend:
+        dipped = float(recent["RSI"].min()) <= float(ONE_H_RECLAIM_RSI_LONG_MAX)
+        reclaim = prev_close <= float(prev["EMA2"]) and close > ema2
+        recover = prev_rsi <= float(ONE_H_RECLAIM_RSI_CONFIRM) and curr_rsi > float(ONE_H_RECLAIM_RSI_CONFIRM)
+        if dipped and reclaim and recover:
+            tracker = ScalpTracker(timeframe)
+            calc = tracker._calc_sl_tp(close, atr_val, "LONG")
+            return {"type": "CONFIRMED", "side": "LONG", "entry": close, **calc, "trigger": "ONE_H_RECLAIM"}
+
+    if bearish_trend:
+        popped = float(recent["RSI"].max()) >= float(ONE_H_RECLAIM_RSI_SHORT_MIN)
+        reject = prev_close >= float(prev["EMA2"]) and close < ema2
+        recover = prev_rsi >= float(ONE_H_RECLAIM_RSI_CONFIRM) and curr_rsi < float(ONE_H_RECLAIM_RSI_CONFIRM)
+        if popped and reject and recover:
+            tracker = ScalpTracker(timeframe)
+            calc = tracker._calc_sl_tp(close, atr_val, "SHORT")
+            return {"type": "CONFIRMED", "side": "SHORT", "entry": close, **calc, "trigger": "ONE_H_RECLAIM"}
+
+    return None
+
+
 class ScalpTracker:
     """
     Tracks the momentum scalp state machine for one timeframe.
@@ -92,6 +217,13 @@ class ScalpTracker:
         mom_rsi = rsi_smooth if rsi_smooth is not None else 50
         # Current raw RSI value (used for Fast Confirmation/Reset)
         raw_rsi = rsi_raw if rsi_raw is not None else mom_rsi
+        tf_ob, tf_os = get_momentum_thresholds(self.timeframe)
+        timeout_candles = int(TIMEFRAME_ZONE_TIMEOUT_CANDLES.get(self.timeframe, 10))
+        deeper_delta = float(TIMEFRAME_DEEPER_RSI_DELTA.get(self.timeframe, 5))
+        flat_limit = int(TIMEFRAME_FLAT_MAX_CANDLES.get(self.timeframe, 5))
+        rest_cfg = TIMEFRAME_RESTING_RESET_RSI.get(self.timeframe, {})
+        rest_long = float(rest_cfg.get("long", tf_os + 2))
+        rest_short = float(rest_cfg.get("short", tf_ob - 2))
 
         if self.state == "IDLE":
             # Cooldown check: don't restart on the same candle
@@ -163,8 +295,8 @@ class ScalpTracker:
             # This prevents missing valid quick bounces/rejections.
             if self.zone_entry_candles <= 1:
                 fast_confirm = (
-                    (self.side == "LONG" and raw_rsi > MOMENTUM_OS) or
-                    (self.side == "SHORT" and raw_rsi < MOMENTUM_OB)
+                    (self.side == "LONG" and raw_rsi > tf_os) or
+                    (self.side == "SHORT" and raw_rsi < tf_ob)
                 )
                 if fast_confirm:
                     entry = close
@@ -173,7 +305,7 @@ class ScalpTracker:
                     _reset()
 
             # 1. TIMEOUT: close stale window after 10 candles
-            if self.state == "ZONE_ENTRY" and self.zone_entry_candles > 10:
+            if self.state == "ZONE_ENTRY" and self.zone_entry_candles > timeout_candles:
                 events.append({"type": "CLOSED", "side": self.side, "price": close})
                 _reset()
 
@@ -181,8 +313,8 @@ class ScalpTracker:
             #    LONG (was OS < 30): RSI rises above (30 + buffer)
             #    SHORT (was OB > 70): RSI drops below (70 - buffer)
             elif self.state == "ZONE_ENTRY" and (
-                (self.side == "LONG" and raw_rsi > (MOMENTUM_OS + confirm_buffer)) or
-                (self.side == "SHORT" and raw_rsi < (MOMENTUM_OB - confirm_buffer))
+                (self.side == "LONG" and raw_rsi > (tf_os + confirm_buffer)) or
+                (self.side == "SHORT" and raw_rsi < (tf_ob - confirm_buffer))
             ):
                 entry = close
                 calc = self._calc_sl_tp(entry, atr_value, self.side)
@@ -200,9 +332,9 @@ class ScalpTracker:
                 #    SHORT (OB): RSI rose 5+ pts above entry RSI (e.g. 75 → 80)
                 if self.entry_rsi is not None:
                     deeper = False
-                    if self.side == "LONG" and raw_rsi <= self.entry_rsi - 5:
+                    if self.side == "LONG" and raw_rsi <= self.entry_rsi - deeper_delta:
                         deeper = True
-                    elif self.side == "SHORT" and raw_rsi >= self.entry_rsi + 5:
+                    elif self.side == "SHORT" and raw_rsi >= self.entry_rsi + deeper_delta:
                         deeper = True
 
                     if deeper:
@@ -218,7 +350,7 @@ class ScalpTracker:
                     else:
                         self.flat_candles = 0
 
-                    if self.flat_candles >= 5:
+                    if self.flat_candles >= flat_limit:
                         events.append({"type": "CLOSED", "side": self.side, "price": close})
                         _reset()
                         self.prev_raw_rsi = raw_rsi
@@ -229,9 +361,9 @@ class ScalpTracker:
                 #    SHORT (OB): RSI going DOWN (raw < prev) while still ≥ 70
                 if not self.prepare_sent and self.prev_raw_rsi is not None:
                     reversing = False
-                    if self.side == "LONG" and raw_rsi > self.prev_raw_rsi and raw_rsi <= MOMENTUM_OS:
+                    if self.side == "LONG" and raw_rsi > self.prev_raw_rsi and raw_rsi <= tf_os:
                         reversing = True
-                    elif self.side == "SHORT" and raw_rsi < self.prev_raw_rsi and raw_rsi >= MOMENTUM_OB:
+                    elif self.side == "SHORT" and raw_rsi < self.prev_raw_rsi and raw_rsi >= tf_ob:
                         reversing = True
 
                     if reversing:
@@ -246,11 +378,11 @@ class ScalpTracker:
             # LONG was in OS (RSI < 30): rest until RSI recovers to neutral (≥ 32)
             # SHORT was in OB (RSI > 70): rest until RSI drops to neutral (≤ 68)
             if self.last_side == "LONG":
-                if raw_rsi >= 32:
+                if raw_rsi >= rest_long:
                     self.state = "IDLE"
                     self.last_side = None
             else:  # SHORT
-                if raw_rsi <= 68:
+                if raw_rsi <= rest_short:
                     self.state = "IDLE"
                     self.last_side = None
 

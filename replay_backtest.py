@@ -7,6 +7,7 @@ import requests
 
 from channels import calculate_channels
 from config import (
+    BASE_MOMENTUM_ENABLED_TFS,
     ORDERFLOW_ANOMALY_SCORE_MIN,
     ORDERFLOW_OI_PCT_ANOMALY,
     ORDERFLOW_LIQ_ANOMALY_USD,
@@ -49,7 +50,7 @@ from config import (
     get_adjusted_sessions,
 )
 from data import INTERVAL_MAP, OKX_BASE, fetch_klines
-from momentum import ScalpTracker, calculate_momentum
+from momentum import ScalpTracker, calculate_momentum, classify_momentum_zone, check_htf_pullback_entry, check_one_h_reclaim_entry
 from scoring import calculate_signal_score
 
 KLINES_URL = f"{OKX_BASE}/api/v5/market/candles"
@@ -209,6 +210,51 @@ def _build_macro_trend_series(days: int):
     return trend
 
 
+def _build_trend_series(interval: str, days: int, extra_bars: int = 400):
+    candles_per_day = {"5m": 288, "15m": 96, "1h": 24, "4h": 6, "1d": 1, "1w": 1 / 7}.get(interval, 24)
+    bars_needed = max(300, int(candles_per_day * days + extra_bars))
+    df = fetch_klines_history(interval, bars_needed)
+    if df.empty:
+        return pd.Series(dtype="object")
+    close = df["Close"]
+    ema50 = close.ewm(span=50, adjust=False).mean()
+    ema100 = close.ewm(span=100, adjust=False).mean()
+    ema200 = close.ewm(span=200, adjust=False).mean()
+
+    trend = pd.Series("Ranging", index=df.index, dtype="object")
+    bull = (close > ema50) & (ema50 > ema100) & (ema100 > ema200)
+    bear = (close < ema50) & (ema50 < ema100) & (ema100 < ema200)
+    trend[bull] = "Trending Bullish"
+    trend[bear] = "Trending Bearish"
+    return trend
+
+
+def _trend_side(trend_name: str):
+    t = str(trend_name or "").lower()
+    if "bullish" in t:
+        return "LONG"
+    if "bearish" in t:
+        return "SHORT"
+    return None
+
+
+def _anchor_trend_for_tf(tf: str, idx, trend_map: dict):
+    order_map = {
+        "5m": ["15m", "1h", "4h", "1d", "1w"],
+        "15m": ["15m", "1h", "4h", "1d", "1w"],
+        "1h": ["1h", "4h", "1d", "1w"],
+        "4h": ["4h", "1d", "1w"],
+    }
+    for k in order_map.get(tf, [tf, "1h", "4h", "1d", "1w"]):
+        series = trend_map.get(k)
+        if series is None or series.empty:
+            continue
+        val = series.asof(idx)
+        if isinstance(val, str) and _trend_side(val):
+            return val, k
+    return "Ranging", None
+
+
 def _orderflow_anomaly_placeholder():
     # Historical OI/liquidation block data is not reconstructed in replay yet.
     # Keep the same gate shape but with neutral anomaly signal.
@@ -285,7 +331,7 @@ def _build_proxy_levels(df: pd.DataFrame, i: int, idx):
     }
 
 
-def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, relaxed: bool = False):
+def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_map: dict, relaxed: bool = False):
     candles_per_day = {"5m": 288, "15m": 96, "1h": 24, "4h": 6}.get(tf, 24)
     bars_needed = max(300, candles_per_day * days + 50)
     df = fetch_klines_history(tf, bars_needed)
@@ -315,7 +361,7 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, relaxe
     side_cooldown_until = {"LONG": 0.0, "SHORT": 0.0}
 
     for i, (idx, row) in enumerate(df.iterrows()):
-        zone = row.get("MomentumZone", "NEUTRAL")
+        zone = classify_momentum_zone(float(row.get("MomentumSmooth", 50)), tf)
         close = float(row["Close"])
         high = float(row["High"])
         low = float(row["Low"])
@@ -326,7 +372,15 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, relaxe
         now_ts = idx.timestamp()
 
         # Build new entries first (bot does signals then outcome checks in the same poll)
-        events = tracker.update(zone, close, atr, candle_ts=candle_ts, rsi_raw=rsi_raw, rsi_smooth=rsi_sm)
+        events = []
+        if tf in BASE_MOMENTUM_ENABLED_TFS:
+            events.extend(tracker.update(zone, close, atr, candle_ts=candle_ts, rsi_raw=rsi_raw, rsi_smooth=rsi_sm))
+        htf_evt = check_htf_pullback_entry(df.loc[:idx], tf)
+        if htf_evt:
+            events.append(htf_evt)
+        one_h_evt = check_one_h_reclaim_entry(df.loc[:idx], tf)
+        if one_h_evt:
+            events.append(one_h_evt)
         for evt in events:
             if evt["type"] != "CONFIRMED":
                 continue
@@ -344,7 +398,8 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, relaxe
                 if isinstance(mt, str):
                     macro_trend = mt
             levels_proxy = _build_proxy_levels(df, i, idx)
-            score, _ = calculate_signal_score(evt, df.loc[:idx], levels_proxy, macro_trend, None, 0)
+            local_trend, _ = _anchor_trend_for_tf(tf, idx, trend_map)
+            score, _ = calculate_signal_score(evt, df.loc[:idx], levels_proxy, local_trend or macro_trend, None, 0)
             regime_name = _detect_regime_from_df(df.loc[:idx]) if SCALP_REGIME_SWITCHING else "RANGE"
             regime_cfg = SCALP_REGIME_PROFILES.get(regime_name, {})
             score_delta = int(regime_cfg.get("score_delta", 0))
@@ -397,13 +452,20 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, relaxe
                 if open_tf >= tf_limit:
                     continue
 
-            # Trend gate and countertrend quota
+            # Trend gate and countertrend quota (use hierarchical anchor trend)
             bullish = {"Bullish", "Trending Bullish", "Strong Bullish"}
             bearish = {"Bearish", "Trending Bearish", "Strong Bearish"}
+            trend_name = local_trend or macro_trend
+
+            # Hard reversal guard: do not SHORT in bullish anchor trend and vice-versa.
+            anchor_side = _trend_side(trend_name)
+            if anchor_side and side != anchor_side:
+                continue
+
             trend_aligned = (
-                macro_trend == "Ranging"
-                or (side == "LONG" and macro_trend in bullish)
-                or (side == "SHORT" and macro_trend in bearish)
+                trend_name == "Ranging"
+                or (side == "LONG" and trend_name in bullish)
+                or (side == "SHORT" and trend_name in bearish)
             )
             mode = str(SCALP_TREND_FILTER_MODE_BY_TF.get(tf, SCALP_TREND_FILTER_MODE)).strip().lower()
             countertrend_min_score = int(SCALP_COUNTERTREND_MIN_SCORE_BY_TF.get(tf, SCALP_COUNTERTREND_MIN_SCORE))
@@ -513,12 +575,19 @@ def main():
     relaxed_mode = bool(args.relaxed or (SCALP_RELAXED_FILTERS and not args.strict))
 
     macro_series = _build_macro_trend_series(args.days)
+    trend_map = {
+        "15m": _build_trend_series("15m", args.days),
+        "1h": _build_trend_series("1h", args.days),
+        "4h": _build_trend_series("4h", args.days),
+        "1d": _build_trend_series("1d", args.days),
+        "1w": _build_trend_series("1w", args.days),
+    }
     mode_label = "RELAXED" if relaxed_mode else "STRICT"
     print(f"Replay backtest for {SYMBOL} | days={args.days} | mode={mode_label}")
     print("-" * 64)
     all_rows = []
     for tf in SIGNAL_TIMEFRAMES:
-        row = simulate_timeframe(tf, args.days, macro_series, relaxed=relaxed_mode)
+        row = simulate_timeframe(tf, args.days, macro_series, trend_map, relaxed=relaxed_mode)
         all_rows.append(row)
         print(
             f"{tf:>4} | trades={row['trades']:>4} wins={row['wins']:>4} "
