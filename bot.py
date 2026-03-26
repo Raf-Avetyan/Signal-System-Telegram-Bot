@@ -1070,17 +1070,23 @@ class PonchBot:
                     self.sent_signals.add(conf_key)
                     
                     # --- CONFLUENCE FILTERS & QUALITY CONTROL ---
-                    # 1. Trend Alignment: Confluence must match the macro trend
-                    # Hierarchical trend gate for non-scalp confluence:
-                    # respect 1h->4h->1d->1w direction, avoid counter entries on reversals.
-                    conf_trend, conf_src = self._get_anchor_trend("1h")
-                    conf_side = self._trend_side(conf_trend)
-                    trend_ok = (conf_side is None) or (side == conf_side)
-                    
-                    if not trend_ok:
+                    # 1. Trend Alignment: confluence must not fight either local
+                    # (15m-led) or macro (1h-led) directional anchors.
+                    local_conf_trend, local_conf_src = self._get_anchor_trend("15m")
+                    macro_conf_trend, macro_conf_src = self._get_anchor_trend("1h")
+                    blocked_trends = []
+                    for trend_name, trend_src in (
+                        (local_conf_trend, local_conf_src),
+                        (macro_conf_trend, macro_conf_src),
+                    ):
+                        trend_side = self._trend_side(trend_name)
+                        if trend_side and side != trend_side:
+                            blocked_trends.append(f"{trend_name} ({trend_src or 'N/A'})")
+
+                    if blocked_trends:
                         print(
                             f"  [CONFLUENCE] Blocked {side} {ce['type']}: "
-                            f"against trend {conf_trend} ({conf_src or 'N/A'})"
+                            f"against trend {', '.join(blocked_trends)}"
                         )
                         continue
 

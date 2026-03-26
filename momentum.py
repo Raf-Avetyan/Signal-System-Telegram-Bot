@@ -445,8 +445,11 @@ class ScalpTracker:
 
 def detect_trend(df_1h):
     """
-    Detect the macro trend based on 1h timeframe prices relative to EMAs.
-    Returns: "Trending Bullish", "Trending Bearish", or "Ranging"
+    Detect trend bias from EMA structure.
+    Returns one of:
+      - "Trending Bullish" / "Trending Bearish" for fully stacked trends
+      - "Bullish" / "Bearish" for partial directional bias
+      - "Ranging" otherwise
     """
     if len(df_1h) < 200:
         return "Ranging"
@@ -466,8 +469,14 @@ def detect_trend(df_1h):
         return "Trending Bullish"
 
     # Bearish: Price < all EMAs and EMAs are stacked (50 < 100 < 200)
-    elif curr_p < e50 and e50 < e100 and e100 < e200:
+    if curr_p < e50 and e50 < e100 and e100 < e200:
         return "Trending Bearish"
+
+    # Partial directional bias: enough to block counter-trend confluence/scalp entries.
+    if curr_p > e50 and e50 > e100:
+        return "Bullish"
+    if curr_p < e50 and e50 < e100:
+        return "Bearish"
 
     # Otherwise Ranging
     return "Ranging"
