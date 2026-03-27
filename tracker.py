@@ -37,6 +37,30 @@ class SignalTracker:
         except Exception as e:
             print(f"[TRACKER ERROR] Save failed: {e}")
 
+    def _parse_iso_utc(self, value):
+        """Parse ISO datetime string into UTC-aware datetime."""
+        if not value:
+            return None
+        try:
+            dt = datetime.fromisoformat(str(value))
+        except Exception:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    def _daily_recap_window(self, now_utc=None, recap_hour_utc=8):
+        """
+        Return the last completed daily recap window.
+        Default recap boundary is 08:00 UTC, which matches 12:00 local.
+        """
+        now_utc = now_utc.astimezone(timezone.utc) if now_utc else datetime.now(timezone.utc)
+        window_end = now_utc.replace(hour=recap_hour_utc, minute=0, second=0, microsecond=0)
+        if now_utc < window_end:
+            window_end -= timedelta(days=1)
+        window_start = window_end - timedelta(days=1)
+        return window_start, window_end
+
     def log_signal(self, side, entry, sl, tp1, tp2, tp3, tf, timestamp, msg_id=None, chat_id=None, signal_type="SCALP", meta=None):
         """Log a new CONFIRMED scalp or confluence signal with TG data."""
         signal = {
@@ -218,20 +242,39 @@ class SignalTracker:
 
         return events
 
-    def get_daily_summary(self, date_str=None):
-        """Get performance stats for signals on a specific date (YYYY-MM-DD)."""
-        target_date = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    def get_daily_summary(self, window_end=None):
+        """Get performance stats for the last completed recap window (08:00 UTC -> 08:00 UTC)."""
+        window_start, window_end = self._daily_recap_window(window_end)
 
-        generated_today = [s for s in self.signals if str(s.get("logged_at", "")).startswith(target_date)]
-        total = len(generated_today)
+        generated = []
+        tp1_hits = 0
+        tp2_hits = 0
+        tp3_hits = 0
+        sl_hits = 0
 
-        # Count realized outcomes by event date (fixes recap mismatch intraday).
-        tp1_hits = sum(1 for s in self.signals if str(s.get("tp1_at", "")).startswith(target_date))
-        tp2_hits = sum(1 for s in self.signals if str(s.get("tp2_at", "")).startswith(target_date))
-        tp3_hits = sum(1 for s in self.signals if str(s.get("tp3_at", "")).startswith(target_date))
-        sl_hits = sum(1 for s in self.signals if str(s.get("sl_at", "")).startswith(target_date))
+        for sig in self.signals:
+            logged_at = self._parse_iso_utc(sig.get("logged_at"))
+            if logged_at and window_start <= logged_at < window_end:
+                generated.append(sig)
 
-        still_open = sum(1 for s in generated_today if s.get("status") == "OPEN")
+            tp1_at = self._parse_iso_utc(sig.get("tp1_at"))
+            if tp1_at and window_start <= tp1_at < window_end:
+                tp1_hits += 1
+
+            tp2_at = self._parse_iso_utc(sig.get("tp2_at"))
+            if tp2_at and window_start <= tp2_at < window_end:
+                tp2_hits += 1
+
+            tp3_at = self._parse_iso_utc(sig.get("tp3_at"))
+            if tp3_at and window_start <= tp3_at < window_end:
+                tp3_hits += 1
+
+            sl_at = self._parse_iso_utc(sig.get("sl_at"))
+            if sl_at and window_start <= sl_at < window_end:
+                sl_hits += 1
+
+        total = len(generated)
+        still_open = sum(1 for s in generated if s.get("status") == "OPEN")
         if total == 0 and tp1_hits == 0 and tp2_hits == 0 and tp3_hits == 0 and sl_hits == 0:
             return None
 
@@ -253,6 +296,8 @@ class SignalTracker:
             "wins": wins,
             "losses": losses,
             "win_rate": win_rate,
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
         }
 
     def get_session_stats(self, session_start_hour, session_end_hour):

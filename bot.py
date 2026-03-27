@@ -939,9 +939,8 @@ class PonchBot:
         if now.hour == 8 and now.minute == 0:
             today_str = now.strftime("%d.%m.%Y")
             if self.last_summary_date != today_str:
-                # Send summary for the previous day recap
-                yesterday = now - timedelta(days=1)
-                self._send_performance_summary(yesterday.strftime("%Y-%m-%d"))
+                # Send summary for the last completed recap window (08:00 UTC -> 08:00 UTC)
+                self._send_performance_summary(now)
                 self.last_summary_date = today_str
                 self._save_state()
 
@@ -1624,7 +1623,7 @@ class PonchBot:
 
         # --- Performance Summary first ---
         try:
-            stats = self.tracker.get_daily_summary()
+            stats = self.tracker.get_daily_summary(now)
             if stats:
                 if not self.is_booting:
                     tg.send_performance_summary(stats, chat_id=PRIVATE_CHAT_ID)
@@ -1784,17 +1783,17 @@ class PonchBot:
             # Save state after each update to avoid re-processing on crash
             self._save_state()
 
-    def _send_performance_summary(self, target_date_str=None):
-        """Fetch and send the performance summary for a specific date."""
+    def _send_performance_summary(self, window_end=None):
+        """Fetch and send the performance summary for the last completed recap window."""
         try:
-            stats = self.tracker.get_daily_summary(target_date_str)
+            stats = self.tracker.get_daily_summary(window_end)
             if stats:
                 if not self.is_booting:
                     tg.send_performance_summary(stats, chat_id=PRIVATE_CHAT_ID)
                 else:
                     print(f"  [TG] Skipped sending performance summary (booting)")
             else:
-                print(f"  [TRACKER] No signals found for {target_date_str or 'today'}. Skipping summary.")
+                print(f"  [TRACKER] No signals found for the completed recap window. Skipping summary.")
             
             # Clean up old signals (keep 7 days)
             self.tracker.cleanup_old(7)
