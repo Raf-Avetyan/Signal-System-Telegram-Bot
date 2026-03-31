@@ -565,7 +565,7 @@ class SignalTracker:
             "avg_r": (sum(r_values) / len(r_values)) if r_values else 0.0,
         }
 
-    def cleanup_old(self, days=7):
+    def cleanup_old(self, days=365):
         """Remove signals older than N days."""
         cutoff = datetime.now(timezone.utc)
         keep = []

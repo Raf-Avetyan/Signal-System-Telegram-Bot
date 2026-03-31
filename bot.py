@@ -1,4 +1,4 @@
-﻿# в”Ђв”Ђв”Ђ Ponch Signal System вЂ” Main Bot в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+# Ponch Signal System - Main Bot
 
 """
 Main entry point. Monitors BTCUSDT across multiple timeframes,
@@ -74,7 +74,7 @@ class PonchBot:
     """Main Ponch Signal System bot."""
 
     def __init__(self):
-        # Scalp trackers вЂ” one per timeframe
+        # Scalp trackers - one per timeframe
         self.scalp_trackers = {
             tf: ScalpTracker(tf) for tf in SIGNAL_TIMEFRAMES
         }
@@ -91,7 +91,7 @@ class PonchBot:
         self.levels = {}
         self.last_levels_date = None
 
-        # в”Ђв”Ђв”Ђ New Features в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+        # ─── New Features ─────────────────────────────────
         self.tracker = SignalTracker()
         self.approach_alerts = {}      # { "Pump": timestamp }
         self.last_funding_check = 0
@@ -499,11 +499,11 @@ class PonchBot:
         if not trigger:
             return
 
-        lines = [f"<b>🧲 LIQUIDITY POOL REPORT</b>", f"<pre>Trigger: {trigger}"]
+        lines = [f"<b>?? LIQUIDITY POOL REPORT</b>", f"<pre>Trigger: {trigger}"]
         for tf in LIQ_POOL_REPORT_TIMEFRAMES:
             evt = by_tf.get(tf)
             if not evt:
-                lines.append(f"{tf:>3} | ⏳ Waiting for clear pool")
+                lines.append(f"{tf:>3} | ? Waiting for clear pool")
                 continue
             quality = "Estimated" if evt.get("synthetic") else ("Approx" if evt.get("force") or evt.get("fallback") else "Live")
             lines.append(
@@ -615,7 +615,7 @@ class PonchBot:
 
 
     def run(self):
-        """Main loop вЂ” fetches data and processes signals."""
+        """Main loop - fetches data and processes signals."""
 
         print(f"{'='*50}")
         print(f"  Ponch Signal System (v2)")
@@ -1176,7 +1176,7 @@ class PonchBot:
                             }
                         )
                         self._save_state()
-                        print(f"  [CONFLUENCE] вњ… STRONG {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
+                        print(f"  [CONFLUENCE] STRONG {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
 
                     elif ce["type"] == "EXTREME":
                         extreme_size = round(min(ce["points"] * 0.3, 5.0), 1)
@@ -1208,7 +1208,7 @@ class PonchBot:
                             }
                         )
                         self._save_state()
-                        print(f"  [CONFLUENCE] рџ”Ґ EXTREME {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
+                        print(f"  [CONFLUENCE] EXTREME {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
 
                     # Prevent immediate opposite-side flip from stale queued confirmations.
                     opposite_side = "SHORT" if ce["side"] == "LONG" else "LONG"
@@ -1216,7 +1216,7 @@ class PonchBot:
                     self.confluence_side_lock_until[opposite_side] = current_time + CONFLUENCE_OPPOSITE_LOCK_SEC
                     self._save_state()
 
-        # в”Ђв”Ђв”Ђ Update Performance Tracker & Success Teasers в”Ђв”Ђв”Ђв”Ђ
+        # ─── Update Performance Tracker & Success Teasers ────
         if latest_price is not None:
             # 1. Success Teasers (Public Marketing FOMO)
             # Use the base 5m candle wick range when available to avoid
@@ -1292,7 +1292,7 @@ class PonchBot:
                     if not self.is_booting:
                         tg.send_squeeze_alert(self.last_liqs, latest_price, chat_id=PRIVATE_CHAT_ID)
                     self.last_liq_alert_time = current_time
-                    print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} рџљЁ Liquidation Squeeze: ${self.last_liqs/1e6:.1f}M")
+                    print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Liquidation Squeeze: ${self.last_liqs/1e6:.1f}M")
 
             # 3. OI Divergence
             if self.last_oi and self.last_oi_price:
@@ -1316,7 +1316,7 @@ class PonchBot:
                             if not self.is_booting:
                                 tg.send_oi_divergence(price_chg*100, oi_chg*100, note, chat_id=PRIVATE_CHAT_ID)
                             self._save_state()
-                            print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} вљ пёЏ OI Divergence: {note}")
+                            print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} OI Divergence: {note}")
 
             # Update baselines for next tick comparison
             self.last_oi_price = latest_price
@@ -1460,7 +1460,7 @@ class PonchBot:
                             
                             print(f"[SESSION] {s_name} closed. {'Skipped sending recap' if self.is_booting else 'Recap sent'}.")
 
-        # в”Ђв”Ђв”Ђ Flush Batched Alerts в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+        # ─── Flush Batched Alerts ────────────────────────────
         if self.pending_alerts and self.batch_timer_start:
             # Check if batch window has passed
             if current_time - self.batch_timer_start >= ALERT_BATCH_WINDOW:
@@ -1491,7 +1491,7 @@ class PonchBot:
                 self.pending_alerts = []
                 self.batch_timer_start = None
 
-        # в”Ђв”Ђв”Ђ Periodic Chart Updates в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+        # ─── Periodic Chart Updates ──────────────────────────
         # 1. Session Updates (30s)
         if current_time - self.last_session_update > 30:
             self.last_session_update = current_time
@@ -1523,7 +1523,7 @@ class PonchBot:
                     except: pass
 
         # 2. Daily Levels Update (600s)
-        # в”Ђв”Ђв”Ђ End of Tick в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+        # ─── End of Tick ─────────────────────────────────────
         tick_duration = time.time() - current_time
         if tick_duration > 2.0:
             print(f"[PERF] Tick took {tick_duration:.1f}s (Threshold: 2.0s)")
@@ -1629,7 +1629,7 @@ class PonchBot:
                     tg.send_performance_summary(stats, chat_id=PRIVATE_CHAT_ID)
                 else:
                     print(f"  [TG] Skipped sending performance summary (booting)")
-            self.tracker.cleanup_old(7)
+            self.tracker.cleanup_old(365)
         except Exception as e:
             print(f"[TRACKER ERROR] {e}")
 
@@ -1707,9 +1707,9 @@ class PonchBot:
                 welcome_msg = (
                     f"<b>How to Join:</b>\n\n"
                     f"1. Sign up on Bitunix to start trading:\n"
-                    f"рџ”— {BITUNIX_REG_LINK}\n\n"
+                    f"{BITUNIX_REG_LINK}\n\n"
                     f"2. <b>Send your unique UID here.</b>\n\n"
-                    f"3. Once verified, youвЂ™ll receive an invite link to join."
+                    f"3. Once verified, you'll receive an invite link to join."
                 )
                 tg.send(welcome_msg, parse_mode="HTML", chat_id=user_id)
             elif text.startswith("/analytics"):
@@ -1735,7 +1735,7 @@ class PonchBot:
                         )
 
                     msg = (
-                        f"рџ“Љ <b>SIGNAL ANALYTICS ({days}d)</b>\n\n"
+                        f"<b>SIGNAL ANALYTICS ({days}d)</b>\n\n"
                         f"<pre>"
                         f"Generated:   {totals['generated']}\n"
                         f"Closed:      {totals['trades']}\n"
@@ -1766,16 +1766,17 @@ class PonchBot:
 
                 if not is_referral:
                     error_msg = (
-                        f"вљ пёЏвќ—пёЏ Hi there, the account you provided is not under this partner. "
-                        f"please use the link below to sign up\n"
-                        f"рџ”—: {BITUNIX_REG_LINK}"
+                        f"Account verification failed.\n\n"
+                        f"The UID you provided is not under this partner.\n"
+                        f"Please sign up using this link:\n"
+                        f"{BITUNIX_REG_LINK}"
                     )
                     tg.send(error_msg, parse_mode="HTML", chat_id=user_id)
                 else:
                     success_msg = (
-                        f"вњ… <b>Verification Successful!</b>\n\n"
+                        f"<b>Verification Successful!</b>\n\n"
                         f"Welcome to the team. You can now access our private signal channel:\n"
-                        f"рџ”— {INVITE_LINK}\n\n"
+                        f"{INVITE_LINK}\n\n"
                         f"See you inside!"
                     )
                     tg.send(success_msg, parse_mode="HTML", chat_id=user_id)
@@ -1796,7 +1797,7 @@ class PonchBot:
                 print(f"  [TRACKER] No signals found for the completed recap window. Skipping summary.")
             
             # Clean up old signals (keep 7 days)
-            self.tracker.cleanup_old(7)
+            self.tracker.cleanup_old(365)
         except Exception as e:
             print(f"[TRACKER ERROR] Failed to send performance summary: {e}")
 
@@ -1804,7 +1805,7 @@ class PonchBot:
     def _process_timeframe(self, tf, df, now, entry_protection_ts=None):
         """Process one timeframe: channels, momentum, signals."""
 
-        # в”Ђв”Ђв”Ђ Calculate indicators в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+        # ─── Calculate indicators ────────────────────────
         df = calculate_channels(df)
         df = calculate_momentum(df)
 
@@ -1824,7 +1825,7 @@ class PonchBot:
         # Local trend anchor by hierarchy (5m/15m -> 15m, then 1h->4h->1d->1w).
         local_trend, local_trend_src = self._get_anchor_trend(tf)
 
-        # в”Ђв”Ђв”Ђ REAL-TIME MONITOR (Debug) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+        # ─── REAL-TIME MONITOR (Debug) ───────────────────
 
         prev_high = float(prev["High"])
         prev_low  = float(prev["Low"])
@@ -1855,7 +1856,7 @@ class PonchBot:
                     if session_id in self.session_data:
                         self.session_data[session_id]["levels_tested"].add(lvl)
 
-        # в”Ђв”Ђв”Ђ Volume Spike Detection в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+        # ─── Volume Spike Detection ──────────────────────
         if tf in VOLUME_SPIKE_TIMEFRAMES and len(df) > VOLUME_AVG_PERIOD:
             vol_col = df["Volume"]
             avg_vol = vol_col.iloc[-VOLUME_AVG_PERIOD-1:-1].mean()
@@ -1934,7 +1935,7 @@ class PonchBot:
                         print(f"  [SIG] Approaching Level Triggered: {lvl_name} ({closest_dist*100:.2f}%)")
 
 
-        # в”Ђв”Ђв”Ђ Liquidity Sweeps в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+        # ─── Liquidity Sweeps ────────────────────────────
         if self.levels:
             sweeps = check_liquidity_sweep(
                 price_high, price_low, self.levels,
@@ -1965,7 +1966,7 @@ class PonchBot:
                         "tf":        tf
                     })
 
-        # в”Ђв”Ђв”Ђ Volatility Zone Touches в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+        # ─── Volatility Zone Touches ─────────────────────
         if self.levels:
             touches = check_volatility_touch(
                 price_high, price_low, self.levels,
@@ -2044,7 +2045,7 @@ class PonchBot:
                     sig["tf"] = tf
                     self.confirmations.add_signal(sig)
 
-        # в”Ђв”Ђв”Ђ Scalp Momentum System в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+        # ─── Scalp Momentum System ───────────────────────
         tracker = self.scalp_trackers[tf]
         events = []
         if tf in BASE_MOMENTUM_ENABLED_TFS:
@@ -2358,7 +2359,7 @@ class PonchBot:
                 print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Scalp Closed [{tf}] {evt['side']}")
 
 
-        # в”Ђв”Ђв”Ђ Store prev candle data в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+        # ─── Store prev candle data ──────────────────────
         self.prev_candles[tf] = {
             "High": price_high,
             "Low":  price_low,
@@ -2367,9 +2368,9 @@ class PonchBot:
         return atr_val, candle_ts, rsi_raw
 
 
-# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+# ═══════════════════════════════════════════════════════════════
 # ENTRY POINT
-# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+# ═══════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     import sys
@@ -2425,4 +2426,5 @@ if __name__ == "__main__":
     finally:
         if os.path.exists(lock_file):
             os.remove(lock_file)
+
 
