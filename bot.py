@@ -66,6 +66,7 @@ from data import (
 )
 from tracker import SignalTracker
 from bitunix import verify_bitunix_user
+from bitunix_trade import TradeExecutor, new_signal_id
 from liquidity_map import detect_liquidity_event, detect_liquidity_candidates
 import telegram as tg
 
@@ -93,6 +94,7 @@ class PonchBot:
 
         # ─── New Features ─────────────────────────────────
         self.tracker = SignalTracker()
+        self.trade_executor = TradeExecutor()
         self.approach_alerts = {}      # { "Pump": timestamp }
         self.last_funding_check = 0
         self.last_funding_alert = 0
@@ -138,6 +140,7 @@ class PonchBot:
         self.last_oi = 0
         self.last_oi_base = 0
         self.last_liqs = 0
+        print(f"[TRADE] Bitunix executor {self.trade_executor.status_line()}")
         self.last_oi_price = 0
         self.last_liq_alert_time = 0
         self.is_booting = True         # Start in quiet mode for first check
@@ -1149,6 +1152,7 @@ class PonchBot:
                     if ce["type"] == "STRONG":
                         strong_size = round(min(ce["points"] * 0.3, 5.0), 1)
                         tp_liq = self._estimate_tp_liquidity(side, latest_price, tp1_c, tp2_c, tp3_c)
+                        signal_id = new_signal_id()
                         resp = tg.send_strong(
                             side=ce["side"],
                             total_points=ce["points"],
@@ -1168,6 +1172,7 @@ class PonchBot:
                             tf="Confluence", timestamp=base_candle_ts or conf_ts,
                             msg_id=msg_id, chat_id=PRIVATE_CHAT_ID, signal_type="STRONG",
                             meta={
+                                "signal_id": signal_id,
                                 "indicators": ce["indicators"],
                                 "size": strong_size,
                                 "tp_liq_prob": tp_liq["prob"] if tp_liq else None,
@@ -1175,12 +1180,15 @@ class PonchBot:
                                 "tp_liq_target": tp_liq["target"] if tp_liq else None,
                             }
                         )
+                        self.tracker.signals[-1]["signal_id"] = signal_id
+                        self._execute_exchange_trade(self.tracker.signals[-1])
                         self._save_state()
                         print(f"  [CONFLUENCE] STRONG {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
 
                     elif ce["type"] == "EXTREME":
                         extreme_size = round(min(ce["points"] * 0.3, 5.0), 1)
                         tp_liq = self._estimate_tp_liquidity(side, latest_price, tp1_c, tp2_c, tp3_c)
+                        signal_id = new_signal_id()
                         resp = tg.send_extreme(
                             side=ce["side"],
                             total_points=ce["points"],
@@ -1200,6 +1208,7 @@ class PonchBot:
                             tf="Confluence", timestamp=base_candle_ts or conf_ts,
                             msg_id=msg_id, chat_id=PRIVATE_CHAT_ID, signal_type="EXTREME",
                             meta={
+                                "signal_id": signal_id,
                                 "indicators": ce["indicators"],
                                 "size": extreme_size,
                                 "tp_liq_prob": tp_liq["prob"] if tp_liq else None,
@@ -1207,6 +1216,8 @@ class PonchBot:
                                 "tp_liq_target": tp_liq["target"] if tp_liq else None,
                             }
                         )
+                        self.tracker.signals[-1]["signal_id"] = signal_id
+                        self._execute_exchange_trade(self.tracker.signals[-1])
                         self._save_state()
                         print(f"  [CONFLUENCE] EXTREME {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
 
@@ -1285,6 +1296,9 @@ class PonchBot:
 
                 if risk_state_changed:
                     self._save_state()
+
+                if evt_type in ("TP1", "TP2", "TP3", "ENTRY_CLOSE", "PROFIT_SL", "SL"):
+                    self._sync_exchange_trade_event(sig, evt_type)
 
             # 2. Liquidation Squeezes
             if self.last_liqs >= LIQ_SQUEEZE_THRESHOLD:
@@ -1801,6 +1815,79 @@ class PonchBot:
         except Exception as e:
             print(f"[TRACKER ERROR] Failed to send performance summary: {e}")
 
+    def _execute_exchange_trade(self, sig_obj):
+        """Route a confirmed signal into the Bitunix executor if trading is enabled."""
+        if not self.trade_executor.can_trade():
+            print(f"  [TRADE] Skipped signal {sig_obj.get('type')} {sig_obj.get('side')}: executor disabled")
+            return
+        open_counts = self.tracker.get_open_signal_counts(signal_type=sig_obj.get("type", "SCALP"))
+        try:
+            result = self.trade_executor.execute_signal(sig_obj, open_positions_count=int(open_counts.get("total", 0)))
+        except Exception as e:
+            print(f"  [TRADE] Execution error for {sig_obj.get('type')} {sig_obj.get('side')}: {e}")
+            endpoint = getattr(e, "endpoint", None)
+            response_text = getattr(e, "response_text", None)
+            if endpoint:
+                print(f"  [TRADE] Endpoint: {endpoint}")
+            if response_text:
+                print(f"  [TRADE] Exchange response: {response_text}")
+            return
+
+        status = "accepted" if result.accepted else "blocked"
+        print(f"  [TRADE] {status.upper()} {sig_obj.get('type')} {sig_obj.get('side')}: {result.message}")
+        details = result.payload or {}
+        if details:
+            print(
+                f"  [TRADE] Plan: mode={result.mode} symbol={details.get('symbol')} side={details.get('side', sig_obj.get('side'))} "
+                f"entry={float(details.get('entry', sig_obj.get('entry', 0)) or 0):.2f} "
+                f"sl={float(details.get('sl', sig_obj.get('sl', 0)) or 0):.2f} "
+                f"tp1={float(details.get('tp1', sig_obj.get('tp1', 0)) or 0):.2f} "
+                f"tp2={float(details.get('tp2', sig_obj.get('tp2', 0)) or 0):.2f} "
+                f"tp3={float(details.get('tp3', sig_obj.get('tp3', 0)) or 0):.2f}"
+            )
+        if "balance_available" in details:
+            print(
+                f"  [TRADE] Balance={float(details.get('balance_available', 0) or 0):.2f} "
+                f"risk_budget={float(details.get('risk_budget_usd', 0) or 0):.2f} "
+                f"qty={float(details.get('qty', 0) or 0):.6f} "
+                f"notional={float(details.get('notional', 0) or 0):.4f}"
+            )
+            if float(details.get("balance_available", 0) or 0) < 5:
+                print("  [TRADE] Tiny balance mode: size is derived only from current balance and risk cap.")
+        if result.mode == "demo" and result.accepted:
+            print("  [TRADE] Demo mode only: no real Bitunix orders were sent.")
+        if result.mode == "live" and result.accepted:
+            exec_info = details
+            print(
+                f"  [TRADE] Live orders: position_id={exec_info.get('position_id')} "
+                f"tp_orders={len(exec_info.get('tp_orders', []) or [])} "
+                f"sl_order={bool(exec_info.get('sl_order'))}"
+            )
+        if result.accepted and result.payload:
+            sig_obj["execution"] = result.payload
+            self._save_state()
+
+    def _sync_exchange_trade_event(self, sig_obj, event_type):
+        """Apply TP/SL lifecycle changes to exchange-side protection orders."""
+        execution = sig_obj.get("execution") or {}
+        if not execution:
+            return
+        try:
+            result = self.trade_executor.sync_outcome(sig_obj, event_type)
+        except Exception as e:
+            print(f"  [TRADE] Sync error for {event_type} on {sig_obj.get('type')} {sig_obj.get('side')}: {e}")
+            endpoint = getattr(e, "endpoint", None)
+            response_text = getattr(e, "response_text", None)
+            if endpoint:
+                print(f"  [TRADE] Endpoint: {endpoint}")
+            if response_text:
+                print(f"  [TRADE] Exchange response: {response_text}")
+            return
+        print(f"  [TRADE] {event_type}: {result.message}")
+        if result.payload:
+            sig_obj["execution"] = result.payload
+            self._save_state()
+
 
     def _process_timeframe(self, tf, df, now, entry_protection_ts=None):
         """Process one timeframe: channels, momentum, signals."""
@@ -2303,6 +2390,7 @@ class PonchBot:
                 dyn_base = max(0.5, (score / 10) * profile["size"]) if score else profile["size"]
                 dyn_size = round(max(0.5, dyn_base * size_mult), 1)
                 tp_liq = self._estimate_tp_liquidity(evt["side"], evt["entry"], evt["tp1"], evt["tp2"], evt["tp3"])
+                signal_id = new_signal_id()
 
                 resp = None
                 if not self.is_booting:
@@ -2342,6 +2430,7 @@ class PonchBot:
                     chat_id=PRIVATE_CHAT_ID,
                     signal_type="SCALP",
                     meta={
+                        "signal_id": signal_id,
                         "score": score,
                         "trend": self.macro_trend,
                         "reasons": reasons,
@@ -2351,6 +2440,8 @@ class PonchBot:
                         "tp_liq_target": tp_liq["target"] if tp_liq else None,
                     }
                 )
+                self.tracker.signals[-1]["signal_id"] = signal_id
+                self._execute_exchange_trade(self.tracker.signals[-1])
 
             elif evt["type"] == "CLOSED":
                 if not self.is_booting:
