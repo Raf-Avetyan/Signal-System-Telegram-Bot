@@ -115,6 +115,7 @@ class PonchBot:
         self.last_funding_alert  = state.get("last_funding_alert", 0)   
         self.last_market_alert   = state.get("last_market_alert", 0)
         self.last_summary_date   = state.get("last_summary_date")      # New: Track summary schedule
+        self.last_daily_report_date = state.get("last_daily_report_date")
         self.last_scalp_open_alert = state.get("last_scalp_open_alert", {})
         self.scalp_countertrend_hits = state.get("scalp_countertrend_hits", {"LONG": [], "SHORT": []})
         self.scalp_loss_streak = state.get("scalp_loss_streak", {"LONG": 0, "SHORT": 0})
@@ -597,6 +598,20 @@ class PonchBot:
 
         return False, ""
 
+    def _get_opposite_divergence_note(self, side):
+        """Return note when any tracked timeframe has opposite-side RSI divergence."""
+        div_map = getattr(self, "divergence_map", {}) or {}
+        opposite = "SHORT" if side == "LONG" else "LONG"
+        hits = []
+        for tf in ["5m", "15m", "1h", "4h"]:
+            sides = div_map.get(tf) or set()
+            if opposite in sides:
+                hits.append(tf)
+        if not hits:
+            return ""
+        label = "bearish" if opposite == "SHORT" else "bullish"
+        return f"opposite RSI divergence on {', '.join(hits)} ({label})"
+
     def _get_scalp_tuning_state(self):
         """Adapt scalp strictness from recent closed scalp performance."""
         if not SCALP_SELF_TUNING_ENABLED:
@@ -868,6 +883,7 @@ class PonchBot:
                 "last_funding_alert": self.last_funding_alert,
                 "last_market_alert": self.last_market_alert,
                 "last_summary_date": self.last_summary_date,
+                "last_daily_report_date": self.last_daily_report_date,
                 "last_scalp_open_alert": self.last_scalp_open_alert,
                 "scalp_countertrend_hits": self.scalp_countertrend_hits,
                 "scalp_loss_streak": self.scalp_loss_streak,
@@ -946,6 +962,10 @@ class PonchBot:
                 self._send_performance_summary(now)
                 self.last_summary_date = today_str
                 self._save_state()
+            if self.last_daily_report_date != today_str:
+                self._send_daily_report(now)
+                self.last_daily_report_date = today_str
+                self._save_state()
 
         # 2. Fetch Global context
         self.last_oi = fetch_open_interest()
@@ -958,10 +978,21 @@ class PonchBot:
 
         # Build per-timeframe trend map for hierarchical gating.
         self.tf_trends = {}
+        self.divergence_map = {}
         for tf_key in ["5m", "15m", "1h", "4h", "1d", "1w"]:
             df_tf = data.get(tf_key)
             if df_tf is not None and not df_tf.empty:
                 self.tf_trends[tf_key] = detect_trend(df_tf)
+                if tf_key in {"5m", "15m", "1h", "4h"}:
+                    try:
+                        df_div = calculate_channels(df_tf.copy())
+                        df_div = calculate_momentum(df_div)
+                        div_sigs = check_rsi_divergence(df_div, tf_key)
+                        self.divergence_map[tf_key] = {
+                            str(s.get("side")).upper() for s in div_sigs if s.get("side") and s.get("active", True)
+                        }
+                    except Exception:
+                        self.divergence_map[tf_key] = set()
 
         # 3.1 Market Alert (Fast Move)
         if "1h" in data:
@@ -1090,6 +1121,11 @@ class PonchBot:
                             f"  [CONFLUENCE] Blocked {side} {ce['type']}: "
                             f"against trend {', '.join(blocked_trends)}"
                         )
+                        continue
+
+                    divergence_note = self._get_opposite_divergence_note(side)
+                    if divergence_note:
+                        print(f"  [CONFLUENCE] Blocked {side} {ce['type']}: {divergence_note}")
                         continue
 
                     # 1.5 Falling-knife / blow-off safety filter.
@@ -1588,7 +1624,6 @@ class PonchBot:
             # 1. Reset everything for the new day
             self.daily_report_msg_id = None 
             self._update_levels()
-            self._send_daily_report(now)
             
             self.last_levels_date = today
             self.sent_signals.clear()  # Reset duplicate tracking
@@ -1634,18 +1669,6 @@ class PonchBot:
         """Send daily levels report to Telegram."""
         if not self.levels:
             return
-
-        # --- Performance Summary first ---
-        try:
-            stats = self.tracker.get_daily_summary(now)
-            if stats:
-                if not self.is_booting:
-                    tg.send_performance_summary(stats, chat_id=PRIVATE_CHAT_ID)
-                else:
-                    print(f"  [TG] Skipped sending performance summary (booting)")
-            self.tracker.cleanup_old(365)
-        except Exception as e:
-            print(f"[TRACKER ERROR] {e}")
 
         date_str = now.strftime("%d.%m.%Y")
         do = self.levels["DO"]
@@ -2097,8 +2120,8 @@ class PonchBot:
 
             # 2. Momentum confirmation
             mom_sigs = check_momentum_confirm(df)
-            div_sigs = check_rsi_divergence(df)
-            divergence_sides = {s.get("side") for s in div_sigs}
+            div_sigs = check_rsi_divergence(df, tf)
+            divergence_sides = {s.get("side") for s in div_sigs if s.get("active", True)}
             for sig in mom_sigs:
                 sig_key = f"mom_sig_{tf}_{sig['side']}_{candle_ts}"
                 if sig_key not in self.sent_signals:
@@ -2126,6 +2149,8 @@ class PonchBot:
 
             # 5. RSI divergence confirmation
             for sig in div_sigs:
+                if not sig.get("active", True):
+                    continue
                 sig_key = f"rsi_div_{tf}_{sig['side']}_{candle_ts}"
                 if sig_key not in self.sent_signals:
                     self.sent_signals.add(sig_key)
@@ -2187,6 +2212,11 @@ class PonchBot:
                 if side in divergence_sides:
                     score += 1
                     reasons.append("RSI Divergence")
+
+                divergence_note = self._get_opposite_divergence_note(side)
+                if divergence_note:
+                    print(f"  [SCALP] Blocked {tf} {side}: {divergence_note}")
+                    continue
 
                 # Hard local-trend reversal guard (hierarchical source):
                 # do not SHORT in bullish local trend, do not LONG in bearish local trend.

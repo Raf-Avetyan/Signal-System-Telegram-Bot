@@ -20,6 +20,7 @@ from config import (
     RSI_DIVERGENCE_MIN_PRICE_DELTA_PCT,
     RSI_DIVERGENCE_MIN_RSI_DELTA,
     RSI_DIVERGENCE_POINTS,
+    RSI_DIVERGENCE_MAX_AGE_CANDLES_BY_TF,
 )
 
 
@@ -154,7 +155,7 @@ def check_flow_confirm(df):
     return signals
 
 
-def check_rsi_divergence(df):
+def check_rsi_divergence(df, timeframe=None):
     """
     RSI divergence confirmation:
     - Bullish: price makes lower low, RSI makes higher low.
@@ -169,6 +170,7 @@ def check_rsi_divergence(df):
     seg = int(max(6, RSI_DIVERGENCE_SEGMENT))
     min_rsi_delta = float(RSI_DIVERGENCE_MIN_RSI_DELTA)
     min_price_delta_pct = float(RSI_DIVERGENCE_MIN_PRICE_DELTA_PCT)
+    max_age = int(RSI_DIVERGENCE_MAX_AGE_CANDLES_BY_TF.get(timeframe, seg // 2 if timeframe else seg // 2))
 
     sub = df.iloc[-lookback:].copy()
     if len(sub) < seg * 2:
@@ -189,7 +191,14 @@ def check_rsi_divergence(df):
     old_low_rsi = float(sub.loc[old_low_idx, "RSI"])
     new_low_rsi = float(sub.loc[new_low_idx, "RSI"])
     low_drop_pct = ((old_low_price - new_low_price) / old_low_price * 100.0) if old_low_price > 0 else 0.0
-    if low_drop_pct >= min_price_delta_pct and (new_low_rsi - old_low_rsi) >= min_rsi_delta:
+    low_age = max(0, len(sub) - 1 - sub.index.get_loc(new_low_idx))
+    low_invalidated = float(sub["Low"].iloc[-1]) < new_low_price
+    if (
+        low_drop_pct >= min_price_delta_pct
+        and (new_low_rsi - old_low_rsi) >= min_rsi_delta
+        and low_age <= max_age
+        and not low_invalidated
+    ):
         signals.append({
             "side": "LONG",
             "signal": "L+",
@@ -198,6 +207,9 @@ def check_rsi_divergence(df):
             "price": float(sub["Close"].iloc[-1]),
             "indicator": "Ponch_RSI_Divergence",
             "note": "Bullish divergence",
+            "bars_since_pivot": low_age,
+            "pivot_price": new_low_price,
+            "active": True,
         })
 
     # Bearish divergence: higher high in price, lower high in RSI.
@@ -208,7 +220,14 @@ def check_rsi_divergence(df):
     old_high_rsi = float(sub.loc[old_high_idx, "RSI"])
     new_high_rsi = float(sub.loc[new_high_idx, "RSI"])
     high_rise_pct = ((new_high_price - old_high_price) / old_high_price * 100.0) if old_high_price > 0 else 0.0
-    if high_rise_pct >= min_price_delta_pct and (old_high_rsi - new_high_rsi) >= min_rsi_delta:
+    high_age = max(0, len(sub) - 1 - sub.index.get_loc(new_high_idx))
+    high_invalidated = float(sub["High"].iloc[-1]) > new_high_price
+    if (
+        high_rise_pct >= min_price_delta_pct
+        and (old_high_rsi - new_high_rsi) >= min_rsi_delta
+        and high_age <= max_age
+        and not high_invalidated
+    ):
         signals.append({
             "side": "SHORT",
             "signal": "S+",
@@ -217,6 +236,9 @@ def check_rsi_divergence(df):
             "price": float(sub["Close"].iloc[-1]),
             "indicator": "Ponch_RSI_Divergence",
             "note": "Bearish divergence",
+            "bars_since_pivot": high_age,
+            "pivot_price": new_high_price,
+            "active": True,
         })
 
     return signals

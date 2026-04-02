@@ -77,6 +77,12 @@ RSI_DIVERGENCE_SEGMENT = 20
 RSI_DIVERGENCE_MIN_PRICE_DELTA_PCT = 0.20
 RSI_DIVERGENCE_MIN_RSI_DELTA = 4.0
 RSI_DIVERGENCE_POINTS = 2
+RSI_DIVERGENCE_MAX_AGE_CANDLES_BY_TF = {
+    "5m": 8,
+    "15m": 6,
+    "1h": 4,
+    "4h": 3,
+}
 
 # ─── SCALP PARAMETERS ────────────────────────
 # ATR multipliers for SL/TP calculation
