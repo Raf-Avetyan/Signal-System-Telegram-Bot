@@ -247,10 +247,17 @@ class TradeExecutor:
         self._refresh_state()
         if not self.enabled:
             return ExecutionResult(self.mode, False, "Trading disabled.", {})
-        if open_positions_count >= BITUNIX_MAX_OPEN_POSITIONS:
-            return ExecutionResult(self.mode, False, "Max open positions reached.", {})
+        exchange_open_positions = self.get_exchange_open_position_count() if self.mode == "live" else open_positions_count
+        if exchange_open_positions >= BITUNIX_MAX_OPEN_POSITIONS:
+            return ExecutionResult(
+                self.mode,
+                False,
+                "Max open positions reached.",
+                {"exchange_open_positions": exchange_open_positions},
+            )
 
         plan = self._build_plan(signal)
+        plan["exchange_open_positions"] = exchange_open_positions
         if plan["balance_available"] <= 0:
             return ExecutionResult(self.mode, False, "No available margin balance.", plan)
         if self.mode == "demo":
@@ -420,6 +427,23 @@ class TradeExecutor:
             if pos_side == target and qty > 0:
                 return pos
         return None
+
+    def get_exchange_open_position_count(self) -> int:
+        self._refresh_state()
+        if self.mode != "live" or not self.client.is_configured():
+            return 0
+        try:
+            data = self.client.get_pending_positions().get("data", [])
+            if isinstance(data, dict):
+                data = data.get("positionList") or data.get("data") or []
+            count = 0
+            for pos in data or []:
+                qty = float(pos.get("qty") or pos.get("positionQty") or 0)
+                if qty > 0:
+                    count += 1
+            return count
+        except Exception:
+            return 0
 
     @staticmethod
     def _split_qty(qty: float) -> List[float]:

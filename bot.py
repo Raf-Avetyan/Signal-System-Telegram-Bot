@@ -1879,6 +1879,8 @@ class PonchBot:
         status = "accepted" if result.accepted else "blocked"
         print(f"  [TRADE] {status.upper()} {sig_obj.get('type')} {sig_obj.get('side')}: {result.message}")
         details = result.payload or {}
+        if "exchange_open_positions" in details:
+            print(f"  [TRADE] Exchange open positions: {int(details.get('exchange_open_positions', 0) or 0)}")
         if details:
             print(
                 f"  [TRADE] Plan: mode={result.mode} symbol={details.get('symbol')} side={details.get('side', sig_obj.get('side'))} "
