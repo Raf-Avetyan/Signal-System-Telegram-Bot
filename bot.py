@@ -612,6 +612,26 @@ class PonchBot:
         label = "bearish" if opposite == "SHORT" else "bullish"
         return f"opposite RSI divergence on {', '.join(hits)} ({label})"
 
+    def _get_scalp_window_block_reason(self, tf, side, local_trend, local_trend_src):
+        """
+        Hard blockers for scalp OPEN/PREPARE visibility.
+        We only suppress early alerts when the side is already invalid on hard structure.
+        """
+        divergence_note = self._get_opposite_divergence_note(side)
+        if divergence_note:
+            return divergence_note
+
+        local_side = self._trend_side(local_trend)
+        if local_side and side != local_side:
+            return f"local trend reversal ({local_trend} from {local_trend_src or tf})"
+
+        macro_trend, macro_src = self._get_anchor_trend("1h")
+        macro_side = self._trend_side(macro_trend)
+        if macro_side and side != macro_side:
+            return f"macro trend reversal ({macro_trend} from {macro_src or '1h'})"
+
+        return ""
+
     def _get_scalp_tuning_state(self):
         """Adapt scalp strictness from recent closed scalp performance."""
         if not SCALP_SELF_TUNING_ENABLED:
@@ -2182,6 +2202,10 @@ class PonchBot:
             self.sent_signals.add(evt_key)
 
             if evt["type"] == "OPEN":
+                block_reason = self._get_scalp_window_block_reason(tf, evt["side"], local_trend, local_trend_src)
+                if block_reason:
+                    print(f"  [SCALP] Suppressed Open [{tf}] {evt['side']}: {block_reason}")
+                    continue
                 open_key = f"{tf}_{evt['side']}"
                 last_open_alert_ts = self.last_scalp_open_alert.get(open_key, 0)
                 can_send_open = (current_time - last_open_alert_ts) >= SCALP_OPEN_ALERT_COOLDOWN
@@ -2198,6 +2222,10 @@ class PonchBot:
                     print(f"  [TG] Sent Scalp Open [{tf}] {evt['side']}")
 
             elif evt["type"] == "PREPARE":
+                block_reason = self._get_scalp_window_block_reason(tf, evt["side"], local_trend, local_trend_src)
+                if block_reason:
+                    print(f"  [SCALP] Suppressed Prepare [{tf}] {evt['side']}: {block_reason}")
+                    continue
                 if not self.is_booting:
                     tg.send_scalp_prepare(tf, evt["side"], emoji=emoji, chat_id=PRIVATE_CHAT_ID)
                 self._save_state()
