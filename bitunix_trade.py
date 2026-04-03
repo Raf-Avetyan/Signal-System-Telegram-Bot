@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import secrets
 import time
 import uuid
 from dataclasses import dataclass
@@ -59,6 +60,10 @@ def _sorted_keys(d: Dict[str, Any]) -> List[str]:
     return sorted(d.keys(), key=lambda k: (_get_parameter_type(k), _str_ascii_sum(k)))
 
 
+def _sha256_hex(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 class BitunixFuturesClient:
     def __init__(self):
         self.base_url = BITUNIX_FAPI_BASE_URL.rstrip("/")
@@ -69,34 +74,29 @@ class BitunixFuturesClient:
         return bool(self.api_key and self.api_secret)
 
     def _sign(self, params: Dict[str, Any]) -> str:
-        """
-        Bitunix docs use sorted values concatenation + apiSecret on some APIs.
-        Futures OpenAPI examples show `sign` header with timestamp/nonce.
-        We keep one deterministic strategy here based on sorted request fields.
-        """
-        sorted_keys = _sorted_keys(params)
-        concatenated = "".join(str(params[k]) for k in sorted_keys)
-        return hashlib.sha256((concatenated + self.api_secret).encode("utf-8")).hexdigest()
+        raise NotImplementedError("Use _build_signature() with separated query/body parts.")
 
     def _build_query(self, params: Dict[str, Any]) -> str:
         ordered = {k: params[k] for k in _sorted_keys(params)}
         return urlencode(ordered)
+
+    def _build_signature(self, nonce: str, timestamp: str, query: Dict[str, Any], body: str) -> str:
+        query_params = "".join(f"{k}{query[k]}" for k in _sorted_keys(query))
+        digest = _sha256_hex(nonce + timestamp + self.api_key + query_params + body)
+        return _sha256_hex(digest + self.api_secret)
 
     def _request(self, method: str, path: str, payload: Optional[Dict[str, Any]] = None, query: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if not self.is_configured():
             raise BitunixTradeError("Bitunix futures API credentials are not configured.")
         payload = payload or {}
         query = query or {}
-        nonce = str(int(time.time() * 1000))
+        nonce = secrets.token_hex(16)
         timestamp = nonce
-        sign_source: Dict[str, Any] = {}
-        sign_source.update(query)
-        sign_source.update(payload)
-        sign_source["nonce"] = nonce
-        sign_source["timestamp"] = timestamp
+        timestamp = str(int(time.time() * 1000))
+        body = json.dumps(payload, separators=(",", ":")) if payload else ""
         headers = {
             "api-key": self.api_key,
-            "sign": self._sign(sign_source),
+            "sign": self._build_signature(nonce, timestamp, query, body),
             "nonce": nonce,
             "timestamp": timestamp,
             "language": "en-US",
@@ -107,9 +107,8 @@ class BitunixFuturesClient:
         if query:
             url = f"{url}?{self._build_query(query)}"
 
-        body = json.dumps(payload) if payload else None
         try:
-            resp = requests.request(method, url, headers=headers, data=body, timeout=20)
+            resp = requests.request(method, url, headers=headers, data=(body or None), timeout=20)
             resp.raise_for_status()
             data = resp.json()
         except requests.HTTPError as e:
@@ -134,7 +133,7 @@ class BitunixFuturesClient:
         return data
 
     def get_single_account(self, margin_coin: str = BITUNIX_MARGIN_COIN) -> Dict[str, Any]:
-        return self._request("GET", "/api/v1/futures/account/get_single_account", query={"marginCoin": margin_coin})
+        return self._request("GET", "/api/v1/futures/account", query={"marginCoin": margin_coin})
 
     def change_leverage(self, symbol: str, leverage: int, margin_coin: str = BITUNIX_MARGIN_COIN) -> Dict[str, Any]:
         return self._request(
@@ -165,9 +164,6 @@ class BitunixFuturesClient:
             "orderType": order_type,
             "effect": effect,
             "reduceOnly": bool(reduce_only),
-            "positionMode": BITUNIX_POSITION_MODE,
-            "marginMode": "ISOLATION",
-            "marginCoin": BITUNIX_MARGIN_COIN,
         }
         if client_id:
             payload["clientId"] = client_id
@@ -202,10 +198,10 @@ class BitunixFuturesClient:
             query["positionId"] = position_id
         return self._request("GET", "/api/v1/futures/tpsl/get_pending_orders", query=query)
 
-    def modify_position_tpsl(self, symbol: str, order_id: str, tp_price: Optional[float], sl_price: Optional[float]) -> Dict[str, Any]:
+    def modify_position_tpsl(self, symbol: str, position_id: str, tp_price: Optional[float], sl_price: Optional[float]) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "symbol": symbol,
-            "orderId": str(order_id),
+            "positionId": str(position_id),
         }
         if tp_price is not None:
             payload["tpPrice"] = self._fmt_num(tp_price)
@@ -213,7 +209,7 @@ class BitunixFuturesClient:
         if sl_price is not None:
             payload["slPrice"] = self._fmt_num(sl_price)
             payload["slStopType"] = BITUNIX_TPSL_TRIGGER_TYPE
-        return self._request("POST", "/api/v1/futures/tpsl/modify_order", payload=payload)
+        return self._request("POST", "/api/v1/futures/tpsl/position/modify_order", payload=payload)
 
     def cancel_tpsl(self, symbol: str, order_id: str) -> Dict[str, Any]:
         return self._request("POST", "/api/v1/futures/tpsl/cancel_order", payload={"symbol": symbol, "orderId": str(order_id)})
@@ -242,6 +238,53 @@ class TradeExecutor:
     def status_line(self) -> str:
         self._refresh_state()
         return f"mode={self.mode} enabled={self.enabled} configured={self.client.is_configured()}"
+
+    def startup_self_check(self) -> Dict[str, Any]:
+        """
+        Return startup connectivity snapshot for logging:
+        - configured/auth state
+        - balance endpoint result
+        - current open positions
+        """
+        self._refresh_state()
+        info: Dict[str, Any] = {
+            "mode": self.mode,
+            "enabled": self.enabled,
+            "configured": self.client.is_configured(),
+            "auth_ok": False,
+            "balance_available": 0.0,
+            "open_positions": 0,
+            "position_sides": [],
+            "errors": [],
+        }
+        if not self.client.is_configured():
+            info["errors"].append("Bitunix futures API key/secret missing.")
+            return info
+
+        bal = self._safe_get_balance()
+        info["balance_available"] = float(bal.get("available", 0) or 0)
+        if bal.get("error"):
+            info["errors"].append(f"balance: {bal.get('error')}")
+            if bal.get("endpoint"):
+                info["balance_endpoint"] = bal.get("endpoint")
+            if bal.get("response_text"):
+                info["balance_response"] = bal.get("response_text")
+        else:
+            info["auth_ok"] = True
+
+        pos = self._safe_get_open_positions()
+        info["open_positions"] = int(pos.get("count", 0) or 0)
+        info["position_sides"] = pos.get("sides", [])
+        if pos.get("error"):
+            info["errors"].append(f"positions: {pos.get('error')}")
+            if pos.get("endpoint"):
+                info["positions_endpoint"] = pos.get("endpoint")
+            if pos.get("response_text"):
+                info["positions_response"] = pos.get("response_text")
+        elif info["auth_ok"]:
+            info["auth_ok"] = True
+
+        return info
 
     def execute_signal(self, signal: Dict[str, Any], open_positions_count: int = 0) -> ExecutionResult:
         self._refresh_state()
@@ -338,14 +381,15 @@ class TradeExecutor:
         symbol = execution["symbol"]
         sl_order = execution.get("sl_order") or {}
         sl_order_id = sl_order.get("orderId") or sl_order.get("id")
+        position_id = execution.get("position_id")
 
-        if event_type == "TP1" and sl_order_id:
-            self.client.modify_position_tpsl(symbol, str(sl_order_id), None, float(signal["entry"]))
+        if event_type == "TP1" and position_id:
+            self.client.modify_position_tpsl(symbol, str(position_id), None, float(signal["entry"]))
             execution["sl_moved_to"] = float(signal["entry"])
             return ExecutionResult(self.mode, True, "Moved SL to entry after TP1.", execution)
 
-        if event_type == "TP2" and sl_order_id:
-            self.client.modify_position_tpsl(symbol, str(sl_order_id), None, float(signal["tp1"]))
+        if event_type == "TP2" and position_id:
+            self.client.modify_position_tpsl(symbol, str(position_id), None, float(signal["tp1"]))
             execution["sl_moved_to"] = float(signal["tp1"])
             return ExecutionResult(self.mode, True, "Moved SL to TP1 after TP2.", execution)
 
@@ -413,8 +457,13 @@ class TradeExecutor:
                 or 0
             )
             return {"available": float(available or 0), "raw": raw}
-        except Exception:
-            return {"available": 0}
+        except Exception as e:
+            return {
+                "available": 0,
+                "error": str(e),
+                "endpoint": getattr(e, "endpoint", "GET /api/v1/futures/account"),
+                "response_text": getattr(e, "response_text", None),
+            }
 
     def _find_position(self, symbol: str, side: str) -> Optional[Dict[str, Any]]:
         data = self.client.get_pending_positions(symbol).get("data", [])
@@ -432,18 +481,33 @@ class TradeExecutor:
         self._refresh_state()
         if self.mode != "live" or not self.client.is_configured():
             return 0
+        return int(self._safe_get_open_positions().get("count", 0) or 0)
+
+    def _safe_get_open_positions(self) -> Dict[str, Any]:
+        if not self.client.is_configured():
+            return {"count": 0, "sides": [], "error": "Bitunix futures API credentials are not configured."}
         try:
             data = self.client.get_pending_positions().get("data", [])
             if isinstance(data, dict):
                 data = data.get("positionList") or data.get("data") or []
             count = 0
+            sides = []
             for pos in data or []:
                 qty = float(pos.get("qty") or pos.get("positionQty") or 0)
                 if qty > 0:
                     count += 1
-            return count
-        except Exception:
-            return 0
+                    side = str(pos.get("side") or pos.get("positionSide") or "").upper()
+                    if side:
+                        sides.append(side)
+            return {"count": count, "sides": sides}
+        except Exception as e:
+            return {
+                "count": 0,
+                "sides": [],
+                "error": str(e),
+                "endpoint": getattr(e, "endpoint", "GET /api/v1/futures/position/get_pending_positions"),
+                "response_text": getattr(e, "response_text", None),
+            }
 
     @staticmethod
     def _split_qty(qty: float) -> List[float]:

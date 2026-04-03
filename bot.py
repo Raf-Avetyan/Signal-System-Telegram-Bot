@@ -142,6 +142,23 @@ class PonchBot:
         self.last_oi_base = 0
         self.last_liqs = 0
         print(f"[TRADE] Bitunix executor {self.trade_executor.status_line()}")
+        trade_check = self.trade_executor.startup_self_check()
+        print(
+            f"[TRADE] Startup check: auth_ok={trade_check.get('auth_ok')} "
+            f"balance={float(trade_check.get('balance_available', 0) or 0):.2f} "
+            f"open_positions={int(trade_check.get('open_positions', 0) or 0)} "
+            f"sides={trade_check.get('position_sides', [])}"
+        )
+        for err in trade_check.get("errors", []):
+            print(f"[TRADE] Startup detail: {err}")
+        if trade_check.get("balance_endpoint"):
+            print(f"[TRADE] Balance endpoint: {trade_check.get('balance_endpoint')}")
+        if trade_check.get("balance_response"):
+            print(f"[TRADE] Balance response: {trade_check.get('balance_response')}")
+        if trade_check.get("positions_endpoint"):
+            print(f"[TRADE] Positions endpoint: {trade_check.get('positions_endpoint')}")
+        if trade_check.get("positions_response"):
+            print(f"[TRADE] Positions response: {trade_check.get('positions_response')}")
         self.last_oi_price = 0
         self.last_liq_alert_time = 0
         self.is_booting = True         # Start in quiet mode for first check
@@ -1897,6 +1914,12 @@ class PonchBot:
                 f"qty={float(details.get('qty', 0) or 0):.6f} "
                 f"notional={float(details.get('notional', 0) or 0):.4f}"
             )
+            if details.get("endpoint") or details.get("response_text") or details.get("error"):
+                print(f"  [TRADE] Balance check error: {details.get('error')}")
+                if details.get("endpoint"):
+                    print(f"  [TRADE] Balance endpoint: {details.get('endpoint')}")
+                if details.get("response_text"):
+                    print(f"  [TRADE] Balance response: {details.get('response_text')}")
             if float(details.get("balance_available", 0) or 0) < 5:
                 print("  [TRADE] Tiny balance mode: size is derived only from current balance and risk cap.")
         if result.mode == "demo" and result.accepted:
