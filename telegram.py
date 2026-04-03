@@ -51,7 +51,7 @@ def send_tp2_hit_congrats(
     chat_id, message_id, tf, side=None, lock_price=None,
     entry=None, sl=None, tp1=None, tp2=None, size=None
 ):
-    """Send a reply for hitting TP2 with dynamic profit-lock suggestion."""
+    """Send a reply for hitting TP2 with the actual protected stop level."""
     import random
     messages = [
         f"⚡️ <b>TARGET 2 SMACKED!</b> [{tf}] Moving fast! Final goal in sight. 🚀",
@@ -60,39 +60,12 @@ def send_tp2_hit_congrats(
     ]
     txt = random.choice(messages)
 
-    dynamic_lock = lock_price
-    mode_label = "Standard"
-    if side in ("LONG", "SHORT") and entry is not None and sl is not None and tp1 is not None:
-        risk_r = abs(entry - sl)
-        if risk_r > 0:
-            # Position-size aware safety profile:
-            # - Larger size -> tighter protection
-            # - Smaller size -> more breathing room
-            if size is not None and size >= 2.0:
-                r_mult = 0.8
-                mode_label = "Tight (size-aware)"
-            elif size is not None and size >= 1.0:
-                r_mult = 0.6
-                mode_label = "Balanced (size-aware)"
-            else:
-                r_mult = 0.4
-                mode_label = "Loose (size-aware)"
-
-            if side == "LONG":
-                candidate = entry + risk_r * r_mult
-                # keep lock in profit but not above TP1
-                dynamic_lock = min(tp1, max(entry, candidate))
-            else:
-                candidate = entry - risk_r * r_mult
-                # keep lock in profit but not below TP1 for shorts
-                dynamic_lock = max(tp1, min(entry, candidate))
-
-    if dynamic_lock is not None:
+    actual_lock = lock_price if lock_price is not None else sl
+    if actual_lock is not None:
         side_txt = side if side else "POSITION"
         txt += (
             f"\n\n🛡 <b>Safety Update</b>\n"
-            f"Set SL in profit for <b>{side_txt}</b> at <b>{fmt_price(dynamic_lock)}</b>\n"
-            f"<i>Mode: {mode_label}</i>"
+            f"Protected stop for <b>{side_txt}</b> is now at <b>{fmt_price(actual_lock)}</b>"
         )
     return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
 
@@ -346,63 +319,70 @@ def fmt_hit(is_hit):
     """Return a checkmark if level was hit."""
     return " ✅" if is_hit else ""
 
-def get_signal_levels_code(entry, sl, tp1, tp2, tp3, status="OPEN", tp1_h=False, tp2_h=False, tp3_h=False, sl_h=False):
+def get_signal_levels_code(entry, sl, tp1, tp2, tp3, status="OPEN", tp1_h=False, tp2_h=False, tp3_h=False, sl_h=False, initial_sl=None):
     """Format the levels block with hit markers."""
-    # Symbols based on state
-    sl_mark = " ❌" if sl_h else ""
+    sl_mark = " ?" if sl_h else ""
     tp1_mark = fmt_hit(tp1_h)
     tp2_mark = fmt_hit(tp2_h)
     tp3_mark = fmt_hit(tp3_h)
-    
+    initial_sl = sl if initial_sl is None else initial_sl
+    moved_sl = abs(float(sl) - float(initial_sl)) > 1e-9
+
     lines = [
         f"Entry:  {fmt_price(entry)}",
-        f"SL:     {fmt_price(sl)}{sl_mark}",
+        f"SL:     {fmt_price(initial_sl)}{sl_mark}",
         f"",
         f"TP1:    {fmt_price(tp1)}{tp1_mark}",
         f"TP2:    {fmt_price(tp2)}{tp2_mark}",
         f"TP3:    {fmt_price(tp3)}{tp3_mark}"
     ]
-    
+    if moved_sl:
+        lines.insert(2, f"Lock:   {fmt_price(sl)}")
+        lines.insert(3, f"")
+
     return "\n".join(lines)
 
 def get_signal_html(signal_type, side, timeframe, entry, sl, tp1, tp2, tp3,
                     status="OPEN", tp1_h=False, tp2_h=False, tp3_h=False, sl_h=False,
                     score=None, trend=None, indicators=None, reasons=None, size=None,
-                    tp_liq_prob=None, tp_liq_usd=None, tp_liq_target=None):
+                    tp_liq_prob=None, tp_liq_usd=None, tp_liq_target=None,
+                    trigger_label=None, initial_sl=None):
     """Generate HTML for Scalp, Strong, or Extreme signals."""
-    side_emoji = "🟢" if side == "LONG" else "🔴"
-    
-    # 1. Header
+    side_emoji = "\U0001F7E2" if side == "LONG" else "\U0001F534"
+
     if signal_type == "SCALP":
-        emoji = "🚀" if timeframe.lower() in ["1h", "4h"] else "⚡️"
-        label = "SCALP" if timeframe.lower() in ["5m", "15m"] else "SIGNAL"
-        header = f"<b>{emoji} {label} ENTRY CONFIRMED</b> [{timeframe.upper()}]\n"
-        header += f"<b>{side_emoji} {side}</b>\n"
-        header += f"\n"
+        trigger_name = str(trigger_label or "")
+        if trigger_name == "Smart Money Liquidity":
+            header = f"<b>\U0001F3E6 SMART MONEY ENTRY CONFIRMED</b> [{timeframe.upper()}]\n"
+        else:
+            emoji = "\U0001F680" if timeframe.lower() in ["1h", "4h"] else "\u26A1\uFE0F"
+            label = "SCALP" if timeframe.lower() in ["5m", "15m"] else "SIGNAL"
+            header = f"<b>{emoji} {label} ENTRY CONFIRMED</b> [{timeframe.upper()}]\n"
+        header += f"<b>{side_emoji} {side}</b>\n\n"
     elif signal_type == "STRONG":
-        emoji = "✅"
+        emoji = "\u2705"
         header = f"<b>{emoji} STRONG {side} CONFLUENCE</b>\n"
         header += f"<b>{side_emoji} Market Divergence Detected [{timeframe}]</b>\n\n"
     elif signal_type == "EXTREME":
-        emoji = "🔥"
+        emoji = "\U0001F525"
         header = f"<b>{emoji} EXTREME {side} CONFLUENCE</b>\n"
         header += f"<b>{side_emoji} High-Alpha Setup Identified [{timeframe}]</b>\n\n"
     else:
-        header = f"<b>🔔 {signal_type} {side}</b>\n"
+        header = f"<b>\U0001F514 {signal_type} {side}</b>\n"
 
-    # 2. Score/Trend (for Scalps) or Confluence Details (for Strong/Extreme)
     details = ""
     if signal_type == "SCALP":
+        trigger_name = trigger_label or "Momentum Exit"
         score_display = f"Score:   {score}/10\n" if score else ""
         trend_display = f"Trend:   {trend}\n" if trend else ""
-        reasons_display = f"Confl:   {', '.join(reasons)}\n" if reasons else ""
+        reasons_label = "Model" if trigger_name == "Smart Money Liquidity" else "Confl"
+        reasons_display = f"{reasons_label}:   {', '.join(reasons)}\n" if reasons else ""
         size_display = f"Size:    {size}%\n" if size is not None else ""
         liq_display = ""
         if tp_liq_prob is not None and tp_liq_usd is not None and tp_liq_target:
             liq_display = f"TP Liq:  {tp_liq_target} ${tp_liq_usd/1e6:.1f}M | Prob {tp_liq_prob:.0f}%\n"
-        details = f"<pre>Trigger: Momentum Exit\n{score_display}{trend_display}{reasons_display}{size_display}{liq_display}</pre>\n"
+        details = f"<pre>Trigger: {trigger_name}\n{score_display}{trend_display}{reasons_display}{size_display}{liq_display}</pre>\n"
     else:
-        # Strong/Extreme
         num_systems = len(indicators) if indicators else 0
         total_points = sum(ind['points'] for ind in indicators) if indicators else 0
         size_display = f"\n<b>Risk Size:</b> {size}%" if size is not None else ""
@@ -416,37 +396,33 @@ def get_signal_html(signal_type, side, timeframe, entry, sl, tp1, tp2, tp3,
             f"{liq_display}\n"
         )
 
-    # 3. Levels
-    levels_code = get_signal_levels_code(entry, sl, tp1, tp2, tp3, status, tp1_h, tp2_h, tp3_h, sl_h)
-    
-    msg = header + details + f"\n<b>⚡️ TRADE LEVELS</b>\n<pre>{levels_code}</pre>\n"
+    levels_code = get_signal_levels_code(entry, sl, tp1, tp2, tp3, status, tp1_h, tp2_h, tp3_h, sl_h, initial_sl=initial_sl)
+    msg = header + details + f"\n<b>\u26A1\uFE0F TRADE LEVELS</b>\n<pre>{levels_code}</pre>\n"
 
-    # 3b. Status Banner (Bold & Outside <pre>)
     if status == "OPEN":
-        msg += f"\n<b>🔵 POSITION OPEN</b>"
+        msg += f"\n<b>\U0001F535 POSITION OPEN</b>"
     elif status == "TP1":
-        msg += f"\n<b>🔵 POSITION OPEN (TP1 ✅)</b>"
+        msg += f"\n<b>\U0001F535 POSITION OPEN (TP1 \u2705)</b>"
     elif status == "TP2":
-        msg += f"\n<b>🔵 POSITION OPEN (TP2 ✅)</b>"
+        msg += f"\n<b>\U0001F535 POSITION OPEN (TP2 \u2705)</b>"
     elif status == "TP3":
-        msg += f"\n<b>💰 ALL TARGETS HIT</b>"
+        msg += f"\n<b>\U0001F4B0 ALL TARGETS HIT</b>"
     elif status == "SL":
-        msg += f"\n<b>❌ STOP LOSS HIT</b>"
+        msg += f"\n<b>\u274C STOP LOSS HIT</b>"
     elif status == "PROFIT_SL":
-        msg += f"\n<b>🛡 STOP HIT IN PROFIT</b>"
+        msg += f"\n<b>\U0001F6E1 STOP HIT IN PROFIT</b>"
     elif status == "ENTRY_CLOSE":
-        msg += f"\n<b>🟡 CLOSED AT BREAKEVEN | NOT ACTIVE</b>"
+        msg += f"\n<b>\U0001F7E1 CLOSED AT BREAKEVEN | NOT ACTIVE</b>"
     elif status == "CLOSED":
-        msg += f"\n<b>🛡 CLOSED AFTER TP | NOT ACTIVE</b>"
+        msg += f"\n<b>\U0001F6E1 CLOSED AFTER TP | NOT ACTIVE</b>"
 
-    # 4. Matched Strategies (for Strong/Extreme)
     if (signal_type in ["STRONG", "EXTREME"]) and indicators:
         ind_lines = []
         for ind in indicators:
             name = ind['name'].replace("Ponch_", "").replace("_", " ")
             sig = ind['signal'].replace("ENTRY ", "")
-            ind_lines.append(f"• {name}: {sig} (+{ind['points']})")
-        
+            ind_lines.append(f"- {name}: {sig} (+{ind['points']})")
+
         msg += f"\n\n<b>Matched Strategies:</b>\n<pre>" + "\n".join(ind_lines) + "</pre>"
 
     return msg
@@ -454,11 +430,13 @@ def get_signal_html(signal_type, side, timeframe, entry, sl, tp1, tp2, tp3,
 
 def send_scalp_confirmed(timeframe, side, entry, sl, tp1, tp2, tp3,
                          strength, size, score=None, trend=None, reasons=None, chat_id=None,
-                         tp_liq_prob=None, tp_liq_usd=None, tp_liq_target=None):
+                         tp_liq_prob=None, tp_liq_usd=None, tp_liq_target=None,
+                         trigger_label=None, initial_sl=None):
     """⚡️/🚀 SCALP ENTRY CONFIRMED"""
     html = get_signal_html("SCALP", side, timeframe, entry, sl, tp1, tp2, tp3,
                            score=score, trend=trend, reasons=reasons, size=size,
-                           tp_liq_prob=tp_liq_prob, tp_liq_usd=tp_liq_usd, tp_liq_target=tp_liq_target)
+                           tp_liq_prob=tp_liq_prob, tp_liq_usd=tp_liq_usd, tp_liq_target=tp_liq_target,
+                           trigger_label=trigger_label, initial_sl=sl)
     return send(html, parse_mode="HTML", chat_id=chat_id)
 
 
@@ -504,6 +482,7 @@ def update_signal_message(chat_id, msg_id, sig_data):
         timeframe=tf_val,
         entry=sig_data["entry"],
         sl=sig_data["sl"],
+        initial_sl=sig_data.get("initial_sl", sig_data["sl"]),
         tp1=sig_data["tp1"],
         tp2=sig_data["tp2"],
         tp3=sig_data["tp3"],
@@ -520,6 +499,7 @@ def update_signal_message(chat_id, msg_id, sig_data):
         tp_liq_prob=meta.get("tp_liq_prob"),
         tp_liq_usd=meta.get("tp_liq_usd"),
         tp_liq_target=meta.get("tp_liq_target"),
+        trigger_label=meta.get("trigger"),
     )
     return edit_message_text(msg_id, html, chat_id=chat_id)
 

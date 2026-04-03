@@ -51,7 +51,8 @@ from config import (
     LIQ_POOL_PROGRESSIVE_MIN_STEP_PCT,
     LIQ_POOL_AGG_WINDOW_PCT_BY_TF,
     LIQ_POOL_NO_MOVE_RANGE_PCT_1H, LIQ_POOL_EXPANSION_PRICE_MOVE_PCT_1H,
-    LIQ_POOL_EXPANSION_VOLUME_MULT, LIQ_POOL_EXPANSION_BOOK_MULT, LIQ_POOL_EXPANSION_COOLDOWN
+    LIQ_POOL_EXPANSION_VOLUME_MULT, LIQ_POOL_EXPANSION_BOOK_MULT, LIQ_POOL_EXPANSION_COOLDOWN,
+    SMART_MONEY_ENABLED, SMART_MONEY_EXECUTION_TFS, SMART_MONEY_RISK_PCT
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
@@ -68,6 +69,7 @@ from tracker import SignalTracker
 from bitunix import verify_bitunix_user
 from bitunix_trade import TradeExecutor, new_signal_id
 from liquidity_map import detect_liquidity_event, detect_liquidity_candidates
+from smart_money import detect_smart_money_entry
 import telegram as tg
 
 
@@ -95,6 +97,7 @@ class PonchBot:
         # ─── New Features ─────────────────────────────────
         self.tracker = SignalTracker()
         self.trade_executor = TradeExecutor()
+        self.latest_data = {}
         self.approach_alerts = {}      # { "Pump": timestamp }
         self.last_funding_check = 0
         self.last_funding_alert = 0
@@ -146,6 +149,8 @@ class PonchBot:
         print(
             f"[TRADE] Startup check: auth_ok={trade_check.get('auth_ok')} "
             f"balance={float(trade_check.get('balance_available', 0) or 0):.2f} "
+            f"position_mode={trade_check.get('position_mode')} "
+            f"leverage={int(trade_check.get('leverage', 0) or 0)} "
             f"open_positions={int(trade_check.get('open_positions', 0) or 0)} "
             f"sides={trade_check.get('position_sides', [])}"
         )
@@ -1009,9 +1014,10 @@ class PonchBot:
         self.last_liqs = fetch_liquidations()
 
         # 3. Fetch all timeframes (+1d/+1w for liquidity-pool and trend hierarchy context)
-        fetch_tfs = list(dict.fromkeys(SIGNAL_TIMEFRAMES + ["1d", "1w"]))
+        fetch_tfs = list(dict.fromkeys(SIGNAL_TIMEFRAMES + ["1m", "1d", "1w"]))
         data = fetch_all_timeframes(timeframes=fetch_tfs)
         if not data: return
+        self.latest_data = data
 
         # Build per-timeframe trend map for hierarchical gating.
         self.tf_trends = {}
@@ -1887,10 +1893,23 @@ class PonchBot:
             print(f"  [TRADE] Execution error for {sig_obj.get('type')} {sig_obj.get('side')}: {e}")
             endpoint = getattr(e, "endpoint", None)
             response_text = getattr(e, "response_text", None)
+            plan = getattr(e, "plan", None) or {}
             if endpoint:
                 print(f"  [TRADE] Endpoint: {endpoint}")
             if response_text:
                 print(f"  [TRADE] Exchange response: {response_text}")
+            if plan:
+                print(
+                    f"  [TRADE] Failed plan: mode={self.trade_executor.mode} symbol={plan.get('symbol')} "
+                    f"side={plan.get('side', sig_obj.get('side'))} qty={float(plan.get('qty', 0) or 0):.6f} "
+                    f"notional={float(plan.get('notional', 0) or 0):.4f} "
+                    f"position_mode={plan.get('position_mode')} leverage={int(plan.get('leverage', 0) or 0)}"
+                )
+                print(
+                    f"  [TRADE] Risk qty={float(plan.get('risk_qty', 0) or 0):.6f} "
+                    f"affordable_qty={float(plan.get('affordable_qty', 0) or 0):.6f} "
+                    f"affordable_notional={float(plan.get('affordable_notional', 0) or 0):.4f}"
+                )
             return
 
         status = "accepted" if result.accepted else "blocked"
@@ -1914,6 +1933,14 @@ class PonchBot:
                 f"qty={float(details.get('qty', 0) or 0):.6f} "
                 f"notional={float(details.get('notional', 0) or 0):.4f}"
             )
+            if details.get("position_mode"):
+                print(
+                    f"  [TRADE] PositionMode={details.get('position_mode')} "
+                    f"leverage={int(details.get('leverage', 0) or 0)} "
+                    f"risk_qty={float(details.get('risk_qty', 0) or 0):.6f} "
+                    f"affordable_qty={float(details.get('affordable_qty', 0) or 0):.6f} "
+                    f"affordable_notional={float(details.get('affordable_notional', 0) or 0):.4f}"
+                )
             if details.get("endpoint") or details.get("response_text") or details.get("error"):
                 print(f"  [TRADE] Balance check error: {details.get('error')}")
                 if details.get("endpoint"):
@@ -2205,6 +2232,21 @@ class PonchBot:
         # ─── Scalp Momentum System ───────────────────────
         tracker = self.scalp_trackers[tf]
         events = []
+        if SMART_MONEY_ENABLED and tf in SMART_MONEY_EXECUTION_TFS:
+            smart_money_trades = self.tracker.count_signals_for_day(
+                strategy="SMART_MONEY_LIQUIDITY",
+                signal_type="SCALP",
+                now_utc=now,
+            )
+            sm_evt = detect_smart_money_entry(
+                self.latest_data or {},
+                self.levels or {},
+                now,
+                trades_today=smart_money_trades,
+                execution_tf=tf,
+            )
+            if sm_evt:
+                events.append(sm_evt)
         if tf in BASE_MOMENTUM_ENABLED_TFS:
             events.extend(tracker.update(zone, close, atr_val, candle_ts=candle_ts, rsi_raw=rsi_raw, rsi_smooth=rsi_smooth))
         htf_evt = check_htf_pullback_entry(df, tf)
@@ -2219,7 +2261,8 @@ class PonchBot:
 
         for evt in events:
             # Scalp signals usually only one of each type per candle
-            evt_key = f"scalp_{tf}_{evt['type']}_{evt['side']}_{candle_ts}"
+            evt_signature = evt.get("event_id", candle_ts)
+            evt_key = f"scalp_{tf}_{evt['type']}_{evt['side']}_{evt_signature}"
 
             if evt_key in self.sent_signals:
                 continue
@@ -2257,10 +2300,15 @@ class PonchBot:
                 print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Prepare [{tf}] {evt['side']}")
 
             elif evt["type"] == "CONFIRMED":
-                # --- Calculate Signal Strength Score ---
-                score, reasons = calculate_signal_score(
-                    evt, df, self.levels, self.macro_trend, self.last_oi, self.last_liqs
-                )
+                trigger_label = str(evt.get("trigger_label") or evt.get("trigger") or "Momentum Exit")
+                if str(evt.get("strategy", "")).upper() == "SMART_MONEY_LIQUIDITY":
+                    score = max(8, len(evt.get("reasons", [])) + 3)
+                    reasons = list(evt.get("reasons", []))
+                else:
+                    # --- Calculate Signal Strength Score ---
+                    score, reasons = calculate_signal_score(
+                        evt, df, self.levels, self.macro_trend, self.last_oi, self.last_liqs
+                    )
                 side = evt["side"]
                 if side in divergence_sides:
                     score += 1
@@ -2470,8 +2518,11 @@ class PonchBot:
                         self.scalp_countertrend_hits[side] = side_hits
 
                 # Dynamic size: scale base size by score, min 0.5%
-                dyn_base = max(0.5, (score / 10) * profile["size"]) if score else profile["size"]
-                dyn_size = round(max(0.5, dyn_base * size_mult), 1)
+                if str(evt.get("strategy", "")).upper() == "SMART_MONEY_LIQUIDITY":
+                    dyn_size = float(evt.get("size", SMART_MONEY_RISK_PCT))
+                else:
+                    dyn_base = max(0.5, (score / 10) * profile["size"]) if score else profile["size"]
+                    dyn_size = round(max(0.5, dyn_base * size_mult), 1)
                 tp_liq = self._estimate_tp_liquidity(evt["side"], evt["entry"], evt["tp1"], evt["tp2"], evt["tp3"])
                 signal_id = new_signal_id()
 
@@ -2493,11 +2544,13 @@ class PonchBot:
                         tp_liq_prob=tp_liq["prob"] if tp_liq else None,
                         tp_liq_usd=tp_liq["size_usd"] if tp_liq else None,
                         tp_liq_target=tp_liq["target"] if tp_liq else None,
+                        trigger_label=trigger_label,
                         chat_id=PRIVATE_CHAT_ID
                     )
                 msg_id = resp.get("result", {}).get("message_id") if resp else None
                 self._save_state()
-                print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Scalp Confirmed [{tf}] {evt['side']} @ {evt['entry']:,.2f}")
+                sent_label = "Smart Money Confirmed" if str(evt.get("strategy", "")).upper() == "SMART_MONEY_LIQUIDITY" else "Scalp Confirmed"
+                print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} {sent_label} [{tf}] {evt['side']} @ {evt['entry']:,.2f}")
 
                 # Log signal for performance tracking
                 self.tracker.log_signal(
@@ -2516,6 +2569,8 @@ class PonchBot:
                         "signal_id": signal_id,
                         "score": score,
                         "trend": self.macro_trend,
+                        "trigger": trigger_label,
+                        "strategy": evt.get("strategy", "MOMENTUM"),
                         "reasons": reasons,
                         "size": dyn_size,
                         "tp_liq_prob": tp_liq["prob"] if tp_liq else None,

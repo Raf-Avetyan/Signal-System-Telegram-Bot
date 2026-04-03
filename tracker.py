@@ -201,9 +201,10 @@ class SignalTracker:
                         events.append({"type": "TP3", "sig": sig})
                         continue
 
-            # 2. Check Entry Return (Breakeven after TP1)
-            # If TP1 hit, and we touch entry again, close as ENTRY_CLOSE.
-            if sig.get("tp1_hit") and sig["status"] != "ENTRY_CLOSE":
+            # 2. Check Entry Return (Breakeven after TP1 only).
+            # Once TP2 is hit the stop is locked at TP1, so reversal should not
+            # be treated as a breakeven exit anymore.
+            if sig.get("tp1_hit") and not sig.get("tp2_hit") and sig["status"] != "ENTRY_CLOSE":
                 entry_hit = False
                 if is_long and p_low <= sig["entry"]:
                     entry_hit = True
@@ -513,6 +514,25 @@ class SignalTracker:
             counts["by_tf"][tf] = counts["by_tf"].get(tf, 0) + 1
 
         return counts
+
+    def count_signals_for_day(self, strategy=None, signal_type=None, now_utc=None):
+        """Count signals logged since current UTC midnight with optional filters."""
+        now_utc = now_utc.astimezone(timezone.utc) if now_utc else datetime.now(timezone.utc)
+        day_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        count = 0
+
+        for sig in self.signals:
+            logged_at = self._parse_iso_utc(sig.get("logged_at"))
+            if not logged_at or logged_at < day_start or logged_at > now_utc:
+                continue
+            if signal_type and str(sig.get("type", "")).upper() != str(signal_type).upper():
+                continue
+            meta = sig.get("meta") or {}
+            if strategy and str(meta.get("strategy", "")) != str(strategy):
+                continue
+            count += 1
+
+        return count
 
     def get_recent_signal_health(self, signal_type="SCALP", limit=25):
         """Return recent closed performance for adaptive scalp tuning."""

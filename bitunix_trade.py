@@ -153,24 +153,32 @@ class BitunixFuturesClient:
         qty: float,
         order_type: str = "MARKET",
         price: Optional[float] = None,
-        reduce_only: bool = False,
+        reduce_only: Optional[bool] = None,
         client_id: Optional[str] = None,
-        effect: str = "GTC",
+        effect: Optional[str] = "GTC",
+        trade_side: Optional[str] = None,
+        position_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "symbol": symbol,
             "qty": self._fmt_num(qty),
             "side": side,
             "orderType": order_type,
-            "effect": effect,
-            "reduceOnly": bool(reduce_only),
         }
+        if reduce_only is not None:
+            payload["reduceOnly"] = bool(reduce_only)
         if client_id:
             payload["clientId"] = client_id
+        if trade_side:
+            payload["tradeSide"] = str(trade_side).upper()
+        if position_id:
+            payload["positionId"] = str(position_id)
         if order_type == "LIMIT":
             if price is None:
                 raise BitunixTradeError("Limit order requires price.")
             payload["price"] = self._fmt_num(price)
+            if effect:
+                payload["effect"] = effect
         return self._request("POST", "/api/v1/futures/trade/place_order", payload=payload)
 
     def get_pending_positions(self, symbol: Optional[str] = None) -> Dict[str, Any]:
@@ -263,6 +271,9 @@ class TradeExecutor:
 
         bal = self._safe_get_balance()
         info["balance_available"] = float(bal.get("available", 0) or 0)
+        raw = bal.get("raw") or {}
+        info["position_mode"] = str(raw.get("positionMode") or BITUNIX_POSITION_MODE or "UNKNOWN").strip().upper()
+        info["leverage"] = int(raw.get("leverage") or BITUNIX_DEFAULT_LEVERAGE or 0)
         if bal.get("error"):
             info["errors"].append(f"balance: {bal.get('error')}")
             if bal.get("endpoint"):
@@ -303,6 +314,8 @@ class TradeExecutor:
         plan["exchange_open_positions"] = exchange_open_positions
         if plan["balance_available"] <= 0:
             return ExecutionResult(self.mode, False, "No available margin balance.", plan)
+        if plan["qty"] <= 0 or plan["notional"] <= 0:
+            return ExecutionResult(self.mode, False, "Calculated order size is zero after balance/leverage cap.", plan)
         if self.mode == "demo":
             return ExecutionResult(self.mode, True, "Demo execution planned.", plan)
         if not self.client.is_configured():
@@ -313,58 +326,69 @@ class TradeExecutor:
         exit_side = plan["exit_side"]
         signal_id = signal.get("signal_id") or new_signal_id()
 
-        self.client.change_leverage(symbol, int(plan["leverage"]))
-        entry_order = self.client.place_order(
-            symbol=symbol,
-            side=entry_side,
-            qty=plan["qty"],
-            order_type="MARKET",
-            reduce_only=False,
-            client_id=f"{signal_id}-entry",
-        )
-
-        position = self._find_position(symbol, signal["side"])
-        if not position:
-            raise BitunixTradeError(f"Entry accepted but no pending {signal['side']} position was returned.")
-
-        position_id = str(position.get("positionId") or "")
-        if not position_id:
-            raise BitunixTradeError("Bitunix positionId missing after entry.")
-
-        tp_orders = []
-        for idx, (qty_part, tp_price) in enumerate(zip(plan["tp_qtys"], [signal["tp1"], signal["tp2"], signal["tp3"]]), start=1):
-            if qty_part <= 0:
-                continue
-            tp_res = self.client.place_order(
+        try:
+            self.client.change_leverage(symbol, int(plan["leverage"]))
+            entry_order = self.client.place_order(
                 symbol=symbol,
-                side=exit_side,
-                qty=qty_part,
-                order_type="LIMIT",
-                price=float(tp_price),
-                reduce_only=True,
-                client_id=f"{signal_id}-tp{idx}",
+                side=entry_side,
+                qty=plan["qty"],
+                order_type="MARKET",
+                reduce_only=None,
+                client_id=f"{signal_id}-entry",
+                trade_side=plan.get("entry_trade_side"),
             )
-            tp_orders.append(tp_res.get("data", {}))
 
-        sl_res = self.client.place_position_tpsl(symbol, position_id, None, float(signal["sl"]))
-        sl_order = sl_res.get("data", {})
-        signal["execution"] = {
-            "signal_id": signal_id,
-            "mode": self.mode,
-            "symbol": symbol,
-            "side": signal["side"],
-            "position_id": position_id,
-            "entry_order": entry_order.get("data", {}),
-            "tp_orders": tp_orders,
-            "sl_order": sl_order,
-            "qty": plan["qty"],
-            "tp_qtys": plan["tp_qtys"],
-            "leverage": plan["leverage"],
-            "risk_budget_usd": plan["risk_budget_usd"],
-            "balance_available": plan["balance_available"],
-            "active": True,
-        }
-        return ExecutionResult(self.mode, True, "Live Bitunix execution placed.", signal["execution"])
+            position = self._find_position(symbol, signal["side"])
+            if not position:
+                raise BitunixTradeError(f"Entry accepted but no pending {signal['side']} position was returned.")
+
+            position_id = str(position.get("positionId") or "")
+            if not position_id:
+                raise BitunixTradeError("Bitunix positionId missing after entry.")
+
+            tp_orders = []
+            for idx, (qty_part, tp_price) in enumerate(zip(plan["tp_qtys"], [signal["tp1"], signal["tp2"], signal["tp3"]]), start=1):
+                if qty_part <= 0:
+                    continue
+                tp_res = self.client.place_order(
+                    symbol=symbol,
+                    side=exit_side,
+                    qty=qty_part,
+                    order_type="LIMIT",
+                    price=float(tp_price),
+                    reduce_only=plan.get("exit_reduce_only"),
+                    client_id=f"{signal_id}-tp{idx}",
+                    trade_side=plan.get("exit_trade_side"),
+                    position_id=position_id if plan.get("exit_trade_side") else None,
+                )
+                tp_orders.append(tp_res.get("data", {}))
+
+            sl_res = self.client.place_position_tpsl(symbol, position_id, None, float(signal["sl"]))
+            sl_order = sl_res.get("data", {})
+            signal["execution"] = {
+                "signal_id": signal_id,
+                "mode": self.mode,
+                "symbol": symbol,
+                "side": signal["side"],
+                "position_id": position_id,
+                "entry_order": entry_order.get("data", {}),
+                "tp_orders": tp_orders,
+                "sl_order": sl_order,
+                "qty": plan["qty"],
+                "tp_qtys": plan["tp_qtys"],
+                "leverage": plan["leverage"],
+                "risk_budget_usd": plan["risk_budget_usd"],
+                "balance_available": plan["balance_available"],
+                "position_mode": plan.get("position_mode"),
+                "risk_qty": plan.get("risk_qty"),
+                "affordable_qty": plan.get("affordable_qty"),
+                "affordable_notional": plan.get("affordable_notional"),
+                "active": True,
+            }
+            return ExecutionResult(self.mode, True, "Live Bitunix execution placed.", signal["execution"])
+        except BitunixTradeError as e:
+            setattr(e, "plan", plan)
+            raise
 
     def sync_outcome(self, signal: Dict[str, Any], event_type: str) -> ExecutionResult:
         self._refresh_state()
@@ -413,12 +437,28 @@ class TradeExecutor:
 
         balance_data = self._safe_get_balance()
         balance_available = float(balance_data.get("available", 0) or 0)
+        raw_account = balance_data.get("raw") or {}
+        position_mode = str(raw_account.get("positionMode") or BITUNIX_POSITION_MODE or "ONE_WAY").strip().upper()
+        if position_mode not in {"ONE_WAY", "HEDGE"}:
+            position_mode = str(BITUNIX_POSITION_MODE or "ONE_WAY").strip().upper()
+        leverage = int(raw_account.get("leverage") or BITUNIX_DEFAULT_LEVERAGE or 1)
         risk_from_balance = balance_available * BITUNIX_RISK_CAP_PCT
         risk_budget = min(BITUNIX_MAX_RISK_USD, risk_from_balance) if balance_available > 0 else 0.0
-        qty = (risk_budget / risk_per_unit) if risk_budget > 0 else 0.0
-        if qty > 0 and balance_available >= BITUNIX_MIN_NOTIONAL_USD and qty * entry < BITUNIX_MIN_NOTIONAL_USD:
-            qty = BITUNIX_MIN_NOTIONAL_USD / entry
+        risk_qty = (risk_budget / risk_per_unit) if risk_budget > 0 else 0.0
+        affordable_notional = max(0.0, balance_available * leverage * 0.98)
+        affordable_qty = (affordable_notional / entry) if entry > 0 else 0.0
+        qty = min(risk_qty, affordable_qty) if affordable_qty > 0 else 0.0
+        if (
+            qty > 0
+            and balance_available >= BITUNIX_MIN_NOTIONAL_USD
+            and affordable_notional >= BITUNIX_MIN_NOTIONAL_USD
+            and qty * entry < BITUNIX_MIN_NOTIONAL_USD
+        ):
+            qty = min(BITUNIX_MIN_NOTIONAL_USD / entry, affordable_qty)
         tp_qtys = self._split_qty(qty)
+        is_hedge = position_mode == "HEDGE"
+        entry_side = "BUY" if signal["side"] == "LONG" else "SELL"
+        exit_side = entry_side if is_hedge else ("SELL" if signal["side"] == "LONG" else "BUY")
 
         return {
             "symbol": SYMBOL,
@@ -429,14 +469,21 @@ class TradeExecutor:
             "tp1": float(signal["tp1"]),
             "tp2": float(signal["tp2"]),
             "tp3": float(signal["tp3"]),
-            "entry_side": "BUY" if signal["side"] == "LONG" else "SELL",
-            "exit_side": "SELL" if signal["side"] == "LONG" else "BUY",
+            "entry_side": entry_side,
+            "entry_trade_side": "OPEN" if is_hedge else None,
+            "exit_side": exit_side,
+            "exit_trade_side": "CLOSE" if is_hedge else None,
+            "exit_reduce_only": None if is_hedge else True,
             "qty": qty,
             "tp_qtys": tp_qtys,
-            "leverage": BITUNIX_DEFAULT_LEVERAGE,
+            "leverage": leverage,
             "risk_budget_usd": risk_budget,
             "risk_cap_pct": BITUNIX_RISK_CAP_PCT,
+            "risk_qty": risk_qty,
+            "affordable_qty": affordable_qty,
+            "affordable_notional": affordable_notional,
             "balance_available": balance_available,
+            "position_mode": position_mode,
             "notional": qty * entry,
         }
 

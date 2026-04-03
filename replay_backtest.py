@@ -41,6 +41,7 @@ from config import (
     SCALP_MAX_OPEN_TOTAL,
     SCALP_MAX_OPEN_PER_SIDE,
     SCALP_MAX_OPEN_PER_TF,
+    SMART_MONEY_EXECUTION_TFS,
     SESSION_SCALP_MODE,
     SIGNAL_TIMEFRAMES,
     SYMBOL,
@@ -52,6 +53,7 @@ from config import (
 from data import INTERVAL_MAP, OKX_BASE, fetch_klines
 from momentum import ScalpTracker, calculate_momentum, classify_momentum_zone, check_htf_pullback_entry, check_one_h_reclaim_entry
 from scoring import calculate_signal_score
+from smart_money import detect_smart_money_entry
 
 KLINES_URL = f"{OKX_BASE}/api/v5/market/candles"
 HISTORY_KLINES_URL = f"{OKX_BASE}/api/v5/market/history-candles"
@@ -79,6 +81,7 @@ def _resolve_trade_event(tr: dict, high: float, low: float, candle_ts: str):
                 tr["tp1_hit"] = True
             if not tr["tp2_hit"] and tp_price >= tr["tp2"]:
                 tr["tp2_hit"] = True
+                tr["sl"] = max(float(tr.get("sl", tr["entry"])), float(tr.get("tp1", tr["entry"])))
             if not tr["tp3_hit"] and tp_price >= tr["tp3"]:
                 tr["tp3_hit"] = True
                 return "TP3"
@@ -87,12 +90,13 @@ def _resolve_trade_event(tr: dict, high: float, low: float, candle_ts: str):
                 tr["tp1_hit"] = True
             if not tr["tp2_hit"] and tp_price <= tr["tp2"]:
                 tr["tp2_hit"] = True
+                tr["sl"] = min(float(tr.get("sl", tr["entry"])), float(tr.get("tp1", tr["entry"])))
             if not tr["tp3_hit"] and tp_price <= tr["tp3"]:
                 tr["tp3_hit"] = True
                 return "TP3"
 
-    # Breakeven close after TP1
-    if tr["tp1_hit"]:
+    # Breakeven close after TP1 only; after TP2 the stop is locked at TP1.
+    if tr["tp1_hit"] and not tr["tp2_hit"]:
         entry_hit = (low <= tr["entry"]) if is_long else (high >= tr["entry"])
         if entry_hit:
             return "ENTRY_CLOSE"
@@ -331,6 +335,52 @@ def _build_proxy_levels(df: pd.DataFrame, i: int, idx):
     }
 
 
+def _build_proxy_levels_from_hist(hist: pd.DataFrame, idx):
+    if hist is None or hist.empty:
+        return {}
+
+    day_start = idx.floor("D")
+    curr_day = hist[hist.index >= day_start]
+    prev_day = hist[(hist.index >= day_start - pd.Timedelta(days=1)) & (hist.index < day_start)]
+    prev_week = hist[(hist.index >= day_start - pd.Timedelta(days=7)) & (hist.index < day_start)]
+    prev_month = hist[(hist.index >= day_start - pd.Timedelta(days=30)) & (hist.index < day_start)]
+
+    do_val = float(curr_day.iloc[0]["Open"]) if not curr_day.empty else float(hist.iloc[-1]["Close"])
+    pdh = float(prev_day["High"].max()) if not prev_day.empty else float(hist["High"].tail(24).max())
+    pdl = float(prev_day["Low"].min()) if not prev_day.empty else float(hist["Low"].tail(24).min())
+    pwh = float(prev_week["High"].max()) if not prev_week.empty else pdh
+    pwl = float(prev_week["Low"].min()) if not prev_week.empty else pdl
+    pmh = float(prev_month["High"].max()) if not prev_month.empty else pwh
+    pml = float(prev_month["Low"].min()) if not prev_month.empty else pwl
+
+    return {
+        "DO": do_val,
+        "PDH": pdh,
+        "PDL": pdl,
+        "PWH": pwh,
+        "PWL": pwl,
+        "PMH": pmh,
+        "PML": pml,
+        "Pump": pdh,
+        "Dump": pdl,
+        "PumpMax": pwh,
+        "DumpMax": pwl,
+    }
+
+
+def _bars_for_days(tf: str, days: int, extra: int = 120):
+    candles_per_day = {
+        "1m": 1440,
+        "5m": 288,
+        "15m": 96,
+        "1h": 24,
+        "4h": 6,
+        "1d": 1,
+        "1w": 1 / 7,
+    }.get(tf, 24)
+    return max(300, int(candles_per_day * days + extra))
+
+
 def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_map: dict, relaxed: bool = False):
     candles_per_day = {"5m": 288, "15m": 96, "1h": 24, "4h": 6}.get(tf, 24)
     bars_needed = max(300, candles_per_day * days + 50)
@@ -561,18 +611,217 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_
     }
 
 
+def simulate_smart_money_timeframe(tf: str, days: int):
+    required_tfs = ["5m", "15m", "1h", "4h"]
+    history = {}
+    for req_tf in required_tfs:
+        bars_needed = _bars_for_days(req_tf, days, extra=180)
+        history[req_tf] = fetch_klines_history(req_tf, bars_needed)
+
+    entry_df = history.get(tf)
+    if entry_df is None or entry_df.empty or len(entry_df) < 120:
+        return {
+            "tf": tf,
+            "trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "breakeven": 0,
+            "win_rate": 0.0,
+            "hit_rate": 0.0,
+            "avg_r": 0.0,
+            "covered_days": 0.0,
+        }
+
+    covered_days = (entry_df.index.max() - entry_df.index.min()).total_seconds() / 86400.0
+    active = []
+    results = []
+    seen_event_ids = set()
+    daily_counts = {}
+    cutoff_dt = datetime.now(timezone.utc) - timedelta(days=days)
+
+    for idx, row in entry_df.iterrows():
+        high = float(row["High"])
+        low = float(row["Low"])
+        candle_ts = idx.strftime("%Y-%m-%d %H:%M")
+
+        if idx.to_pydatetime() >= cutoff_dt:
+            slice_data = {}
+            for req_tf, hist_df in history.items():
+                if hist_df is None or hist_df.empty:
+                    continue
+                sliced = hist_df.loc[:idx]
+                if not sliced.empty:
+                    slice_data[req_tf] = sliced
+
+            level_hist = slice_data.get("5m")
+            if level_hist is None or level_hist.empty:
+                level_hist = slice_data.get(tf)
+            levels_proxy = _build_proxy_levels_from_hist(level_hist, idx) if level_hist is not None else {}
+            day_key = idx.strftime("%Y-%m-%d")
+            trades_today = int(daily_counts.get(day_key, 0))
+            evt = detect_smart_money_entry(
+                slice_data,
+                levels_proxy,
+                idx.to_pydatetime(),
+                trades_today=trades_today,
+                execution_tf=tf,
+            )
+            if evt:
+                event_id = evt.get("event_id", f"{tf}_{evt['side']}_{candle_ts}")
+                if event_id not in seen_event_ids:
+                    risk = abs(float(evt["entry"]) - float(evt["sl"]))
+                    if risk > 0:
+                        active.append(
+                            {
+                                "side": evt["side"],
+                                "entry": float(evt["entry"]),
+                                "sl": float(evt["sl"]),
+                                "tp1": float(evt["tp1"]),
+                                "tp2": float(evt["tp2"]),
+                                "tp3": float(evt["tp3"]),
+                                "risk": risk,
+                                "tp1_hit": False,
+                                "tp2_hit": False,
+                                "tp3_hit": False,
+                                "tf": tf,
+                                "entry_candle_ts": candle_ts,
+                                "event_id": event_id,
+                            }
+                        )
+                        seen_event_ids.add(event_id)
+                        daily_counts[day_key] = trades_today + 1
+
+        survivors = []
+        for tr in active:
+            evt_type = _resolve_trade_event(tr, high, low, candle_ts)
+            if evt_type is None:
+                survivors.append(tr)
+                continue
+
+            if evt_type == "TP3":
+                results.append(abs(tr["tp3"] - tr["entry"]) / tr["risk"])
+            elif evt_type == "PROFIT_SL":
+                results.append(max(0.2, abs(tr["tp1"] - tr["entry"]) / tr["risk"] * 0.6))
+            elif evt_type == "SL":
+                results.append(-1.0)
+            elif evt_type == "ENTRY_CLOSE":
+                results.append(0.0)
+            else:
+                survivors.append(tr)
+
+        active = survivors
+
+    for _ in active:
+        results.append(0.0)
+
+    wins = sum(1 for r in results if r > 0)
+    losses = sum(1 for r in results if r < 0)
+    breakeven = sum(1 for r in results if r == 0)
+    avg_r = sum(results) / len(results) if results else 0.0
+    closed = wins + losses
+    win_rate = (wins / closed * 100.0) if closed else 0.0
+    hit_rate = (wins / len(results) * 100.0) if results else 0.0
+
+    return {
+        "tf": tf,
+        "trades": len(results),
+        "wins": wins,
+        "losses": losses,
+        "breakeven": breakeven,
+        "win_rate": win_rate,
+        "hit_rate": hit_rate,
+        "avg_r": avg_r,
+        "covered_days": covered_days,
+    }
+
+
+def _merge_backtest_rows(base_row: dict, extra_row: dict):
+    if not base_row:
+        return dict(extra_row)
+    if not extra_row:
+        return dict(base_row)
+
+    trades = int(base_row.get("trades", 0)) + int(extra_row.get("trades", 0))
+    wins = int(base_row.get("wins", 0)) + int(extra_row.get("wins", 0))
+    losses = int(base_row.get("losses", 0)) + int(extra_row.get("losses", 0))
+    breakeven = int(base_row.get("breakeven", 0)) + int(extra_row.get("breakeven", 0))
+    covered_days = max(float(base_row.get("covered_days", 0.0)), float(extra_row.get("covered_days", 0.0)))
+    avg_r = 0.0
+    if trades:
+        avg_r = (
+            float(base_row.get("avg_r", 0.0)) * int(base_row.get("trades", 0))
+            + float(extra_row.get("avg_r", 0.0)) * int(extra_row.get("trades", 0))
+        ) / trades
+    closed = wins + losses
+    win_rate = (wins / closed * 100.0) if closed else 0.0
+    hit_rate = (wins / trades * 100.0) if trades else 0.0
+
+    return {
+        "tf": base_row.get("tf", extra_row.get("tf")),
+        "trades": trades,
+        "wins": wins,
+        "losses": losses,
+        "breakeven": breakeven,
+        "win_rate": win_rate,
+        "hit_rate": hit_rate,
+        "avg_r": avg_r,
+        "covered_days": covered_days,
+    }
+
+
+def _print_replay_row(row: dict):
+    print(
+        f"{row['tf']:>4} | trades={row['trades']:>4} wins={row['wins']:>4} "
+        f"losses={row['losses']:>4} be={row['breakeven']:>4} "
+        f"wr={row['win_rate']:>5.1f}% hit={row['hit_rate']:>5.1f}% "
+        f"avgR={row['avg_r']:+.2f} cov={row['covered_days']:.1f}d"
+    )
+
+
+def _print_replay_total(rows: list[dict]):
+    total_trades = sum(r["trades"] for r in rows)
+    total_wins = sum(r["wins"] for r in rows)
+    total_losses = sum(r["losses"] for r in rows)
+    total_avg_r = (sum(r["avg_r"] * r["trades"] for r in rows) / total_trades) if total_trades else 0.0
+    total_closed = total_wins + total_losses
+    total_win_rate = (total_wins / total_closed * 100.0) if total_closed else 0.0
+    total_hit_rate = (total_wins / total_trades * 100.0) if total_trades else 0.0
+    print(f"TOTAL | trades={total_trades} wr={total_win_rate:.1f}% hit={total_hit_rate:.1f}% weighted_avgR={total_avg_r:+.2f}")
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Replay backtest for scalp logic")
+    parser = argparse.ArgumentParser(description="Replay backtest for scalp logic and Smart Money Liquidity")
     parser.add_argument("--days", type=int, default=30, help="Lookback period in days (30-180)")
     parser.add_argument("--relaxed", action="store_true", help="Force relaxed scalp filters")
     parser.add_argument("--strict", action="store_true", help="Force strict scalp filters")
+    parser.add_argument("--smart-money-only", action="store_true", help="Replay only Smart Money Liquidity strategy")
+    parser.add_argument(
+        "--with-smart-money",
+        "--smart-money-combined",
+        action="store_true",
+        help="Replay main strategy combined with Smart Money Liquidity",
+    )
     args = parser.parse_args()
     if args.days < 30 or args.days > 180:
         parser.error("--days must be between 30 and 180")
     if args.relaxed and args.strict:
         parser.error("Use only one of --relaxed or --strict")
+    if args.smart_money_only and args.with_smart_money:
+        parser.error("Use either --smart-money-only or --with-smart-money, not both")
 
     relaxed_mode = bool(args.relaxed or (SCALP_RELAXED_FILTERS and not args.strict))
+
+    if args.smart_money_only:
+        print(f"Replay backtest for {SYMBOL} | days={args.days} | mode=SMART_MONEY_ONLY")
+        print("-" * 64)
+        all_rows = []
+        for tf in SMART_MONEY_EXECUTION_TFS:
+            row = simulate_smart_money_timeframe(tf, args.days)
+            all_rows.append(row)
+            _print_replay_row(row)
+        print("-" * 64)
+        _print_replay_total(all_rows)
+        return
 
     macro_series = _build_macro_trend_series(args.days)
     trend_map = {
@@ -583,27 +832,23 @@ def main():
         "1w": _build_trend_series("1w", args.days),
     }
     mode_label = "RELAXED" if relaxed_mode else "STRICT"
+    if args.with_smart_money:
+        mode_label = f"{mode_label}+SMART_MONEY"
     print(f"Replay backtest for {SYMBOL} | days={args.days} | mode={mode_label}")
     print("-" * 64)
+    sm_rows_by_tf = {}
+    if args.with_smart_money:
+        for tf in SMART_MONEY_EXECUTION_TFS:
+            sm_rows_by_tf[tf] = simulate_smart_money_timeframe(tf, args.days)
     all_rows = []
     for tf in SIGNAL_TIMEFRAMES:
         row = simulate_timeframe(tf, args.days, macro_series, trend_map, relaxed=relaxed_mode)
+        if args.with_smart_money and tf in sm_rows_by_tf:
+            row = _merge_backtest_rows(row, sm_rows_by_tf[tf])
         all_rows.append(row)
-        print(
-            f"{tf:>4} | trades={row['trades']:>4} wins={row['wins']:>4} "
-            f"losses={row['losses']:>4} be={row['breakeven']:>4} "
-            f"wr={row['win_rate']:>5.1f}% hit={row['hit_rate']:>5.1f}% "
-            f"avgR={row['avg_r']:+.2f} cov={row['covered_days']:.1f}d"
-        )
+        _print_replay_row(row)
     print("-" * 64)
-    total_trades = sum(r["trades"] for r in all_rows)
-    total_wins = sum(r["wins"] for r in all_rows)
-    total_losses = sum(r["losses"] for r in all_rows)
-    total_avg_r = (sum(r["avg_r"] * r["trades"] for r in all_rows) / total_trades) if total_trades else 0.0
-    total_closed = total_wins + total_losses
-    total_win_rate = (total_wins / total_closed * 100.0) if total_closed else 0.0
-    total_hit_rate = (total_wins / total_trades * 100.0) if total_trades else 0.0
-    print(f"TOTAL | trades={total_trades} wr={total_win_rate:.1f}% hit={total_hit_rate:.1f}% weighted_avgR={total_avg_r:+.2f}")
+    _print_replay_total(all_rows)
 
 
 if __name__ == "__main__":
