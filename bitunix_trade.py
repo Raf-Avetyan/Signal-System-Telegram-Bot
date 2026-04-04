@@ -48,20 +48,9 @@ class ExecutionResult:
     payload: Dict[str, Any]
 
 
-def _get_parameter_type(key: str) -> int:
-    if key and key[0].isdigit():
-        return 1
-    if key and key[0].islower():
-        return 2
-    return 3
-
-
-def _str_ascii_sum(s: str) -> int:
-    return sum(ord(c) for c in s)
-
-
 def _sorted_keys(d: Dict[str, Any]) -> List[str]:
-    return sorted(d.keys(), key=lambda k: (_get_parameter_type(k), _str_ascii_sum(k)))
+    # Bitunix docs require query params sorted in ascending ASCII order by key.
+    return sorted(d.keys())
 
 
 def _sha256_hex(value: str) -> str:
@@ -609,7 +598,14 @@ class TradeExecutor:
                 margin_mode = str(raw_account.get("marginMode") or margin_mode).strip().upper()
         tf_max_leverage = int(BITUNIX_LIQUIDATION_MAX_LEVERAGE_BY_TF.get(tf_name, leverage) or leverage)
         leverage = max(1, min(leverage, tf_max_leverage))
-        risk_from_balance = balance_available * BITUNIX_RISK_CAP_PCT
+        meta = signal.get("meta") or {}
+        signal_size_pct = meta.get("size", signal.get("size", 0))
+        try:
+            signal_size_pct = float(signal_size_pct or 0)
+        except Exception:
+            signal_size_pct = 0.0
+        effective_risk_cap_pct = (signal_size_pct / 100.0) if signal_size_pct > 0 else float(BITUNIX_RISK_CAP_PCT)
+        risk_from_balance = balance_available * effective_risk_cap_pct
         risk_budget = min(BITUNIX_MAX_RISK_USD, risk_from_balance) if balance_available > 0 else 0.0
         risk_qty = (risk_budget / risk_per_unit) if risk_budget > 0 else 0.0
         affordable_notional = max(0.0, balance_available * leverage * 0.98)
@@ -654,7 +650,8 @@ class TradeExecutor:
             "tp_qtys": tp_qtys,
             "leverage": leverage,
             "risk_budget_usd": risk_budget,
-            "risk_cap_pct": BITUNIX_RISK_CAP_PCT,
+            "risk_cap_pct": effective_risk_cap_pct,
+            "signal_size_pct": signal_size_pct,
             "risk_qty": risk_qty,
             "affordable_qty": affordable_qty,
             "affordable_notional": affordable_notional,

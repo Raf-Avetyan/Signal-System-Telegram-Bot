@@ -52,7 +52,8 @@ from config import (
     LIQ_POOL_AGG_WINDOW_PCT_BY_TF,
     LIQ_POOL_NO_MOVE_RANGE_PCT_1H, LIQ_POOL_EXPANSION_PRICE_MOVE_PCT_1H,
     LIQ_POOL_EXPANSION_VOLUME_MULT, LIQ_POOL_EXPANSION_BOOK_MULT, LIQ_POOL_EXPANSION_COOLDOWN,
-    SMART_MONEY_ENABLED, SMART_MONEY_EXECUTION_TFS, SMART_MONEY_RISK_PCT
+    SMART_MONEY_ENABLED, SMART_MONEY_EXECUTION_TFS, SMART_MONEY_RISK_PCT,
+    MIN_SIGNAL_SIZE_PCT
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
@@ -1235,7 +1236,7 @@ class PonchBot:
                         tp3_c = latest_price - ref_atr * tp3_m
 
                     if ce["type"] == "STRONG":
-                        strong_size = round(min(ce["points"] * 0.3, 5.0), 1)
+                        strong_size = round(max(MIN_SIGNAL_SIZE_PCT, min(ce["points"] * 0.3, 5.0)), 1)
                         tp_liq = self._estimate_tp_liquidity(side, latest_price, tp1_c, tp2_c, tp3_c)
                         signal_id = new_signal_id()
                         resp = tg.send_strong(
@@ -1271,7 +1272,7 @@ class PonchBot:
                         print(f"  [CONFLUENCE] STRONG {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
 
                     elif ce["type"] == "EXTREME":
-                        extreme_size = round(min(ce["points"] * 0.3, 5.0), 1)
+                        extreme_size = round(max(MIN_SIGNAL_SIZE_PCT, min(ce["points"] * 0.3, 5.0)), 1)
                         tp_liq = self._estimate_tp_liquidity(side, latest_price, tp1_c, tp2_c, tp3_c)
                         signal_id = new_signal_id()
                         resp = tg.send_extreme(
@@ -1974,6 +1975,7 @@ class PonchBot:
             print(
                 f"  [TRADE] Balance={float(details.get('balance_available', 0) or 0):.2f} "
                 f"risk_budget={float(details.get('risk_budget_usd', 0) or 0):.2f} "
+                f"signal_size={float(details.get('signal_size_pct', 0) or 0):.2f}% "
                 f"qty={float(details.get('qty', 0) or 0):.6f} "
                 f"notional={float(details.get('notional', 0) or 0):.4f}"
             )
@@ -2378,6 +2380,11 @@ class PonchBot:
                     print(f"  [SCALP] Blocked {tf} {side}: {divergence_note}")
                     continue
 
+                impulse_blocked, impulse_note = self._is_unstable_impulse(self.latest_data or {}, side)
+                if impulse_blocked:
+                    print(f"  [SCALP] Blocked {tf} {side}: {impulse_note}")
+                    continue
+
                 # Hard local-trend reversal guard (hierarchical source):
                 # do not SHORT in bullish local trend, do not LONG in bearish local trend.
                 local_side = self._trend_side(local_trend)
@@ -2576,12 +2583,12 @@ class PonchBot:
                         side_hits.append(current_time)
                         self.scalp_countertrend_hits[side] = side_hits
 
-                # Dynamic size: scale base size by score, min 0.5%
+                # Dynamic size: scale base size by score, with a global minimum size floor.
                 if str(evt.get("strategy", "")).upper() == "SMART_MONEY_LIQUIDITY":
-                    dyn_size = float(evt.get("size", SMART_MONEY_RISK_PCT))
+                    dyn_size = max(float(MIN_SIGNAL_SIZE_PCT), float(evt.get("size", SMART_MONEY_RISK_PCT)))
                 else:
-                    dyn_base = max(0.5, (score / 10) * profile["size"]) if score else profile["size"]
-                    dyn_size = round(max(0.5, dyn_base * size_mult), 1)
+                    dyn_base = max(float(MIN_SIGNAL_SIZE_PCT), (score / 10) * profile["size"]) if score else max(float(MIN_SIGNAL_SIZE_PCT), profile["size"])
+                    dyn_size = round(max(float(MIN_SIGNAL_SIZE_PCT), dyn_base * size_mult), 1)
                 tp_liq = self._estimate_tp_liquidity(evt["side"], evt["entry"], evt["tp1"], evt["tp2"], evt["tp3"])
                 signal_id = new_signal_id()
 

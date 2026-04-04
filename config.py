@@ -1,10 +1,10 @@
-# ─── Ponch Signal System — Config ───────────────────────────────
+﻿# в”Ђв”Ђв”Ђ Ponch Signal System вЂ” Config в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ─── TELEGRAM ─────────────────────────────────
+# в”Ђв”Ђв”Ђ TELEGRAM в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 BOT_TOKEN      = os.getenv("BOT_TOKEN", "")
 PRIVATE_CHAT_ID = os.getenv("PRIVATE_CHAT_ID", "")
 CHAT_ID         = PRIVATE_CHAT_ID
@@ -26,10 +26,10 @@ BITUNIX_MIN_NOTIONAL_USD = float(os.getenv("BITUNIX_MIN_NOTIONAL_USD", "25"))
 BITUNIX_TP_SPLITS = (0.30, 0.40, 0.30)
 BITUNIX_TPSL_TRIGGER_TYPE = os.getenv("BITUNIX_TPSL_TRIGGER_TYPE", "MARK_PRICE").strip().upper()
 
-# ─── SYMBOL ───────────────────────────────────
+# в”Ђв”Ђв”Ђ SYMBOL в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 SYMBOL = "BTCUSDT"
 
-# ─── TIMEFRAMES ───────────────────────────────
+# в”Ђв”Ђв”Ђ TIMEFRAMES в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 # Signal timeframes for momentum system
 SIGNAL_TIMEFRAMES = ["5m", "15m", "1h", "4h"]
 # Data timeframe for levels/channels
@@ -46,21 +46,21 @@ KLINE_LIMITS = {
     "1M":  12,
 }
 
-# ─── EMA CHANNELS ─────────────────────────────
+# в”Ђв”Ђв”Ђ EMA CHANNELS в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 EMA1_LEN = 9       # Inner channel EMA
 EMA2_LEN = 21      # Mid channel EMA
 EMA3_LEN = 55      # Outer channel EMA
 ATR_LEN  = 14      # ATR period
 
 # Channel multipliers
-MULT_INNER = 1.0   # Inner band = EMA9 ± ATR × 1.0
-MULT_MID   = 2.5   # Mid band   = EMA21 ± ATR × 2.5
-MULT_OUTER = 5.0   # Outer band = EMA55 ± ATR × 5.0
+MULT_INNER = 1.0   # Inner band = EMA9 В± ATR Г— 1.0
+MULT_MID   = 2.5   # Mid band   = EMA21 В± ATR Г— 2.5
+MULT_OUTER = 5.0   # Outer band = EMA55 В± ATR Г— 5.0
 
-# ─── ADR / VOLATILITY ────────────────────────
+# в”Ђв”Ђв”Ђ ADR / VOLATILITY в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 ADR_LEN = 14       # Average Daily Range lookback
 
-# ─── MOMENTUM ────────────────────────────────
+# в”Ђв”Ђв”Ђ MOMENTUM в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 MOMENTUM_RSI_LEN  = 14    # RSI length for momentum
 MOMENTUM_SMOOTH   = 3     # Smoothing EMA for momentum (Fast)
 MOMENTUM_OB       = 66    # Overbought threshold
@@ -86,7 +86,12 @@ RSI_DIVERGENCE_MAX_AGE_CANDLES_BY_TF = {
     "4h": 3,
 }
 
-# ─── SCALP PARAMETERS ────────────────────────
+# Metric rule: count breakeven exits as wins once this TP threshold was reached.
+# 1 = TP1 hit then breakeven counts as win
+# 2 = TP2 hit then breakeven counts as win
+BREAKEVEN_WIN_MIN_TP = max(1, min(3, int(os.getenv("BREAKEVEN_WIN_MIN_TP", "1"))))
+
+# в”Ђв”Ђв”Ђ SCALP PARAMETERS в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 # ATR multipliers for SL/TP calculation
 SL_ATR_MULT  = 1.3
 TP1_ATR_MULT = 0.7   # 30% allocation
@@ -97,8 +102,8 @@ TP3_ATR_MULT = 2.1   # 30% allocation
 TIMEFRAME_RISK_MULTIPLIERS = {
     "5m":  {"sl": 3.2, "tp1": 1.10, "tp2": 1.90, "tp3": 2.80},
     "15m": {"sl": 3.0, "tp1": 1.25, "tp2": 2.10, "tp3": 3.00},
-    "1h":  {"sl": 2.3, "tp1": 0.65, "tp2": 1.10, "tp3": 1.55},
-    "4h":  {"sl": 2.1, "tp1": 0.80, "tp2": 1.30, "tp3": 1.85},
+    "1h":  {"sl": 2.3, "tp1": 1.10, "tp2": 1.75, "tp3": 2.45},
+    "4h":  {"sl": 2.1, "tp1": 1.25, "tp2": 1.95, "tp3": 2.70},
 }
 
 BITUNIX_LIQUIDATION_SAFETY_ENABLED = os.getenv("BITUNIX_LIQUIDATION_SAFETY_ENABLED", "true").strip().lower() == "true"
@@ -134,11 +139,12 @@ SMART_MONEY_MAX_EXECUTION_CANDLE_RISK_RATIO_BY_TF = {
 
 # Strength & Sizing per timeframe
 TIMEFRAME_PROFILES = {
-    "5m":  {"strength": "Weak",   "emoji": "⚡️", "size": 0.5},
-    "15m": {"strength": "Medium", "emoji": "⚡️", "size": 1.0},
-    "1h":  {"strength": "Strong", "emoji": "🚀", "size": 2.0},
-    "4h":  {"strength": "Ultra",  "emoji": "💎", "size": 3.0},
+    "5m":  {"strength": "Weak",   "emoji": "вљЎпёЏ", "size": 1.0},
+    "15m": {"strength": "Medium", "emoji": "вљЎпёЏ", "size": 1.5},
+    "1h":  {"strength": "Strong", "emoji": "рџљЂ", "size": 2.0},
+    "4h":  {"strength": "Ultra",  "emoji": "рџ’Ћ", "size": 3.0},
 }
+MIN_SIGNAL_SIZE_PCT = float(os.getenv("MIN_SIGNAL_SIZE_PCT", "3.0"))
 
 # Scalp confirmation buffer (RSI points beyond zone edge):
 # LONG confirm when RSI > MOMENTUM_OS + buffer
@@ -308,7 +314,7 @@ FALLING_KNIFE_LOOKBACK_15M = 4     # 60 min window
 FALLING_KNIFE_MOVE_PCT_5M = 0.7    # block longs if <= -0.7% without stabilization (shorts vice versa)
 FALLING_KNIFE_MOVE_PCT_15M = 1.0   # block longs if <= -1.0% without stabilization (shorts vice versa)
 
-# ─── SIGNAL POINTS ────────────────────────────
+# в”Ђв”Ђв”Ђ SIGNAL POINTS в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 # Trade signal points by entry level
 SIGNAL_POINTS = {
     "L":   1, "S":   1,   # Basic
@@ -334,33 +340,33 @@ VOL_ZONE_POINTS = {
 
 VOL_ZONE_STRENGTH = {1: "Low", 3: "Strong"}
 
-# ─── CONFIRMATION THRESHOLDS ─────────────────
+# в”Ђв”Ђв”Ђ CONFIRMATION THRESHOLDS в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 STRONG_THRESHOLD  = 3    # Confirmed Confluence (3+ systems)
 EXTREME_THRESHOLD = 4    # High-Alpha Confluence (4+ systems)
 
-# ─── TIMING ──────────────────────────────────
+# в”Ђв”Ђв”Ђ TIMING в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 POLL_INTERVAL = 1       # Seconds between data fetches
 CONFIRMATION_WINDOW = 1800  # 30 min window to aggregate signals
 CONFIRMATION_FRESH_WINDOW = 480  # 8 min: confirmations must be recent to count
 CONFIRMATION_RSI_EXHAUSTION_BUFFER = 6  # block SHORT if RSI too low, LONG if RSI too high
 CONFLUENCE_OPPOSITE_LOCK_SEC = 900  # 15 min opposite-side confluence lock after a fire
 
-# ─── FUNDING RATE ALERTS ─────────────────────
-FUNDING_THRESHOLD = 0.0005       # 0.05% — trigger alert above this
+# в”Ђв”Ђв”Ђ FUNDING RATE ALERTS в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+FUNDING_THRESHOLD = 0.0005       # 0.05% вЂ” trigger alert above this
 FUNDING_CHECK_INTERVAL = 300     # Check every 5 min
 FUNDING_COOLDOWN = 3600          # 1 hour cooldown between alerts
 
-# ─── VOLUME SPIKE DETECTION ──────────────────
+# в”Ђв”Ђв”Ђ VOLUME SPIKE DETECTION в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 VOLUME_SPIKE_MULT = 3.0                   # Alert when vol > 3x average
 VOLUME_SPIKE_TIMEFRAMES = ["15m", "1h", "4h"]   # Skip 5m (too noisy)
 VOLUME_AVG_PERIOD = 20                    # 20-candle volume SMA
 
-# ─── PRICE APPROACHING ALERTS ────────────────
+# в”Ђв”Ђв”Ђ PRICE APPROACHING ALERTS в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 APPROACH_THRESHOLD = 0.002       # 0.2% distance from level
 APPROACH_COOLDOWN = 10800          # 3 hour cooldown per level
 APPROACH_LEVELS = ["PDH", "PDL", "DO", "PWH", "PWL", "PMH", "PML", "Pump", "Dump", "PumpMax", "DumpMax"]  # Which levels to watch
 
-# ─── ADVANCED ALERTS (NEW) ───────────────────
+# в”Ђв”Ђв”Ђ ADVANCED ALERTS (NEW) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 OI_CHANGE_THRESHOLD = 0.015      # 1.5% change in OI to trigger divergence check
 LIQ_SQUEEZE_THRESHOLD = 500000   # $500k in liquidations to trigger squeeze alert
 LIQ_ALERT_COOLDOWN = 600         # 10 min cooldown for squeeze alerts
@@ -422,7 +428,7 @@ LIQ_POOL_EXPANSION_COOLDOWN = 1800
 TP_LIQUIDITY_MIN_USD = 25000000   # minimum near-TP liquidity to annotate probability
 TP_LIQUIDITY_BAND_PCT = 0.12      # "near TP" band size (% around TP level)
 
-# ─── MARKET ALERTS (FAST MOVE) ────────────────
+# в”Ђв”Ђв”Ђ MARKET ALERTS (FAST MOVE) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 FAST_MOVE_THRESHOLD = 0.03       # 3% move
 FAST_MOVE_WINDOW    = 4          # 4 hours
 FAST_MOVE_COOLDOWN  = 14400      # 4 hours
@@ -455,10 +461,10 @@ def get_adjusted_sessions(dt):
         
     return adj
 
-# ─── TELEGRAM COMMANDS ───────────────────────
+# в”Ђв”Ђв”Ђ TELEGRAM COMMANDS в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 COMMAND_POLL_INTERVAL = 2   # Seconds between getUpdates polls
 ALERT_BATCH_WINDOW = 10     # Seconds to wait for multiple alerts before batching
 
-# ─── REGISTRATION & ONBOARDING ───────────────
+# в”Ђв”Ђв”Ђ REGISTRATION & ONBOARDING в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 BITUNIX_REG_LINK = "https://www.bitunix.com/register?vipCode=mrponch"
 INVITE_LINK = "https://t.me/+Z0rG8WJK58RlN2Ey"

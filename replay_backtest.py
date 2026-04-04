@@ -8,6 +8,12 @@ import requests
 from channels import calculate_channels
 from config import (
     BASE_MOMENTUM_ENABLED_TFS,
+    BREAKEVEN_WIN_MIN_TP,
+    FALLING_KNIFE_FILTER_ENABLED,
+    FALLING_KNIFE_LOOKBACK_5M,
+    FALLING_KNIFE_LOOKBACK_15M,
+    FALLING_KNIFE_MOVE_PCT_5M,
+    FALLING_KNIFE_MOVE_PCT_15M,
     ORDERFLOW_ANOMALY_SCORE_MIN,
     ORDERFLOW_OI_PCT_ANOMALY,
     ORDERFLOW_LIQ_ANOMALY_USD,
@@ -53,6 +59,7 @@ from config import (
 from data import INTERVAL_MAP, OKX_BASE, fetch_klines
 from momentum import ScalpTracker, calculate_momentum, classify_momentum_zone, check_htf_pullback_entry, check_one_h_reclaim_entry
 from scoring import calculate_signal_score
+from signals import check_rsi_divergence
 from smart_money import detect_smart_money_entry
 
 KLINES_URL = f"{OKX_BASE}/api/v5/market/candles"
@@ -109,6 +116,15 @@ def _resolve_trade_event(tr: dict, high: float, low: float, candle_ts: str):
         return "PROFIT_SL" if (tr["tp1_hit"] and not stop_at_entry) else "SL"
 
     return None
+
+
+def _breakeven_counts_as_win(tr: dict) -> bool:
+    threshold = int(BREAKEVEN_WIN_MIN_TP)
+    if threshold <= 1:
+        return bool(tr.get("tp1_hit"))
+    if threshold == 2:
+        return bool(tr.get("tp2_hit"))
+    return bool(tr.get("tp3_hit"))
 
 
 def _to_df(rows, bars_needed: int):
@@ -267,6 +283,59 @@ def _orderflow_anomaly_placeholder():
     return False, 0.0, 0.0
 
 
+def _has_opposite_divergence(df_slice: pd.DataFrame, side: str, timeframe: str) -> bool:
+    if df_slice is None or df_slice.empty:
+        return False
+    opposite = "SHORT" if side == "LONG" else "LONG"
+    try:
+        div_sigs = check_rsi_divergence(df_slice, timeframe)
+    except Exception:
+        return False
+    return any(sig.get("active", True) and sig.get("side") == opposite for sig in div_sigs)
+
+
+def _is_unstable_impulse_replay(data: dict, side: str):
+    if not FALLING_KNIFE_FILTER_ENABLED:
+        return False, ""
+
+    checks = [
+        ("5m", int(FALLING_KNIFE_LOOKBACK_5M), float(FALLING_KNIFE_MOVE_PCT_5M)),
+        ("15m", int(FALLING_KNIFE_LOOKBACK_15M), float(FALLING_KNIFE_MOVE_PCT_15M)),
+    ]
+    for tf, lookback, move_thr in checks:
+        df = data.get(tf)
+        if df is None or df.empty or len(df) < lookback + 1:
+            continue
+
+        closes = df["Close"]
+        opens = df["Open"]
+        prev_close = float(closes.iloc[-(lookback + 1)])
+        curr_close = float(closes.iloc[-1])
+        if prev_close <= 0:
+            continue
+
+        move_pct = (curr_close / prev_close - 1.0) * 100.0
+        c1, c2, c3 = float(closes.iloc[-1]), float(closes.iloc[-2]), float(closes.iloc[-3])
+        o1, o2, o3 = float(opens.iloc[-1]), float(opens.iloc[-2]), float(opens.iloc[-3])
+        red_count = int(c1 < o1) + int(c2 < o2) + int(c3 < o3)
+        green_count = int(c1 > o1) + int(c2 > o2) + int(c3 > o3)
+        down_streak = c1 < c2 < c3
+        up_streak = c1 > c2 > c3
+        bounce = c1 > c2 > c3
+        pullback = c1 < c2 < c3
+
+        if side == "LONG":
+            knife = (move_pct <= -abs(move_thr)) and (down_streak or red_count >= 2)
+            if knife and not bounce:
+                return True, f"{tf} impulse {move_pct:+.2f}% (no base)"
+        else:
+            blowoff = (move_pct >= abs(move_thr)) and (up_streak or green_count >= 2)
+            if blowoff and not pullback:
+                return True, f"{tf} impulse {move_pct:+.2f}% (no top)"
+
+    return False, ""
+
+
 def _detect_regime_from_df(df_slice: pd.DataFrame):
     if df_slice is None or df_slice.empty or len(df_slice) < 80:
         return "RANGE"
@@ -291,10 +360,21 @@ def _recent_health_from_results(results, lookback: int):
     trades = len(sample)
     if trades < SCALP_SELF_TUNE_MIN_CLOSED:
         return "NEUTRAL"
-    wins = sum(1 for val in sample if val > 0)
-    losses = sum(1 for val in sample if val < 0)
+    def _metric_outcome(item):
+        if isinstance(item, dict):
+            return item.get("metric", "breakeven"), float(item.get("r", 0.0))
+        val = float(item)
+        if val > 0:
+            return "wins", val
+        if val < 0:
+            return "losses", val
+        return "breakeven", val
+
+    parsed = [_metric_outcome(item) for item in sample]
+    wins = sum(1 for metric, _ in parsed if metric == "wins")
+    losses = sum(1 for metric, _ in parsed if metric == "losses")
     win_rate = (wins / (wins + losses) * 100.0) if (wins + losses) else 0.0
-    avg_r = sum(sample) / len(sample)
+    avg_r = sum(r for _, r in parsed) / len(parsed)
     if win_rate <= SCALP_SELF_TUNE_LOW_WR or avg_r <= SCALP_SELF_TUNE_LOW_AVGR:
         return "TIGHTEN"
     if win_rate >= SCALP_SELF_TUNE_HIGH_WR and avg_r >= SCALP_SELF_TUNE_HIGH_AVGR:
@@ -404,6 +484,17 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_
     df = calculate_channels(df)
     df = calculate_momentum(df)
     tracker = ScalpTracker(tf)
+    aux_history = {tf: df}
+    if tf == "5m":
+        bars_aux = _bars_for_days("15m", days, extra=180)
+        aux_15m = fetch_klines_history("15m", bars_aux)
+        if aux_15m is not None and not aux_15m.empty:
+            aux_history["15m"] = calculate_momentum(aux_15m)
+    elif tf == "15m":
+        bars_aux = _bars_for_days("5m", days, extra=180)
+        aux_5m = fetch_klines_history("5m", bars_aux)
+        if aux_5m is not None and not aux_5m.empty:
+            aux_history["5m"] = calculate_momentum(aux_5m)
 
     active = []
     results = []
@@ -440,6 +531,19 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_
                 continue
 
             side = evt["side"]
+            slice_data = {}
+            for aux_tf, aux_df in aux_history.items():
+                sliced = aux_df.loc[:idx]
+                if not sliced.empty:
+                    slice_data[aux_tf] = sliced
+
+            if _has_opposite_divergence(df.loc[:idx], side, tf):
+                continue
+
+            impulse_blocked, _ = _is_unstable_impulse_replay(slice_data, side)
+            if impulse_blocked:
+                continue
+
             if now_ts < side_cooldown_until.get(side, 0.0):
                 continue
 
@@ -570,18 +674,18 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_
 
             side = tr["side"]
             if evt_type == "TP3":
-                results.append(abs(tr["tp3"] - tr["entry"]) / tr["risk"])
+                results.append({"r": abs(tr["tp3"] - tr["entry"]) / tr["risk"], "metric": "wins"})
                 loss_streak[side] = 0
             elif evt_type == "PROFIT_SL":
-                results.append(max(0.2, abs(tr["tp1"] - tr["entry"]) / tr["risk"] * 0.6))
+                results.append({"r": max(0.2, abs(tr["tp1"] - tr["entry"]) / tr["risk"] * 0.6), "metric": "wins"})
                 loss_streak[side] = 0
             elif evt_type == "SL":
-                results.append(-1.0)
+                results.append({"r": -1.0, "metric": "losses"})
                 loss_streak[side] += 1
                 if loss_streak[side] >= SCALP_LOSS_STREAK_LIMIT:
                     side_cooldown_until[side] = now_ts + SCALP_LOSS_COOLDOWN_SEC
             elif evt_type == "ENTRY_CLOSE":
-                results.append(0.0)
+                results.append({"r": 0.0, "metric": "wins" if _breakeven_counts_as_win(tr) else "breakeven"})
                 if loss_streak[side] > 0:
                     loss_streak[side] -= 1
             else:
@@ -590,12 +694,12 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_
         active = survivors
 
     for _ in active:
-        results.append(0.0)
+        results.append({"r": 0.0, "metric": "breakeven"})
 
-    wins = sum(1 for r in results if r > 0)
-    losses = sum(1 for r in results if r < 0)
-    breakeven = sum(1 for r in results if r == 0)
-    avg_r = sum(results) / len(results) if results else 0.0
+    wins = sum(1 for r in results if r["metric"] == "wins")
+    losses = sum(1 for r in results if r["metric"] == "losses")
+    breakeven = sum(1 for r in results if r["metric"] == "breakeven")
+    avg_r = (sum(r["r"] for r in results) / len(results)) if results else 0.0
     closed = wins + losses
     win_rate = (wins / closed * 100.0) if closed else 0.0
     hit_rate = (wins / len(results) * 100.0) if results else 0.0
@@ -701,25 +805,25 @@ def simulate_smart_money_timeframe(tf: str, days: int):
                 continue
 
             if evt_type == "TP3":
-                results.append(abs(tr["tp3"] - tr["entry"]) / tr["risk"])
+                results.append({"r": abs(tr["tp3"] - tr["entry"]) / tr["risk"], "metric": "wins"})
             elif evt_type == "PROFIT_SL":
-                results.append(max(0.2, abs(tr["tp1"] - tr["entry"]) / tr["risk"] * 0.6))
+                results.append({"r": max(0.2, abs(tr["tp1"] - tr["entry"]) / tr["risk"] * 0.6), "metric": "wins"})
             elif evt_type == "SL":
-                results.append(-1.0)
+                results.append({"r": -1.0, "metric": "losses"})
             elif evt_type == "ENTRY_CLOSE":
-                results.append(0.0)
+                results.append({"r": 0.0, "metric": "wins" if _breakeven_counts_as_win(tr) else "breakeven"})
             else:
                 survivors.append(tr)
 
         active = survivors
 
     for _ in active:
-        results.append(0.0)
+        results.append({"r": 0.0, "metric": "breakeven"})
 
-    wins = sum(1 for r in results if r > 0)
-    losses = sum(1 for r in results if r < 0)
-    breakeven = sum(1 for r in results if r == 0)
-    avg_r = sum(results) / len(results) if results else 0.0
+    wins = sum(1 for r in results if r["metric"] == "wins")
+    losses = sum(1 for r in results if r["metric"] == "losses")
+    breakeven = sum(1 for r in results if r["metric"] == "breakeven")
+    avg_r = (sum(r["r"] for r in results) / len(results)) if results else 0.0
     closed = wins + losses
     win_rate = (wins / closed * 100.0) if closed else 0.0
     hit_rate = (wins / len(results) * 100.0) if results else 0.0

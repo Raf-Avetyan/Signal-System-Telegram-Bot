@@ -8,6 +8,7 @@ Persists data to signals_log.json for restart survival.
 import json
 import os
 from datetime import datetime, timezone, timedelta
+from config import BREAKEVEN_WIN_MIN_TP
 
 LOG_FILE = os.path.join(os.path.dirname(__file__), "signals_log.json")
 
@@ -40,6 +41,37 @@ class SignalTracker:
     def persist(self):
         """Public wrapper to force-save tracker state immediately."""
         self._save()
+
+    def _breakeven_counts_as_win(self, sig):
+        threshold = int(BREAKEVEN_WIN_MIN_TP)
+        if threshold <= 1:
+            return bool(sig.get("tp1_hit"))
+        if threshold == 2:
+            return bool(sig.get("tp2_hit"))
+        return bool(sig.get("tp3_hit"))
+
+    def _metric_outcome(self, sig):
+        """Return metric outcome label and R-multiple for summaries/analytics."""
+        status = str(sig.get("status", "")).upper()
+        entry = float(sig.get("entry", 0))
+        sl = float(sig.get("sl", 0))
+        tp1 = float(sig.get("tp1", entry))
+        tp3 = float(sig.get("tp3", entry))
+        risk = abs(entry - sl)
+
+        if status == "SL":
+            return "losses", -1.0
+        if status == "PROFIT_SL":
+            r_mult = max(0.2, abs(tp1 - entry) / risk * 0.6) if risk > 0 else 0.2
+            return "wins", r_mult
+        if status == "TP3":
+            r_mult = (abs(tp3 - entry) / risk) if risk > 0 else 0.0
+            return "wins", r_mult
+        if status == "ENTRY_CLOSE":
+            if self._breakeven_counts_as_win(sig):
+                return "wins", 0.0
+            return "breakeven", 0.0
+        return "open", 0.0
 
     def _parse_iso_utc(self, value):
         """Parse ISO datetime string into UTC-aware datetime."""
@@ -281,11 +313,15 @@ class SignalTracker:
         if total == 0 and tp1_hits == 0 and tp2_hits == 0 and tp3_hits == 0 and sl_hits == 0:
             return None
 
-        # Recap win-rate preference: TP progress vs SL pressure.
-        # "Wins" = TP1+TP2 hit events on target date; "Losses" = SL hit events.
-        # This matches recap-style interpretation (e.g. 5 TP vs 1 SL => 83.3%).
-        wins = tp1_hits + tp2_hits
-        losses = sl_hits
+        wins = losses = breakeven = 0
+        for sig in generated:
+            outcome, _ = self._metric_outcome(sig)
+            if outcome == "wins":
+                wins += 1
+            elif outcome == "losses":
+                losses += 1
+            elif outcome == "breakeven":
+                breakeven += 1
         resolved = wins + losses
         win_rate = (wins / resolved * 100.0) if resolved > 0 else 0.0
 
@@ -298,6 +334,7 @@ class SignalTracker:
             "still_open": still_open,
             "wins": wins,
             "losses": losses,
+            "breakeven": breakeven,
             "win_rate": win_rate,
             "window_start": window_start.isoformat(),
             "window_end": window_end.isoformat(),
@@ -430,24 +467,7 @@ class SignalTracker:
                 totals["open"] += 1
                 continue
 
-            entry = float(sig.get("entry", 0))
-            sl = float(sig.get("sl", 0))
-            tp1 = float(sig.get("tp1", entry))
-            tp3 = float(sig.get("tp3", entry))
-            risk = abs(entry - sl)
-
-            if status == "SL":
-                r_mult = -1.0
-                outcome = "losses"
-            elif status == "ENTRY_CLOSE":
-                r_mult = 0.0
-                outcome = "breakeven"
-            elif status == "PROFIT_SL":
-                r_mult = max(0.2, abs(tp1 - entry) / risk * 0.6) if risk > 0 else 0.2
-                outcome = "wins"
-            else:  # TP3
-                r_mult = (abs(tp3 - entry) / risk) if risk > 0 else 0.0
-                outcome = "wins"
+            outcome, r_mult = self._metric_outcome(sig)
 
             totals["trades"] += 1
             totals[outcome] += 1
@@ -557,25 +577,14 @@ class SignalTracker:
         wins = losses = breakeven = 0
         r_values = []
         for sig in closed:
-            entry = float(sig.get("entry", 0))
-            sl = float(sig.get("sl", 0))
-            tp1 = float(sig.get("tp1", entry))
-            tp3 = float(sig.get("tp3", entry))
-            risk = abs(entry - sl)
-            status = sig.get("status")
-
-            if status == "SL":
+            outcome, r_mult = self._metric_outcome(sig)
+            if outcome == "wins":
+                wins += 1
+            elif outcome == "losses":
                 losses += 1
-                r_values.append(-1.0)
-            elif status == "ENTRY_CLOSE":
+            elif outcome == "breakeven":
                 breakeven += 1
-                r_values.append(0.0)
-            elif status == "PROFIT_SL":
-                wins += 1
-                r_values.append(max(0.2, abs(tp1 - entry) / risk * 0.6) if risk > 0 else 0.2)
-            else:
-                wins += 1
-                r_values.append((abs(tp3 - entry) / risk) if risk > 0 else 0.0)
+            r_values.append(r_mult)
 
         closed_only = wins + losses
         return {
