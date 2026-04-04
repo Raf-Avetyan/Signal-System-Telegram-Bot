@@ -905,6 +905,9 @@ class PonchBot:
         import os
         import tempfile
         try:
+            # Keep tracker signals/execution info durable across restarts too.
+            self.tracker.persist()
+
             # Prepare session_data by deep-converting sets to lists
             serializable_sessions = {}
             for sid, sdata in self.session_data.items():

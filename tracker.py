@@ -37,6 +37,10 @@ class SignalTracker:
         except Exception as e:
             print(f"[TRACKER ERROR] Save failed: {e}")
 
+    def persist(self):
+        """Public wrapper to force-save tracker state immediately."""
+        self._save()
+
     def _parse_iso_utc(self, value):
         """Parse ISO datetime string into UTC-aware datetime."""
         if not value:
