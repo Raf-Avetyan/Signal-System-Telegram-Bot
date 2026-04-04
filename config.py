@@ -16,6 +16,7 @@ BITUNIX_FAPI_BASE_URL = os.getenv("BITUNIX_FAPI_BASE_URL", "https://fapi.bitunix
 BITUNIX_TRADING_ENABLED = os.getenv("BITUNIX_TRADING_ENABLED", "false").strip().lower() == "true"
 BITUNIX_TRADING_MODE = os.getenv("BITUNIX_TRADING_MODE", "off").strip().lower()  # off | demo | live
 BITUNIX_MARGIN_COIN = os.getenv("BITUNIX_MARGIN_COIN", "USDT")
+BITUNIX_REQUIRED_MARGIN_MODE = os.getenv("BITUNIX_REQUIRED_MARGIN_MODE", "ISOLATION").strip().upper()
 BITUNIX_DEFAULT_LEVERAGE = int(os.getenv("BITUNIX_DEFAULT_LEVERAGE", "3"))
 BITUNIX_POSITION_MODE = os.getenv("BITUNIX_POSITION_MODE", "ONE_WAY").strip().upper()
 BITUNIX_MAX_OPEN_POSITIONS = int(os.getenv("BITUNIX_MAX_OPEN_POSITIONS", "3"))
@@ -94,10 +95,19 @@ TP3_ATR_MULT = 2.1   # 30% allocation
 
 # Per-timeframe risk model (overrides global multipliers above when present)
 TIMEFRAME_RISK_MULTIPLIERS = {
-    "5m":  {"sl": 2.7, "tp1": 0.65, "tp2": 1.20, "tp3": 1.80},
-    "15m": {"sl": 2.5, "tp1": 0.80, "tp2": 1.35, "tp3": 1.95},
+    "5m":  {"sl": 3.2, "tp1": 1.10, "tp2": 1.90, "tp3": 2.80},
+    "15m": {"sl": 3.0, "tp1": 1.25, "tp2": 2.10, "tp3": 3.00},
     "1h":  {"sl": 2.3, "tp1": 0.65, "tp2": 1.10, "tp3": 1.55},
     "4h":  {"sl": 2.1, "tp1": 0.80, "tp2": 1.30, "tp3": 1.85},
+}
+
+BITUNIX_LIQUIDATION_SAFETY_ENABLED = os.getenv("BITUNIX_LIQUIDATION_SAFETY_ENABLED", "true").strip().lower() == "true"
+BITUNIX_LIQUIDATION_SAFETY_BUFFER_R = float(os.getenv("BITUNIX_LIQUIDATION_SAFETY_BUFFER_R", "0.50"))
+BITUNIX_LIQUIDATION_MAX_LEVERAGE_BY_TF = {
+    "5m": int(os.getenv("BITUNIX_MAX_LEVERAGE_5M", "8")),
+    "15m": int(os.getenv("BITUNIX_MAX_LEVERAGE_15M", "8")),
+    "1h": int(os.getenv("BITUNIX_MAX_LEVERAGE_1H", str(BITUNIX_DEFAULT_LEVERAGE))),
+    "4h": int(os.getenv("BITUNIX_MAX_LEVERAGE_4H", str(BITUNIX_DEFAULT_LEVERAGE))),
 }
 
 # Smart Money Liquidity

@@ -71,6 +71,7 @@ def _resolve_trade_event(tr: dict, high: float, low: float, candle_ts: str):
     # Same-candle ambiguity for fresh trades: TP1+SL => ENTRY_CLOSE (never direct SL)
     if not entry_candle and not tr["tp1_hit"] and tp1_touched and sl_touched:
         tr["tp1_hit"] = True
+        tr["sl"] = float(tr["entry"])
         return "ENTRY_CLOSE"
 
     # Progressive TP checks (disabled on entry candle)
@@ -79,24 +80,25 @@ def _resolve_trade_event(tr: dict, high: float, low: float, candle_ts: str):
         if is_long:
             if not tr["tp1_hit"] and tp_price >= tr["tp1"]:
                 tr["tp1_hit"] = True
+                tr["sl"] = float(tr["entry"])
             if not tr["tp2_hit"] and tp_price >= tr["tp2"]:
                 tr["tp2_hit"] = True
-                tr["sl"] = max(float(tr.get("sl", tr["entry"])), float(tr.get("tp1", tr["entry"])))
             if not tr["tp3_hit"] and tp_price >= tr["tp3"]:
                 tr["tp3_hit"] = True
                 return "TP3"
         else:
             if not tr["tp1_hit"] and tp_price <= tr["tp1"]:
                 tr["tp1_hit"] = True
+                tr["sl"] = float(tr["entry"])
             if not tr["tp2_hit"] and tp_price <= tr["tp2"]:
                 tr["tp2_hit"] = True
-                tr["sl"] = min(float(tr.get("sl", tr["entry"])), float(tr.get("tp1", tr["entry"])))
             if not tr["tp3_hit"] and tp_price <= tr["tp3"]:
                 tr["tp3_hit"] = True
                 return "TP3"
 
-    # Breakeven close after TP1 only; after TP2 the stop is locked at TP1.
-    if tr["tp1_hit"] and not tr["tp2_hit"]:
+    # Breakeven close while stop is parked at entry.
+    stop_at_entry = abs(float(tr.get("sl", tr["entry"])) - float(tr["entry"])) < 1e-9
+    if tr["tp1_hit"] and stop_at_entry:
         entry_hit = (low <= tr["entry"]) if is_long else (high >= tr["entry"])
         if entry_hit:
             return "ENTRY_CLOSE"
@@ -104,7 +106,7 @@ def _resolve_trade_event(tr: dict, high: float, low: float, candle_ts: str):
     # SL / protected SL-in-profit
     sl_price = low if is_long else high
     if (is_long and sl_price <= tr["sl"]) or ((not is_long) and sl_price >= tr["sl"]):
-        return "PROFIT_SL" if tr["tp1_hit"] else "SL"
+        return "PROFIT_SL" if (tr["tp1_hit"] and not stop_at_entry) else "SL"
 
     return None
 

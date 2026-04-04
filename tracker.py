@@ -140,6 +140,7 @@ class SignalTracker:
             if not is_entry_candle and not sig["tp1_hit"] and tp1_touched and sl_touched:
                 sig["tp1_hit"] = True
                 sig["tp1_at"] = sig.get("tp1_at") or datetime.now(timezone.utc).isoformat()
+                sig["sl"] = float(sig["entry"])
                 sig["status"] = "TP1"
                 changed = True
                 events.append({"type": "TP1", "sig": sig})
@@ -158,14 +159,13 @@ class SignalTracker:
                     if not sig["tp1_hit"] and tp_price >= sig["tp1"]:
                         sig["tp1_hit"] = True
                         sig["tp1_at"] = sig.get("tp1_at") or datetime.now(timezone.utc).isoformat()
+                        sig["sl"] = float(sig["entry"])
                         sig["status"] = "TP1"
                         changed = True
                         events.append({"type": "TP1", "sig": sig})
                     if not sig["tp2_hit"] and tp_price >= sig["tp2"]:
                         sig["tp2_hit"] = True
                         sig["tp2_at"] = sig.get("tp2_at") or datetime.now(timezone.utc).isoformat()
-                        # After TP2, lock stop in profit at/above TP1 for longs.
-                        sig["sl"] = max(float(sig.get("sl", sig["initial_sl"])), float(sig.get("tp1", sig["entry"])))
                         sig["status"] = "TP2"
                         changed = True
                         events.append({"type": "TP2", "sig": sig})
@@ -181,14 +181,13 @@ class SignalTracker:
                     if not sig["tp1_hit"] and tp_price <= sig["tp1"]:
                         sig["tp1_hit"] = True
                         sig["tp1_at"] = sig.get("tp1_at") or datetime.now(timezone.utc).isoformat()
+                        sig["sl"] = float(sig["entry"])
                         sig["status"] = "TP1"
                         changed = True
                         events.append({"type": "TP1", "sig": sig})
                     if not sig["tp2_hit"] and tp_price <= sig["tp2"]:
                         sig["tp2_hit"] = True
                         sig["tp2_at"] = sig.get("tp2_at") or datetime.now(timezone.utc).isoformat()
-                        # After TP2, lock stop in profit at/below TP1 for shorts.
-                        sig["sl"] = min(float(sig.get("sl", sig["initial_sl"])), float(sig.get("tp1", sig["entry"])))
                         sig["status"] = "TP2"
                         changed = True
                         events.append({"type": "TP2", "sig": sig})
@@ -201,10 +200,9 @@ class SignalTracker:
                         events.append({"type": "TP3", "sig": sig})
                         continue
 
-            # 2. Check Entry Return (Breakeven after TP1 only).
-            # Once TP2 is hit the stop is locked at TP1, so reversal should not
-            # be treated as a breakeven exit anymore.
-            if sig.get("tp1_hit") and not sig.get("tp2_hit") and sig["status"] != "ENTRY_CLOSE":
+            # 2. Check Entry Return when stop has been moved to breakeven.
+            stop_at_entry = abs(float(sig.get("sl", sig["entry"])) - float(sig["entry"])) < 1e-9
+            if sig.get("tp1_hit") and stop_at_entry and sig["status"] != "ENTRY_CLOSE":
                 entry_hit = False
                 if is_long and p_low <= sig["entry"]:
                     entry_hit = True
@@ -223,7 +221,7 @@ class SignalTracker:
             sl_price = p_low if is_long else p_high
 
             if (is_long and sl_price <= sig["sl"]) or (not is_long and sl_price >= sig["sl"]):
-                if sig["tp1_hit"]:
+                if sig["tp1_hit"] and abs(float(sig.get("sl", sig["entry"])) - float(sig["entry"])) >= 1e-9:
                     # Stop was moved into profit after targets; this is a protected win.
                     sig["status"] = "PROFIT_SL"
                     sig["closed_at"] = datetime.now(timezone.utc).isoformat()

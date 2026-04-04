@@ -15,11 +15,15 @@ from config import (
     BITUNIX_FAPI_BASE_URL,
     BITUNIX_FAPI_KEY,
     BITUNIX_FAPI_SECRET,
+    BITUNIX_LIQUIDATION_MAX_LEVERAGE_BY_TF,
+    BITUNIX_LIQUIDATION_SAFETY_BUFFER_R,
+    BITUNIX_LIQUIDATION_SAFETY_ENABLED,
     BITUNIX_MARGIN_COIN,
     BITUNIX_MAX_OPEN_POSITIONS,
     BITUNIX_MAX_RISK_USD,
     BITUNIX_MIN_NOTIONAL_USD,
     BITUNIX_POSITION_MODE,
+    BITUNIX_REQUIRED_MARGIN_MODE,
     BITUNIX_RISK_CAP_PCT,
     BITUNIX_TPSL_TRIGGER_TYPE,
     BITUNIX_TP_SPLITS,
@@ -146,6 +150,27 @@ class BitunixFuturesClient:
             },
         )
 
+    def change_margin_mode(self, symbol: str, margin_mode: str, margin_coin: str = BITUNIX_MARGIN_COIN) -> Dict[str, Any]:
+        return self._request(
+            "POST",
+            "/api/v1/futures/account/change_margin_mode",
+            payload={
+                "symbol": symbol,
+                "marginCoin": margin_coin,
+                "marginMode": str(margin_mode).upper(),
+            },
+        )
+
+    def get_leverage_margin_mode(self, symbol: str, margin_coin: str = BITUNIX_MARGIN_COIN) -> Dict[str, Any]:
+        return self._request(
+            "GET",
+            "/api/v1/futures/account/get_leverage_margin_mode",
+            query={"symbol": symbol, "marginCoin": margin_coin},
+        )
+
+    def get_position_tiers(self, symbol: str) -> Dict[str, Any]:
+        return self._request("GET", "/api/v1/futures/position/get_position_tiers", query={"symbol": symbol})
+
     def place_order(
         self,
         symbol: str,
@@ -187,6 +212,16 @@ class BitunixFuturesClient:
             query["symbol"] = symbol
         return self._request("GET", "/api/v1/futures/position/get_pending_positions", query=query)
 
+    def get_order_detail(self, order_id: Optional[str] = None, client_id: Optional[str] = None) -> Dict[str, Any]:
+        query: Dict[str, Any] = {}
+        if order_id:
+            query["orderId"] = str(order_id)
+        if client_id:
+            query["clientId"] = str(client_id)
+        if not query:
+            raise BitunixTradeError("Either order_id or client_id is required for order detail lookup.")
+        return self._request("GET", "/api/v1/futures/trade/get_order_detail", query=query)
+
     def place_position_tpsl(self, symbol: str, position_id: str, tp_price: Optional[float], sl_price: Optional[float]) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "symbol": symbol,
@@ -199,6 +234,46 @@ class BitunixFuturesClient:
             payload["slPrice"] = self._fmt_num(sl_price)
             payload["slStopType"] = BITUNIX_TPSL_TRIGGER_TYPE
         return self._request("POST", "/api/v1/futures/tpsl/position/place_order", payload=payload)
+
+    def place_tpsl_order(
+        self,
+        symbol: str,
+        position_id: str,
+        *,
+        tp_price: Optional[float] = None,
+        sl_price: Optional[float] = None,
+        tp_qty: Optional[float] = None,
+        sl_qty: Optional[float] = None,
+        tp_order_type: str = "MARKET",
+        sl_order_type: str = "MARKET",
+        tp_order_price: Optional[float] = None,
+        sl_order_price: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "symbol": symbol,
+            "positionId": str(position_id),
+        }
+        if tp_price is not None:
+            payload["tpPrice"] = self._fmt_num(tp_price)
+            payload["tpStopType"] = BITUNIX_TPSL_TRIGGER_TYPE
+            payload["tpOrderType"] = str(tp_order_type).upper()
+            if tp_qty is not None:
+                payload["tpQty"] = self._fmt_num(tp_qty)
+            if str(tp_order_type).upper() == "LIMIT":
+                if tp_order_price is None:
+                    raise BitunixTradeError("tpOrderPrice is required when tpOrderType is LIMIT.")
+                payload["tpOrderPrice"] = self._fmt_num(tp_order_price)
+        if sl_price is not None:
+            payload["slPrice"] = self._fmt_num(sl_price)
+            payload["slStopType"] = BITUNIX_TPSL_TRIGGER_TYPE
+            payload["slOrderType"] = str(sl_order_type).upper()
+            if sl_qty is not None:
+                payload["slQty"] = self._fmt_num(sl_qty)
+            if str(sl_order_type).upper() == "LIMIT":
+                if sl_order_price is None:
+                    raise BitunixTradeError("slOrderPrice is required when slOrderType is LIMIT.")
+                payload["slOrderPrice"] = self._fmt_num(sl_order_price)
+        return self._request("POST", "/api/v1/futures/tpsl/place_order", payload=payload)
 
     def get_pending_tpsl(self, symbol: str, position_id: Optional[str] = None) -> Dict[str, Any]:
         query: Dict[str, Any] = {"symbol": symbol}
@@ -221,6 +296,15 @@ class BitunixFuturesClient:
 
     def cancel_tpsl(self, symbol: str, order_id: str) -> Dict[str, Any]:
         return self._request("POST", "/api/v1/futures/tpsl/cancel_order", payload={"symbol": symbol, "orderId": str(order_id)})
+
+    def cancel_orders(self, symbol: str, order_ids: List[str]) -> Dict[str, Any]:
+        order_list = [{"orderId": str(order_id)} for order_id in order_ids if order_id]
+        if not order_list:
+            return {"code": "0", "data": {"successList": [], "failureList": []}, "msg": "Nothing to cancel"}
+        return self._request("POST", "/api/v1/futures/trade/cancel_orders", payload={"symbol": symbol, "orderList": order_list})
+
+    def flash_close_position(self, position_id: str) -> Dict[str, Any]:
+        return self._request("POST", "/api/v1/futures/trade/flash_close_position", payload={"positionId": str(position_id)})
 
     @staticmethod
     def _fmt_num(value: float) -> str:
@@ -274,6 +358,7 @@ class TradeExecutor:
         raw = bal.get("raw") or {}
         info["position_mode"] = str(raw.get("positionMode") or BITUNIX_POSITION_MODE or "UNKNOWN").strip().upper()
         info["leverage"] = int(raw.get("leverage") or BITUNIX_DEFAULT_LEVERAGE or 0)
+        info["required_margin_mode"] = BITUNIX_REQUIRED_MARGIN_MODE
         if bal.get("error"):
             info["errors"].append(f"balance: {bal.get('error')}")
             if bal.get("endpoint"):
@@ -295,6 +380,14 @@ class TradeExecutor:
         elif info["auth_ok"]:
             info["auth_ok"] = True
 
+        if self.client.is_configured():
+            try:
+                lm = self.client.get_leverage_margin_mode(SYMBOL, BITUNIX_MARGIN_COIN).get("data", {}) or {}
+                info["margin_mode"] = str(lm.get("marginMode") or "").strip().upper()
+                info["margin_mode_ok"] = info["margin_mode"] == BITUNIX_REQUIRED_MARGIN_MODE
+            except Exception as e:
+                info["errors"].append(f"margin_mode: {e}")
+
         return info
 
     def execute_signal(self, signal: Dict[str, Any], open_positions_count: int = 0) -> ExecutionResult:
@@ -309,6 +402,10 @@ class TradeExecutor:
                 "Max open positions reached.",
                 {"exchange_open_positions": exchange_open_positions},
             )
+        if self.mode == "live" and self.client.is_configured():
+            margin_guard = self._ensure_required_margin_mode(SYMBOL, exchange_open_positions=exchange_open_positions)
+            if not margin_guard.get("ok", False):
+                return ExecutionResult(self.mode, False, margin_guard.get("message", "Required margin mode not satisfied."), margin_guard)
 
         plan = self._build_plan(signal)
         plan["exchange_open_positions"] = exchange_open_positions
@@ -316,6 +413,8 @@ class TradeExecutor:
             return ExecutionResult(self.mode, False, "No available margin balance.", plan)
         if plan["qty"] <= 0 or plan["notional"] <= 0:
             return ExecutionResult(self.mode, False, "Calculated order size is zero after balance/leverage cap.", plan)
+        if BITUNIX_LIQUIDATION_SAFETY_ENABLED and not plan.get("pre_liq_safe", True):
+            return ExecutionResult(self.mode, False, f"Pre-trade liquidation safety failed: {plan.get('pre_liq_reason')}", plan)
         if self.mode == "demo":
             return ExecutionResult(self.mode, True, "Demo execution planned.", plan)
         if not self.client.is_configured():
@@ -337,34 +436,72 @@ class TradeExecutor:
                 client_id=f"{signal_id}-entry",
                 trade_side=plan.get("entry_trade_side"),
             )
+            entry_order_data = entry_order.get("data", {}) or {}
+            entry_order_id = entry_order_data.get("orderId") or entry_order_data.get("id")
+            entry_client_id = entry_order_data.get("clientId") or f"{signal_id}-entry"
+            plan["entry_order_id"] = entry_order_id
+            plan["entry_client_id"] = entry_client_id
 
-            position = self._find_position(symbol, signal["side"])
+            position = self._find_position_from_entry(
+                symbol=symbol,
+                side=signal["side"],
+                order_id=entry_order_id,
+                client_id=entry_client_id,
+                retries=20,
+                delay_sec=0.75,
+            )
             if not position:
+                order_detail = self._safe_get_order_detail(order_id=entry_order_id, client_id=entry_client_id)
+                if order_detail:
+                    plan["entry_status"] = order_detail.get("status")
+                    plan["entry_trade_qty"] = order_detail.get("tradeQty")
                 raise BitunixTradeError(f"Entry accepted but no pending {signal['side']} position was returned.")
 
             position_id = str(position.get("positionId") or "")
             if not position_id:
                 raise BitunixTradeError("Bitunix positionId missing after entry.")
 
+            liq_info = self._evaluate_liquidation_safety(position, signal, plan)
+            plan["liq_price"] = liq_info.get("liq_price")
+            plan["liq_safe"] = liq_info.get("safe")
+            plan["liq_reason"] = liq_info.get("reason")
+            plan["liq_buffer_price"] = liq_info.get("buffer_price")
+            if BITUNIX_LIQUIDATION_SAFETY_ENABLED and not liq_info.get("safe", True):
+                try:
+                    self.client.flash_close_position(position_id)
+                except Exception:
+                    pass
+                raise BitunixTradeError(f"Liquidation safety failed: {liq_info.get('reason', 'unsafe liq distance')}")
+
+            protection_warnings: List[str] = []
+            sl_order = self._place_initial_stop_or_close(
+                symbol=symbol,
+                position_id=position_id,
+                signal=signal,
+                plan=plan,
+                signal_id=signal_id,
+            )
+
             tp_orders = []
+            missing_tp_indices = []
             for idx, (qty_part, tp_price) in enumerate(zip(plan["tp_qtys"], [signal["tp1"], signal["tp2"], signal["tp3"]]), start=1):
                 if qty_part <= 0:
                     continue
-                tp_res = self.client.place_order(
+                tp_record = self._place_take_profit_order(
                     symbol=symbol,
-                    side=exit_side,
-                    qty=qty_part,
-                    order_type="LIMIT",
-                    price=float(tp_price),
-                    reduce_only=plan.get("exit_reduce_only"),
-                    client_id=f"{signal_id}-tp{idx}",
-                    trade_side=plan.get("exit_trade_side"),
-                    position_id=position_id if plan.get("exit_trade_side") else None,
+                    position_id=position_id,
+                    exit_side=exit_side,
+                    qty_part=float(qty_part),
+                    tp_price=float(tp_price),
+                    signal_id=signal_id,
+                    tp_index=idx,
+                    plan=plan,
                 )
-                tp_orders.append(tp_res.get("data", {}))
-
-            sl_res = self.client.place_position_tpsl(symbol, position_id, None, float(signal["sl"]))
-            sl_order = sl_res.get("data", {})
+                if tp_record is None:
+                    missing_tp_indices.append(idx)
+                    protection_warnings.append(f"TP{idx} could not be pre-placed; runtime fallback close will be used.")
+                else:
+                    tp_orders.append(tp_record)
             signal["execution"] = {
                 "signal_id": signal_id,
                 "mode": self.mode,
@@ -374,18 +511,33 @@ class TradeExecutor:
                 "entry_order": entry_order.get("data", {}),
                 "tp_orders": tp_orders,
                 "sl_order": sl_order,
+                "missing_tp_indices": missing_tp_indices,
+                "protection_warnings": protection_warnings,
+                "protection_ready": bool(sl_order) and len(tp_orders) == len([q for q in plan["tp_qtys"] if q > 0]),
                 "qty": plan["qty"],
                 "tp_qtys": plan["tp_qtys"],
+                "tp_targets": [float(signal["tp1"]), float(signal["tp2"]), float(signal["tp3"])],
                 "leverage": plan["leverage"],
                 "risk_budget_usd": plan["risk_budget_usd"],
                 "balance_available": plan["balance_available"],
                 "position_mode": plan.get("position_mode"),
+                "liq_price": plan.get("liq_price"),
+                "liq_safe": plan.get("liq_safe"),
+                "liq_reason": plan.get("liq_reason"),
+                "entry_side": plan.get("entry_side"),
+                "entry_trade_side": plan.get("entry_trade_side"),
+                "exit_side": plan.get("exit_side"),
+                "exit_trade_side": plan.get("exit_trade_side"),
+                "exit_reduce_only": plan.get("exit_reduce_only"),
                 "risk_qty": plan.get("risk_qty"),
                 "affordable_qty": plan.get("affordable_qty"),
                 "affordable_notional": plan.get("affordable_notional"),
                 "active": True,
             }
-            return ExecutionResult(self.mode, True, "Live Bitunix execution placed.", signal["execution"])
+            message = "Live Bitunix execution placed with full protection."
+            if protection_warnings:
+                message = "Live Bitunix execution placed, but some TP legs are using runtime fallback."
+            return ExecutionResult(self.mode, True, message, signal["execution"])
         except BitunixTradeError as e:
             setattr(e, "plan", plan)
             raise
@@ -408,16 +560,19 @@ class TradeExecutor:
         position_id = execution.get("position_id")
 
         if event_type == "TP1" and position_id:
+            self._ensure_tp_leg_closed(signal, execution, 1)
             self.client.modify_position_tpsl(symbol, str(position_id), None, float(signal["entry"]))
             execution["sl_moved_to"] = float(signal["entry"])
             return ExecutionResult(self.mode, True, "Moved SL to entry after TP1.", execution)
 
         if event_type == "TP2" and position_id:
-            self.client.modify_position_tpsl(symbol, str(position_id), None, float(signal["tp1"]))
-            execution["sl_moved_to"] = float(signal["tp1"])
-            return ExecutionResult(self.mode, True, "Moved SL to TP1 after TP2.", execution)
+            self._ensure_tp_leg_closed(signal, execution, 2)
+            return ExecutionResult(self.mode, True, "TP2 reached; SL remains at entry.", execution)
 
         if event_type in {"TP3", "SL", "ENTRY_CLOSE", "PROFIT_SL"}:
+            if event_type == "TP3":
+                self._ensure_tp_leg_closed(signal, execution, 3)
+            self._cancel_remaining_protection(execution)
             if sl_order_id:
                 try:
                     self.client.cancel_tpsl(symbol, str(sl_order_id))
@@ -441,7 +596,19 @@ class TradeExecutor:
         position_mode = str(raw_account.get("positionMode") or BITUNIX_POSITION_MODE or "ONE_WAY").strip().upper()
         if position_mode not in {"ONE_WAY", "HEDGE"}:
             position_mode = str(BITUNIX_POSITION_MODE or "ONE_WAY").strip().upper()
+        tf_name = str(signal.get("tf") or signal.get("execution_tf") or "5m")
+        symbol = SYMBOL
         leverage = int(raw_account.get("leverage") or BITUNIX_DEFAULT_LEVERAGE or 1)
+        margin_mode = "ISOLATION"
+        if self.client.is_configured():
+            try:
+                lev_mode = self.client.get_leverage_margin_mode(symbol, BITUNIX_MARGIN_COIN).get("data", {}) or {}
+                leverage = int(lev_mode.get("leverage") or leverage or 1)
+                margin_mode = str(lev_mode.get("marginMode") or margin_mode).strip().upper()
+            except Exception:
+                margin_mode = str(raw_account.get("marginMode") or margin_mode).strip().upper()
+        tf_max_leverage = int(BITUNIX_LIQUIDATION_MAX_LEVERAGE_BY_TF.get(tf_name, leverage) or leverage)
+        leverage = max(1, min(leverage, tf_max_leverage))
         risk_from_balance = balance_available * BITUNIX_RISK_CAP_PCT
         risk_budget = min(BITUNIX_MAX_RISK_USD, risk_from_balance) if balance_available > 0 else 0.0
         risk_qty = (risk_budget / risk_per_unit) if risk_budget > 0 else 0.0
@@ -459,9 +626,18 @@ class TradeExecutor:
         is_hedge = position_mode == "HEDGE"
         entry_side = "BUY" if signal["side"] == "LONG" else "SELL"
         exit_side = entry_side if is_hedge else ("SELL" if signal["side"] == "LONG" else "BUY")
+        pre_liq = self._estimate_pretrade_liquidation(
+            symbol=symbol,
+            side=str(signal["side"]).upper(),
+            entry=entry,
+            sl=sl,
+            notional=qty * entry,
+            leverage=leverage,
+            margin_mode=margin_mode,
+        )
 
         return {
-            "symbol": SYMBOL,
+            "symbol": symbol,
             "signal_type": str(signal.get("type", "SCALP")).upper(),
             "side": signal["side"],
             "entry": entry,
@@ -484,7 +660,14 @@ class TradeExecutor:
             "affordable_notional": affordable_notional,
             "balance_available": balance_available,
             "position_mode": position_mode,
+            "margin_mode": margin_mode,
+            "required_margin_mode": BITUNIX_REQUIRED_MARGIN_MODE,
+            "tf": tf_name,
             "notional": qty * entry,
+            "pre_liq_estimate": pre_liq.get("liq_price"),
+            "pre_liq_safe": pre_liq.get("safe"),
+            "pre_liq_reason": pre_liq.get("reason"),
+            "maintenance_margin_rate": pre_liq.get("maintenance_margin_rate"),
         }
 
     def _safe_get_balance(self) -> Dict[str, Any]:
@@ -513,16 +696,252 @@ class TradeExecutor:
             }
 
     def _find_position(self, symbol: str, side: str) -> Optional[Dict[str, Any]]:
+        return self._find_position_with_retry(symbol, side, retries=1, delay_sec=0.0)
+
+    def _find_position_with_retry(self, symbol: str, side: str, retries: int = 6, delay_sec: float = 0.5) -> Optional[Dict[str, Any]]:
+        target = side.upper()
+        attempts = max(1, int(retries))
+        for attempt in range(attempts):
+            positions = self._pending_positions_list(symbol)
+            pos = self._match_position_side(positions, target)
+            if pos:
+                return pos
+            if attempt < attempts - 1 and delay_sec > 0:
+                time.sleep(delay_sec)
+        return None
+
+    def _pending_positions_list(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
         data = self.client.get_pending_positions(symbol).get("data", [])
         if isinstance(data, dict):
             data = data.get("positionList") or data.get("data") or []
-        target = side.upper()
-        for pos in data or []:
+        return list(data or [])
+
+    @staticmethod
+    def _position_qty(pos: Dict[str, Any]) -> float:
+        return float(pos.get("qty") or pos.get("positionQty") or 0)
+
+    @staticmethod
+    def _position_sort_key(pos: Dict[str, Any]):
+        ts = pos.get("mtime") or pos.get("utime") or pos.get("ctime") or pos.get("openTime") or 0
+        try:
+            ts_val = float(ts)
+        except Exception:
+            ts_val = 0.0
+        return (ts_val, abs(float(pos.get("qty") or pos.get("positionQty") or 0) or 0))
+
+    def _match_position_side(self, positions: List[Dict[str, Any]], target_side: str) -> Optional[Dict[str, Any]]:
+        target = str(target_side or "").upper()
+        candidates = []
+        for pos in positions or []:
+            qty = self._position_qty(pos)
+            if qty <= 0:
+                continue
             pos_side = str(pos.get("side") or pos.get("positionSide") or "").upper()
-            qty = float(pos.get("qty") or pos.get("positionQty") or 0)
-            if pos_side == target and qty > 0:
-                return pos
+            if pos_side == target:
+                candidates.append(pos)
+        if candidates:
+            candidates.sort(key=self._position_sort_key, reverse=True)
+            return candidates[0]
         return None
+
+    def _find_position_from_entry(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        order_id: Optional[str] = None,
+        client_id: Optional[str] = None,
+        retries: int = 20,
+        delay_sec: float = 0.75,
+    ) -> Optional[Dict[str, Any]]:
+        target = str(side or "").upper()
+        latest_symbol_position: Optional[Dict[str, Any]] = None
+        attempts = max(1, int(retries))
+
+        for attempt in range(attempts):
+            positions = self._pending_positions_list(symbol)
+            matched = self._match_position_side(positions, target)
+            if matched:
+                return matched
+
+            active_positions = [pos for pos in positions if self._position_qty(pos) > 0]
+            if active_positions:
+                active_positions.sort(key=self._position_sort_key, reverse=True)
+                latest_symbol_position = active_positions[0]
+                if len(active_positions) == 1:
+                    return latest_symbol_position
+
+            order_detail = self._safe_get_order_detail(order_id=order_id, client_id=client_id)
+            status = str((order_detail or {}).get("status") or "").upper()
+            trade_qty = float((order_detail or {}).get("tradeQty") or 0)
+            if trade_qty > 0 and latest_symbol_position is not None:
+                return latest_symbol_position
+
+            if attempt < attempts - 1 and delay_sec > 0:
+                time.sleep(delay_sec)
+
+        return latest_symbol_position
+
+    def _safe_get_order_detail(self, order_id: Optional[str] = None, client_id: Optional[str] = None) -> Dict[str, Any]:
+        if not order_id and not client_id:
+            return {}
+        try:
+            data = self.client.get_order_detail(order_id=order_id, client_id=client_id).get("data", {}) or {}
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _place_initial_stop_or_close(
+        self,
+        *,
+        symbol: str,
+        position_id: str,
+        signal: Dict[str, Any],
+        plan: Dict[str, Any],
+        signal_id: str,
+    ) -> Dict[str, Any]:
+        last_error: Optional[BitunixTradeError] = None
+        for _ in range(4):
+            try:
+                sl_res = self.client.place_position_tpsl(symbol, position_id, None, float(signal["sl"]))
+                sl_order = sl_res.get("data", {}) or {}
+                if sl_order.get("orderId") or sl_order.get("id"):
+                    return sl_order
+            except BitunixTradeError as e:
+                last_error = e
+                time.sleep(0.35)
+
+        # If we cannot secure a stop, do not leave the position naked.
+        try:
+            self.client.place_order(
+                symbol=symbol,
+                side=plan["exit_side"],
+                qty=float(plan["qty"]),
+                order_type="MARKET",
+                reduce_only=plan.get("exit_reduce_only"),
+                client_id=f"{signal_id}-panic-close",
+                trade_side=plan.get("exit_trade_side"),
+                position_id=position_id if plan.get("exit_trade_side") else None,
+            )
+        except Exception:
+            pass
+
+        if last_error is not None:
+            raise last_error
+        raise BitunixTradeError("Failed to place initial Bitunix stop-loss protection.")
+
+    def _place_take_profit_order(
+        self,
+        *,
+        symbol: str,
+        position_id: str,
+        exit_side: str,
+        qty_part: float,
+        tp_price: float,
+        signal_id: str,
+        tp_index: int,
+        plan: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        # Preferred: true Bitunix TP/SL trigger order so it shows up as TP on the exchange.
+        try:
+            tp_res = self.client.place_tpsl_order(
+                symbol=symbol,
+                position_id=position_id,
+                tp_price=float(tp_price),
+                tp_qty=float(qty_part),
+                tp_order_type="MARKET",
+            )
+            data = tp_res.get("data", {}) or {}
+            return {
+                "index": tp_index,
+                "kind": "TPSL",
+                "qty": float(qty_part),
+                "price": float(tp_price),
+                "orderId": data.get("orderId") or data.get("id"),
+                "raw": data,
+            }
+        except BitunixTradeError:
+            pass
+
+        # Fallback: reduce-only limit take-profit order.
+        try:
+            tp_res = self.client.place_order(
+                symbol=symbol,
+                side=exit_side,
+                qty=float(qty_part),
+                order_type="LIMIT",
+                price=float(tp_price),
+                reduce_only=plan.get("exit_reduce_only"),
+                client_id=f"{signal_id}-tp{tp_index}",
+                trade_side=plan.get("exit_trade_side"),
+                position_id=position_id if plan.get("exit_trade_side") else None,
+            )
+            data = tp_res.get("data", {}) or {}
+            return {
+                "index": tp_index,
+                "kind": "LIMIT",
+                "qty": float(qty_part),
+                "price": float(tp_price),
+                "orderId": data.get("orderId") or data.get("id"),
+                "clientId": data.get("clientId") or f"{signal_id}-tp{tp_index}",
+                "raw": data,
+            }
+        except BitunixTradeError:
+            return None
+
+    def _ensure_tp_leg_closed(self, signal: Dict[str, Any], execution: Dict[str, Any], tp_index: int) -> None:
+        executed = set(execution.get("executed_tp_indices") or [])
+        if tp_index in executed:
+            return
+        existing = {int(o.get("index")) for o in (execution.get("tp_orders") or []) if o.get("index") is not None}
+        if tp_index in existing:
+            return
+
+        qtys = execution.get("tp_qtys") or []
+        if tp_index < 1 or tp_index > len(qtys):
+            return
+        qty = float(qtys[tp_index - 1] or 0)
+        if qty <= 0:
+            return
+
+        self.client.place_order(
+            symbol=execution["symbol"],
+            side=execution["exit_side"],
+            qty=qty,
+            order_type="MARKET",
+            reduce_only=execution.get("exit_reduce_only"),
+            client_id=f"{execution.get('signal_id', new_signal_id())}-tp{tp_index}-fallback",
+            trade_side=execution.get("exit_trade_side"),
+            position_id=execution.get("position_id") if execution.get("exit_trade_side") else None,
+        )
+        execution.setdefault("executed_tp_indices", []).append(tp_index)
+
+    def _cancel_remaining_protection(self, execution: Dict[str, Any]) -> None:
+        symbol = execution.get("symbol")
+        if not symbol:
+            return
+
+        tpsl_ids = []
+        limit_ids = []
+        for order in execution.get("tp_orders") or []:
+            order_id = order.get("orderId") or order.get("id")
+            if not order_id:
+                continue
+            if str(order.get("kind", "")).upper() == "TPSL":
+                tpsl_ids.append(str(order_id))
+            else:
+                limit_ids.append(str(order_id))
+
+        for order_id in tpsl_ids:
+            try:
+                self.client.cancel_tpsl(symbol, order_id)
+            except Exception:
+                pass
+        if limit_ids:
+            try:
+                self.client.cancel_orders(symbol, limit_ids)
+            except Exception:
+                pass
 
     def get_exchange_open_position_count(self) -> int:
         self._refresh_state()
@@ -563,6 +982,162 @@ class TradeExecutor:
         q2 = qty * b
         q3 = max(0.0, qty - q1 - q2)
         return [q1, q2, q3]
+
+    def _evaluate_liquidation_safety(self, position: Dict[str, Any], signal: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
+        liq_raw = position.get("liqPrice") or position.get("liquidationPrice") or position.get("liq_price")
+        try:
+            liq_price = float(liq_raw)
+        except Exception:
+            liq_price = 0.0
+
+        if liq_price <= 0:
+            return {"safe": True, "liq_price": liq_price, "reason": "Bitunix did not return liqPrice."}
+
+        entry = float(signal["entry"])
+        sl = float(signal["sl"])
+        risk = abs(entry - sl)
+        if risk <= 0:
+            return {"safe": True, "liq_price": liq_price, "reason": "Zero-risk setup."}
+
+        buffer_price = risk * float(BITUNIX_LIQUIDATION_SAFETY_BUFFER_R)
+        side = str(signal.get("side", "")).upper()
+        if side == "LONG":
+            safe = liq_price < (sl - buffer_price)
+            reason = f"liq={liq_price:.2f}, sl={sl:.2f}, required_below={sl - buffer_price:.2f}"
+        else:
+            safe = liq_price > (sl + buffer_price)
+            reason = f"liq={liq_price:.2f}, sl={sl:.2f}, required_above={sl + buffer_price:.2f}"
+
+        return {
+            "safe": bool(safe),
+            "liq_price": liq_price,
+            "buffer_price": buffer_price,
+            "reason": reason,
+            "tf": plan.get("tf"),
+        }
+
+    def _estimate_pretrade_liquidation(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        entry: float,
+        sl: float,
+        notional: float,
+        leverage: int,
+        margin_mode: str,
+    ) -> Dict[str, Any]:
+        risk = abs(entry - sl)
+        if entry <= 0 or risk <= 0 or leverage <= 0 or notional <= 0:
+            return {"safe": True, "liq_price": None, "reason": "Insufficient inputs for pre-trade estimate."}
+
+        mmr = self._maintenance_margin_rate(symbol, notional, leverage)
+        if mmr is None:
+            return {"safe": True, "liq_price": None, "reason": "Position tier data unavailable."}
+
+        liq_move_pct = max(0.0, (1.0 / float(leverage)) - float(mmr))
+        if liq_move_pct <= 0:
+            return {"safe": False, "liq_price": None, "maintenance_margin_rate": mmr, "reason": "Leverage too high for maintenance margin tier."}
+
+        if side == "LONG":
+            liq_price = entry * (1.0 - liq_move_pct)
+            safe = liq_price < (sl - risk * float(BITUNIX_LIQUIDATION_SAFETY_BUFFER_R))
+            required = sl - risk * float(BITUNIX_LIQUIDATION_SAFETY_BUFFER_R)
+            reason = f"pre_liq={liq_price:.2f}, sl={sl:.2f}, required_below={required:.2f}, mmr={mmr:.4f}, margin_mode={margin_mode}"
+        else:
+            liq_price = entry * (1.0 + liq_move_pct)
+            safe = liq_price > (sl + risk * float(BITUNIX_LIQUIDATION_SAFETY_BUFFER_R))
+            required = sl + risk * float(BITUNIX_LIQUIDATION_SAFETY_BUFFER_R)
+            reason = f"pre_liq={liq_price:.2f}, sl={sl:.2f}, required_above={required:.2f}, mmr={mmr:.4f}, margin_mode={margin_mode}"
+
+        return {
+            "safe": bool(safe),
+            "liq_price": float(liq_price),
+            "maintenance_margin_rate": float(mmr),
+            "reason": reason,
+        }
+
+    def _maintenance_margin_rate(self, symbol: str, notional: float, leverage: int) -> Optional[float]:
+        if not self.client.is_configured():
+            return None
+        try:
+            tiers = self.client.get_position_tiers(symbol).get("data", []) or []
+        except Exception:
+            return None
+        chosen = None
+        value = float(notional)
+        for tier in tiers:
+            try:
+                start = float(tier.get("startValue") or 0)
+                end_raw = tier.get("endValue")
+                end = float(end_raw) if end_raw not in (None, "", "0") else float("inf")
+                tier_leverage = int(tier.get("leverage") or 0)
+                if value >= start and value < end:
+                    chosen = tier
+                    if tier_leverage <= 0 or leverage <= tier_leverage:
+                        break
+            except Exception:
+                continue
+        if chosen is None and tiers:
+            chosen = tiers[-1]
+        if not chosen:
+            return None
+        try:
+            return float(chosen.get("maintenanceMarginRate"))
+        except Exception:
+            return None
+
+    def _ensure_required_margin_mode(self, symbol: str, exchange_open_positions: int = 0) -> Dict[str, Any]:
+        required = str(BITUNIX_REQUIRED_MARGIN_MODE or "ISOLATION").strip().upper()
+        try:
+            current_data = self.client.get_leverage_margin_mode(symbol, BITUNIX_MARGIN_COIN).get("data", {}) or {}
+        except Exception as e:
+            return {
+                "ok": False,
+                "required_margin_mode": required,
+                "error": str(e),
+                "message": f"Could not verify Bitunix margin mode: {e}",
+            }
+
+        current_mode = str(current_data.get("marginMode") or "").strip().upper()
+        if current_mode == required:
+            return {"ok": True, "margin_mode": current_mode, "required_margin_mode": required}
+
+        if exchange_open_positions > 0:
+            return {
+                "ok": False,
+                "margin_mode": current_mode,
+                "required_margin_mode": required,
+                "message": f"Margin mode is {current_mode}; required {required}. Close open positions before switching.",
+            }
+
+        try:
+            self.client.change_margin_mode(symbol, required, BITUNIX_MARGIN_COIN)
+            confirmed = self.client.get_leverage_margin_mode(symbol, BITUNIX_MARGIN_COIN).get("data", {}) or {}
+            confirmed_mode = str(confirmed.get("marginMode") or "").strip().upper()
+        except Exception as e:
+            return {
+                "ok": False,
+                "margin_mode": current_mode,
+                "required_margin_mode": required,
+                "error": str(e),
+                "message": f"Failed to switch Bitunix margin mode to {required}: {e}",
+            }
+
+        if confirmed_mode != required:
+            return {
+                "ok": False,
+                "margin_mode": confirmed_mode,
+                "required_margin_mode": required,
+                "message": f"Bitunix margin mode stayed {confirmed_mode}; required {required}.",
+            }
+
+        return {
+            "ok": True,
+            "margin_mode": confirmed_mode,
+            "required_margin_mode": required,
+            "message": f"Bitunix margin mode switched to {required}.",
+        }
 
 
 def new_signal_id() -> str:

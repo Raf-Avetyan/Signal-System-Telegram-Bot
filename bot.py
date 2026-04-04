@@ -150,6 +150,9 @@ class PonchBot:
             f"[TRADE] Startup check: auth_ok={trade_check.get('auth_ok')} "
             f"balance={float(trade_check.get('balance_available', 0) or 0):.2f} "
             f"position_mode={trade_check.get('position_mode')} "
+            f"margin_mode={trade_check.get('margin_mode')} "
+            f"required_margin_mode={trade_check.get('required_margin_mode')} "
+            f"margin_mode_ok={trade_check.get('margin_mode_ok')} "
             f"leverage={int(trade_check.get('leverage', 0) or 0)} "
             f"open_positions={int(trade_check.get('open_positions', 0) or 0)} "
             f"sides={trade_check.get('position_sides', [])}"
@@ -1352,14 +1355,27 @@ class PonchBot:
                 if sig.get("msg_id") and sig.get("chat_id"):
                     tg.update_signal_message(sig["chat_id"], sig["msg_id"], sig)
 
-                    # NEW: Reply if TP2 or TP3 targets hit
-                    if evt_type == "TP2":
+                    # Reply on target progression and closure events.
+                    if evt_type == "TP1":
+                        tg.send_tp1_hit_congrats(
+                            sig["chat_id"],
+                            sig["msg_id"],
+                            sig.get("tf", "Unknown"),
+                            side=sig.get("side"),
+                            lock_price=sig.get("entry"),
+                            entry=sig.get("entry"),
+                            sl=sig.get("sl"),
+                            tp1=sig.get("tp1"),
+                            tp2=sig.get("tp2"),
+                            size=(sig.get("meta", {}) or {}).get("size")
+                        )
+                    elif evt_type == "TP2":
                         tg.send_tp2_hit_congrats(
                             sig["chat_id"],
                             sig["msg_id"],
                             sig.get("tf", "Unknown"),
                             side=sig.get("side"),
-                            lock_price=sig.get("tp1"),
+                            lock_price=sig.get("entry"),
                             entry=sig.get("entry"),
                             sl=sig.get("sl"),
                             tp1=sig.get("tp1"),
@@ -1910,6 +1926,31 @@ class PonchBot:
                     f"affordable_qty={float(plan.get('affordable_qty', 0) or 0):.6f} "
                     f"affordable_notional={float(plan.get('affordable_notional', 0) or 0):.4f}"
                 )
+                if plan.get("required_margin_mode") or plan.get("margin_mode"):
+                    print(
+                        f"  [TRADE] Margin mode: current={plan.get('margin_mode')} "
+                        f"required={plan.get('required_margin_mode')}"
+                    )
+                if "pre_liq_estimate" in plan or "pre_liq_reason" in plan:
+                    print(
+                        f"  [TRADE] Pre-liq safety: safe={plan.get('pre_liq_safe')} "
+                        f"est_liq={plan.get('pre_liq_estimate')} note={plan.get('pre_liq_reason')}"
+                    )
+                if "liq_price" in plan or "liq_reason" in plan:
+                    print(
+                        f"  [TRADE] Liquidation safety: safe={plan.get('liq_safe')} "
+                        f"liq_price={plan.get('liq_price')} note={plan.get('liq_reason')}"
+                    )
+                if plan.get("entry_order_id") or plan.get("entry_client_id"):
+                    print(
+                        f"  [TRADE] Entry order refs: order_id={plan.get('entry_order_id')} "
+                        f"client_id={plan.get('entry_client_id')}"
+                    )
+                if plan.get("entry_status") or plan.get("entry_trade_qty") is not None:
+                    print(
+                        f"  [TRADE] Entry detail: status={plan.get('entry_status')} "
+                        f"trade_qty={plan.get('entry_trade_qty')}"
+                    )
             return
 
         status = "accepted" if result.accepted else "blocked"
@@ -1936,10 +1977,21 @@ class PonchBot:
             if details.get("position_mode"):
                 print(
                     f"  [TRADE] PositionMode={details.get('position_mode')} "
+                    f"margin_mode={details.get('margin_mode')} "
                     f"leverage={int(details.get('leverage', 0) or 0)} "
                     f"risk_qty={float(details.get('risk_qty', 0) or 0):.6f} "
                     f"affordable_qty={float(details.get('affordable_qty', 0) or 0):.6f} "
                     f"affordable_notional={float(details.get('affordable_notional', 0) or 0):.4f}"
+                )
+            if "pre_liq_estimate" in details or "pre_liq_reason" in details:
+                print(
+                    f"  [TRADE] Pre-liq safety: safe={details.get('pre_liq_safe')} "
+                    f"est_liq={details.get('pre_liq_estimate')} note={details.get('pre_liq_reason')}"
+                )
+            if "liq_price" in details or "liq_reason" in details:
+                print(
+                    f"  [TRADE] Liquidation safety: safe={details.get('liq_safe')} "
+                    f"liq_price={details.get('liq_price')} note={details.get('liq_reason')}"
                 )
             if details.get("endpoint") or details.get("response_text") or details.get("error"):
                 print(f"  [TRADE] Balance check error: {details.get('error')}")
@@ -1958,6 +2010,10 @@ class PonchBot:
                 f"tp_orders={len(exec_info.get('tp_orders', []) or [])} "
                 f"sl_order={bool(exec_info.get('sl_order'))}"
             )
+            if "protection_ready" in exec_info:
+                print(f"  [TRADE] Protection ready: {bool(exec_info.get('protection_ready'))}")
+            for warning in exec_info.get("protection_warnings", []) or []:
+                print(f"  [TRADE] Protection warning: {warning}")
         if result.accepted and result.payload:
             sig_obj["execution"] = result.payload
             self._save_state()

@@ -47,26 +47,40 @@ def send(text, parse_mode=None, chat_id=None, reply_markup=None, reply_to_messag
         print(f"[TG ERROR] {e}")
         return None
 
+def send_tp1_hit_congrats(
+    chat_id, message_id, tf, side=None, lock_price=None,
+    entry=None, sl=None, tp1=None, tp2=None, size=None
+):
+    """Send a reply for hitting TP1 and moving stop to breakeven."""
+    import random
+    messages = [
+        f"🟢 <b>TP1 HIT!</b> [{tf}] First target reached. Trade is protected now.",
+        f"✅ <b>FIRST TARGET CLEARED!</b> [{tf}] Good reaction. Risk is off the table.",
+        f"🛡 <b>BREAKEVEN PROTECTION ON</b> [{tf}] TP1 was reached cleanly.",
+    ]
+    txt = random.choice(messages)
+
+    be_price = entry if entry is not None else lock_price
+    if be_price is not None:
+        side_txt = side if side else "POSITION"
+        txt += (
+            f"\n\n\U0001F6E1 <b>Safety Update</b>\n"
+            f"Set SL to <b>breakeven</b> for <b>{side_txt}</b> at <b>{fmt_price(be_price)}</b>"
+        )
+    return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
+
 def send_tp2_hit_congrats(
     chat_id, message_id, tf, side=None, lock_price=None,
     entry=None, sl=None, tp1=None, tp2=None, size=None
 ):
-    """Send a reply for hitting TP2 with the actual protected stop level."""
+    """Send a reply for hitting TP2 without moving the stop beyond breakeven."""
     import random
     messages = [
-        f"⚡️ <b>TARGET 2 SMACKED!</b> [{tf}] Moving fast! Final goal in sight. 🚀",
-        f"💹 <b>TP2 REACHED!</b> [{tf}] Profits secured. Riding to the end! ✅",
-        f"🔥 <b>MID-TARGET HIT!</b> [{tf}] 2/3 TPs done. Pure momentum! 💰",
+        f"⚡️ <b>TARGET 2 SMACKED!</b> [{tf}] Moving fast! Final goal in sight.",
+        f"💹 <b>TP2 REACHED!</b> [{tf}] Trade stays protected at breakeven.",
+        f"🔥 <b>MID-TARGET HIT!</b> [{tf}] 2/3 TPs done. Let the runner work.",
     ]
     txt = random.choice(messages)
-
-    actual_lock = lock_price if lock_price is not None else sl
-    if actual_lock is not None:
-        side_txt = side if side else "POSITION"
-        txt += (
-            f"\n\n🛡 <b>Safety Update</b>\n"
-            f"Protected stop for <b>{side_txt}</b> is now at <b>{fmt_price(actual_lock)}</b>"
-        )
     return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
 
 def send_tp3_hit_congrats(chat_id, message_id, tf):
