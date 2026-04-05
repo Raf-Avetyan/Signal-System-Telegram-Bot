@@ -233,8 +233,8 @@ SCALP_COUNTERTREND_MIN_SCORE_BY_TF = {
 # Win-rate-first quality gates
 SCALP_MIN_SCORE_BY_TF = {
     "5m": 3,
-    "15m": 4,
-    "1h": 1,
+    "15m": 3,
+    "1h": 2,
     "4h": 1,
 }
 SCALP_ALLOWED_SESSIONS_BY_TF = {
