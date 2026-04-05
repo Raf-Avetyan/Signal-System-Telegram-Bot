@@ -184,6 +184,7 @@ def parse_gemini_trade_instruction(api_key, model, user_text, context_text):
         "- Use move_sl_entry for breakeven/entry stop moves.\n"
         "- For close half/30 percent etc, return close_partial with fraction from 0 to 1.\n"
         "- For set tp1/tp2/tp3, fill tp_index and price.\n"
+        "- For cancel all take profits, use action cancel_tp with tp_index null.\n"
         "- If user asks for something dangerous or unclear, use unsupported.\n"
         "- Prefer signal_id if the user mentions one.\n"
         "- If no signal_id is given, preserve side/tf hints when present.\n\n"
@@ -222,6 +223,48 @@ def parse_gemini_trade_instruction(api_key, model, user_text, context_text):
                 return json.loads(text[start:end + 1])
     except Exception as e:
         print(f"[GEMINI ERROR] Trade instruction parse failed: {e}")
+    return None
+
+
+def ask_gemini_trade_question(api_key, model, user_text, context_text):
+    """
+    Use Gemini to answer a plain-language question about the bot, trades, or controls.
+    Returns a short plain-text answer or None on failure.
+    """
+    if not api_key or not model or not user_text:
+        return None
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    prompt = (
+        "You are an assistant inside a live crypto trading bot's private execution chat. "
+        "The user may ask about positions, bot behavior, controls, or how a requested action would work. "
+        "Answer briefly, clearly, and in plain language. "
+        "If the answer depends on the current tracked positions, use the provided context. "
+        "Do not invent trades or exchange state that is not in the context. "
+        "Do not output markdown tables or JSON.\n\n"
+        f"Active signal context:\n{context_text}\n\n"
+        f"User question:\n{user_text}"
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.2,
+        },
+    }
+    try:
+        resp = requests.post(url, params={"key": api_key}, json=payload, timeout=25)
+        resp.raise_for_status()
+        data = resp.json()
+        text = (
+            data.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("text", "")
+        )
+        text = str(text or "").strip()
+        return text or None
+    except Exception as e:
+        print(f"[GEMINI ERROR] Trade question answer failed: {e}")
     return None
 
 

@@ -73,7 +73,7 @@ from charting import generate_daily_levels_chart
 from data import (
     fetch_klines, fetch_all_timeframes, fetch_daily, fetch_weekly, fetch_monthly, 
     fetch_funding_rate, fetch_open_interest, fetch_liquidations, fetch_global_indicators, fetch_order_book,
-    fetch_trading_economics_calendar, parse_gemini_trade_instruction
+    fetch_trading_economics_calendar, parse_gemini_trade_instruction, ask_gemini_trade_question
 )
 from tracker import SignalTracker
 from bitunix import verify_bitunix_user
@@ -243,6 +243,15 @@ class PonchBot:
             return
         tg.send_execution_notice(title, lines=lines, chat_id=exec_chat, icon=icon)
 
+    def _send_private_execution_answer(self, text):
+        exec_chat = self._execution_chat_id()
+        if not exec_chat:
+            return
+        answer = str(text or "").strip()
+        if not answer:
+            return
+        tg.send(answer, chat_id=exec_chat)
+
     def _is_private_exec_chat(self, chat_id):
         exec_chat = str(self._execution_chat_id() or "").strip()
         return bool(exec_chat and str(chat_id or "").strip() == exec_chat)
@@ -329,18 +338,81 @@ class PonchBot:
         if kind == "set_tp":
             return f"Set TP{int(action.get('tp_index') or 0)} to {float(action.get('price') or 0):.2f}"
         if kind == "cancel_tp":
+            if int(action.get("tp_index") or 0) not in {1, 2, 3}:
+                return "Cancel all take profits"
             return f"Cancel TP{int(action.get('tp_index') or 0)}"
         if kind == "close_full":
             return "Close full position"
         if kind == "close_partial":
             return f"Close {float(action.get('fraction', 0) or 0) * 100:.1f}% of position"
         if kind == "status":
+            if action.get("signal_id") or action.get("side") or action.get("tf"):
+                return "Show position details"
             return "Show live status"
         if kind == "open_signal":
             return "Open tracked signal on exchange"
         if kind == "open_manual":
-            return "Open manual market position"
+            side = str(action.get("side") or "").upper()
+            tf = str(action.get("tf") or "").strip()
+            margin = action.get("margin_usd")
+            leverage = action.get("leverage")
+            parts = ["Open manual market position"]
+            if side in {"LONG", "SHORT"}:
+                parts = [f"Open manual {side} position"]
+            if tf:
+                parts.append(f"on {tf}")
+            if margin not in (None, "", 0, 0.0):
+                parts.append(f"with ${float(margin):.2f} margin")
+            if leverage not in (None, "", 0, 0.0):
+                parts.append(f"at {int(float(leverage))}x")
+            return " ".join(parts)
         return str(action.get("reason") or "Unsupported action")
+
+    def _needs_exec_clarification(self, action):
+        action_type = str(action.get("action") or "").lower()
+        active = self._active_execution_signals()
+
+        if action_type == "open_manual":
+            side = str(action.get("side") or "").upper()
+            if side not in {"LONG", "SHORT"}:
+                return "Do you want to open a LONG or a SHORT position?"
+            return None
+
+        if action_type == "open_signal":
+            if not self._resolve_signal_for_action(action, allow_unexecuted=True):
+                return "Which tracked signal do you want to open? Send the ID, or say the side and timeframe."
+            return None
+
+        if action_type in {"move_sl_entry", "move_sl", "set_tp", "cancel_tp", "close_full", "close_partial", "status"}:
+            if not self._resolve_signal_for_action(action, allow_unexecuted=False):
+                if len(active) > 1:
+                    return "Which open position do you mean? Send the ID, or say the side and timeframe."
+                if not active:
+                    return "I do not see any active exchange position right now."
+
+        if action_type == "move_sl":
+            if action.get("price") in (None, "", 0, 0.0, "0"):
+                return "What stop-loss price do you want?"
+            return None
+
+        if action_type == "set_tp":
+            tp_index = int(action.get("tp_index") or 0)
+            if tp_index not in {1, 2, 3}:
+                return "Which target do you want to change: TP1, TP2, or TP3?"
+            if action.get("price") in (None, "", 0, 0.0, "0"):
+                return f"What price do you want for TP{tp_index}?"
+            return None
+
+        if action_type == "close_partial":
+            try:
+                fraction = float(action.get("fraction") or 0)
+            except Exception:
+                fraction = 0.0
+            if fraction <= 0 or fraction >= 1:
+                return "How much do you want to close? For example: close 30 percent."
+            return None
+
+        return None
 
     def _derive_manual_trade_signal(self, action):
         side = str(action.get("side") or "").upper()
@@ -470,13 +542,9 @@ class PonchBot:
         elif action_type == "cancel_tp":
             tp_index = int(action.get("tp_index") or 0)
             if tp_index not in {1, 2, 3}:
-                self._send_private_execution_notice(
-                    "Exec Control",
-                    ["I need TP1, TP2, or TP3 to cancel a target."],
-                    icon="⚠️",
-                )
-                return False
-            result = self.trade_executor.manual_cancel_tp(sig, tp_index)
+                result = self.trade_executor.manual_cancel_all_tps(sig)
+            else:
+                result = self.trade_executor.manual_cancel_tp(sig, tp_index)
         elif action_type == "close_full":
             result = self.trade_executor.manual_close_position(sig, 1.0)
         elif action_type == "close_partial":
@@ -525,9 +593,68 @@ class PonchBot:
             if expired:
                 self.pending_exec_action = None
                 self._save_state()
-                self._send_private_execution_notice("Exec Control", ["Pending action expired. Send the request again."], icon="⏰")
+                self._send_private_execution_notice("Exec Control", ["Pending action expired. Send the request again."], icon="?")
                 return True
             if pending_chat == str((message.get("chat") or {}).get("id") or ""):
+                pending_mode = str((self.pending_exec_action or {}).get("mode") or "confirm").lower()
+                if pending_mode == "clarify":
+                    if lower in {"no", "n", "cancel", "stop"}:
+                        self.pending_exec_action = None
+                        self._save_state()
+                        self._send_private_execution_notice("Exec Control", ["Pending request cancelled."], icon="❌")
+                        return True
+                    followup_seed = str((self.pending_exec_action or {}).get("source_text") or "")
+                    combined_text = f"{followup_seed}\nUser follow-up: {text}".strip()
+                    self.pending_exec_action = None
+                    self._save_state()
+                    if not GEMINI_API_KEY:
+                        self._send_private_execution_notice("Exec Control", ["GEMINI_API_KEY is missing in .env."], icon="⚠️")
+                        return True
+                    parsed = parse_gemini_trade_instruction(
+                        GEMINI_API_KEY,
+                        GEMINI_MODEL,
+                        combined_text,
+                        self._build_gemini_trade_context(),
+                    )
+                    if not parsed:
+                        self._send_private_execution_notice("Exec Control", ["I still could not understand the request clearly."], icon="⚠️")
+                        return True
+                    action_type = str(parsed.get("action") or "unsupported").lower()
+                    if action_type == "unsupported":
+                        self._send_private_execution_notice("Exec Control", [str(parsed.get("reason") or "Request is unclear or unsupported.")], icon="⚠️")
+                        return True
+                    if action_type == "status":
+                        self._apply_private_exec_action(parsed)
+                        return True
+                    need_more = self._needs_exec_clarification(parsed)
+                    if need_more:
+                        self.pending_exec_action = {
+                            "created_at": time.time(),
+                            "chat_id": str((message.get("chat") or {}).get("id") or ""),
+                            "action": parsed,
+                            "mode": "clarify",
+                            "source_text": combined_text,
+                        }
+                        self._save_state()
+                        self._send_private_execution_notice("Exec Control", [need_more], icon="🤖")
+                        return True
+                    preview_lines = [
+                        f"Action: {self._preview_exec_action(parsed)}",
+                        "Reply YES to execute or NO to cancel.",
+                    ]
+                    if parsed.get("signal_id"):
+                        preview_lines.insert(1, f"Target ID: {parsed.get('signal_id')}")
+                    if parsed.get("reason") not in (None, "", "n/a"):
+                        preview_lines.insert(len(preview_lines) - 1, f"Note: {parsed.get('reason')}")
+                    self.pending_exec_action = {
+                        "created_at": time.time(),
+                        "chat_id": str((message.get("chat") or {}).get("id") or ""),
+                        "action": parsed,
+                        "mode": "confirm",
+                    }
+                    self._save_state()
+                    self._send_private_execution_notice("Confirm Exec Action", preview_lines, icon="🤖")
+                    return True
                 if lower in {"yes", "y", "confirm", "do it", "execute"}:
                     action = self.pending_exec_action.get("action") or {}
                     self.pending_exec_action = None
@@ -556,29 +683,52 @@ class PonchBot:
 
         action_type = str(parsed.get("action") or "unsupported").lower()
         if action_type == "unsupported":
-            self._send_private_execution_notice("Exec Control", [str(parsed.get("reason") or "Request is unclear or unsupported.")], icon="⚠️")
+            answer = None
+            try:
+                answer = ask_gemini_trade_question(
+                    GEMINI_API_KEY,
+                    GEMINI_MODEL,
+                    text,
+                    self._build_gemini_trade_context(),
+                )
+            except Exception:
+                answer = None
+            if answer:
+                self._send_private_execution_answer(answer)
+            else:
+                self._send_private_execution_notice("Exec Control", [str(parsed.get("reason") or "Request is unclear or unsupported.")], icon="??")
             return True
 
         if action_type == "status":
             self._apply_private_exec_action(parsed)
             return True
 
+        need_more = self._needs_exec_clarification(parsed)
+        if need_more:
+            self.pending_exec_action = {
+                "created_at": time.time(),
+                "chat_id": str((message.get("chat") or {}).get("id") or ""),
+                "action": parsed,
+                "mode": "clarify",
+                "source_text": text,
+            }
+            self._save_state()
+            self._send_private_execution_notice("Exec Control", [need_more], icon="🤖")
+            return True
+
         preview_lines = [
-            f"You wrote: {text}",
-            f"I understood: {self._preview_exec_action(parsed)}",
-            f"Why: {parsed.get('reason') or 'n/a'}",
+            f"Action: {self._preview_exec_action(parsed)}",
             "Reply YES to execute or NO to cancel.",
         ]
         if parsed.get("signal_id"):
-            preview_lines.insert(2, f"Target ID: {parsed.get('signal_id')}")
-        if parsed.get("side"):
-            preview_lines.insert(3 if parsed.get("signal_id") else 2, f"Side: {parsed.get('side')}")
-        if parsed.get("tf"):
-            preview_lines.insert(4 if parsed.get("signal_id") and parsed.get("side") else len(preview_lines) - 2, f"Timeframe: {parsed.get('tf')}")
+            preview_lines.insert(1, f"Target ID: {parsed.get('signal_id')}")
+        if parsed.get("reason") not in (None, "", "n/a"):
+            preview_lines.insert(len(preview_lines) - 1, f"Note: {parsed.get('reason')}")
         self.pending_exec_action = {
             "created_at": time.time(),
             "chat_id": str((message.get("chat") or {}).get("id") or ""),
             "action": parsed,
+            "mode": "confirm",
         }
         self._save_state()
         self._send_private_execution_notice("Confirm Exec Action", preview_lines, icon="🤖")
@@ -657,20 +807,23 @@ class PonchBot:
     def _send_open_positions_snapshot(self, title="Open Positions"):
         active = self._active_execution_signals()
         if not active:
-            self._send_private_execution_notice(title, ["No active exchange positions found."], icon="📂")
+            self._send_private_execution_notice(title, ["No active exchange positions found."], icon="????")
             return
-        blocks = [f"📂 <b>{title}</b>\nOpen positions: {len(active)}"]
+        blocks = [f"???? <b>{title}</b>\n<pre>Open positions: {len(active)}</pre>"]
         for sig in active[:10]:
             execution = sig.get("execution") or {}
             signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (execution.get("signal_id"))
-            block = (
-                f"\n\n🆔 <b>Position ID</b>\n"
-                f"<pre>{signal_id or 'N/A'}</pre>\n"
-                f"📂 <b>Position Details</b>\n"
+            details_block = (
                 f"{sig.get('type', 'SCALP')} {sig.get('side', 'N/A')} [{sig.get('tf', 'N/A')}]\n"
                 f"Entry: {float(sig.get('entry', 0) or 0):.2f}    SL: {float(sig.get('sl', 0) or 0):.2f}\n"
                 f"{self._format_active_tp_line(sig)}\n"
                 f"Qty: {float(execution.get('qty', 0) or 0):.6f}"
+            )
+            block = (
+                f"\n\n???? <b>Position ID</b>\n"
+                f"<pre>{signal_id or 'N/A'}</pre>\n"
+                f"???? <b>Position Details</b>\n"
+                f"<pre>{details_block}</pre>"
             )
             blocks.append(block)
         tg.send("".join(blocks), parse_mode="HTML", chat_id=self._execution_chat_id())

@@ -1243,6 +1243,31 @@ class TradeExecutor:
         execution["protection_ready"] = bool(execution.get("sl_order")) and len(execution.get("tp_orders") or []) == active_tp_count
         return ExecutionResult(self.mode, True, f"Cancelled TP{tp_index}.", execution)
 
+    def manual_cancel_all_tps(self, signal: Dict[str, Any]) -> ExecutionResult:
+        self._refresh_state()
+        execution = (signal or {}).get("execution") or {}
+        if not execution or not execution.get("active"):
+            return ExecutionResult(self.mode, False, "No active exchange execution found for this signal.", {})
+
+        tp_orders = list(execution.get("tp_orders") or [])
+        qtys = list(execution.get("tp_qtys") or [0.0, 0.0, 0.0])
+        if not tp_orders and not any(float(q or 0) > 0 for q in qtys[:3]):
+            return ExecutionResult(self.mode, False, "No active take-profit orders were found.", execution)
+
+        if self.mode == "live":
+            for order in tp_orders:
+                try:
+                    self._cancel_tp_order_record(execution, order)
+                except Exception:
+                    pass
+
+        execution["tp_orders"] = []
+        execution["tp_qtys"] = [0.0, 0.0, 0.0]
+        execution["missing_tp_indices"] = [1, 2, 3]
+        execution["protection_ready"] = bool(execution.get("sl_order"))
+        execution["tp_mode"] = "NONE"
+        return ExecutionResult(self.mode, True, "Cancelled all take-profit orders.", execution)
+
     def manual_close_position(self, signal: Dict[str, Any], fraction: float = 1.0) -> ExecutionResult:
         self._refresh_state()
         execution = (signal or {}).get("execution") or {}
