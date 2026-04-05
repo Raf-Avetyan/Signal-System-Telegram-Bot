@@ -241,7 +241,17 @@ class PonchBot:
         exec_chat = self._execution_chat_id()
         if not exec_chat:
             return
-        tg.send_execution_notice(title, lines=lines, chat_id=exec_chat, icon=icon)
+        if str(title or "").strip() == "Bitunix Startup Check":
+            tg.send_execution_notice(title, lines=lines, chat_id=exec_chat, icon=icon)
+            return
+        body_lines = [str(line) for line in (lines or []) if str(line).strip()]
+        title_text = str(title or "").strip()
+        if title_text and title_text not in {"Exec Control", "Confirm Exec Action", "Exec Action Result"}:
+            body_lines.insert(0, title_text)
+        if not body_lines:
+            body_lines = [title_text] if title_text else []
+        if body_lines:
+            tg.send("\n".join(body_lines), chat_id=exec_chat)
 
     def _send_private_execution_answer(self, text):
         exec_chat = self._execution_chat_id()
@@ -255,6 +265,12 @@ class PonchBot:
     def _is_private_exec_chat(self, chat_id):
         exec_chat = str(self._execution_chat_id() or "").strip()
         return bool(exec_chat and str(chat_id or "").strip() == exec_chat)
+
+    def _refresh_private_execution_state(self):
+        reconcile = self.trade_executor.reconcile_execution_state(self.tracker.signals)
+        if reconcile.get("inactive_marked") or reconcile.get("state_updated"):
+            self.tracker.persist()
+        return reconcile
 
     def _active_execution_signals(self):
         active = []
@@ -283,6 +299,7 @@ class PonchBot:
         )
 
     def _build_gemini_trade_context(self):
+        self._refresh_private_execution_state()
         lines = ["Active exchange positions:"]
         active = self._active_execution_signals()
         if not active:
@@ -290,9 +307,10 @@ class PonchBot:
         for sig in active[:8]:
             execution = sig.get("execution") or {}
             active_tps = self._format_active_tp_line(sig)
+            live_sl = self._format_live_sl_value(sig)
             lines.append(
                 f"- {self._control_signal_label(sig)} "
-                f"status={sig.get('status')} sl={float(sig.get('sl', 0) or 0):.2f} "
+                f"status={sig.get('status')} sl={live_sl} "
                 f"{active_tps} qty={float(execution.get('qty', 0) or 0):.6f}"
             )
         lines.append("Recent tracked signals not opened on exchange:")
@@ -527,6 +545,7 @@ class PonchBot:
                     icon="⚠️",
                 )
                 return False
+            result = self.trade_executor.manual_move_stop(sig, float(action.get("price")))
         elif action_type == "set_tp":
             tp_index = int(action.get("tp_index") or 0)
             if action.get("price") in (None, "", 0, 0.0, "0"):
@@ -819,12 +838,13 @@ class PonchBot:
         now = now or datetime.now(timezone.utc)
         trade_check = self.trade_executor.startup_self_check()
         reconcile = self.trade_executor.reconcile_execution_state(self.tracker.signals)
-        if reconcile.get("inactive_marked"):
+        if reconcile.get("inactive_marked") or reconcile.get("state_updated"):
             self.tracker.persist()
         lines = self._build_execution_status_lines(trade_check=trade_check, reconcile=reconcile, now=now)
         self._send_private_execution_notice(title, lines)
 
     def _send_open_positions_snapshot(self, title="Open Positions"):
+        self._refresh_private_execution_state()
         active = self._active_execution_signals()
         if not active:
             self._send_private_execution_notice(title, ["No active exchange positions found."], icon="📂")
@@ -833,9 +853,10 @@ class PonchBot:
         for sig in active[:10]:
             execution = sig.get("execution") or {}
             signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (execution.get("signal_id"))
+            sl_text = self._format_live_sl_value(sig)
             details_block = (
                 f"{sig.get('type', 'SCALP')} {sig.get('side', 'N/A')} [{sig.get('tf', 'N/A')}]\n"
-                f"Entry: {float(sig.get('entry', 0) or 0):.2f}    SL: {float(sig.get('sl', 0) or 0):.2f}\n"
+                f"Entry: {float(sig.get('entry', 0) or 0):.2f}    SL: {sl_text}\n"
                 f"{self._format_active_tp_line(sig)}\n"
                 f"Qty: {float(execution.get('qty', 0) or 0):.6f}"
             )
@@ -849,6 +870,7 @@ class PonchBot:
         tg.send("".join(blocks), parse_mode="HTML", chat_id=self._execution_chat_id())
 
     def _send_single_position_snapshot(self, sig, title="Position Info"):
+        self._refresh_private_execution_state()
         sig = sig or {}
         execution = sig.get("execution") or {}
         signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or execution.get("signal_id")
@@ -856,10 +878,11 @@ class PonchBot:
         sig_type = str(sig.get("type") or "Signal")
         tf = str(sig.get("tf") or "N/A")
         status = str(sig.get("status") or "OPEN").upper()
+        sl_text = self._format_live_sl_value(sig)
         details_block = (
             f"This is your {sig_type} {side} on {tf}.\n"
             f"Status: {status}\n"
-            f"Entry: {float(sig.get('entry', 0) or 0):.2f}    SL: {float(sig.get('sl', 0) or 0):.2f}\n"
+            f"Entry: {float(sig.get('entry', 0) or 0):.2f}    SL: {sl_text}\n"
             f"{self._format_active_tp_line(sig)}\n"
             f"Qty: {float(execution.get('qty', 0) or 0):.6f}"
         )
@@ -871,6 +894,24 @@ class PonchBot:
             f"<pre>{details_block}</pre>",
         ]
         tg.send("\n".join(lines), parse_mode="HTML", chat_id=self._execution_chat_id())
+
+    def _format_live_sl_value(self, sig):
+        execution = (sig or {}).get("execution") or {}
+        if execution.get("active"):
+            if not (execution.get("sl_order") or {}):
+                return "none"
+            moved = execution.get("sl_moved_to")
+            try:
+                moved_price = float(moved or 0)
+            except Exception:
+                moved_price = 0.0
+            if moved_price > 0:
+                return f"{moved_price:.2f}"
+        try:
+            sl_price = float((sig or {}).get("sl") or 0)
+        except Exception:
+            sl_price = 0.0
+        return f"{sl_price:.2f}" if sl_price > 0 else "none"
 
     def _format_active_tp_line(self, sig):
         execution = (sig or {}).get("execution") or {}
@@ -911,7 +952,7 @@ class PonchBot:
             lines.append(f"{sig_type or 'Signal'} {side or 'N/A'} [{tf or 'N/A'}]")
         if sig.get("entry") is not None:
             lines.append(
-                f"Entry: {float(sig.get('entry') or 0):.2f}    SL: {float(sig.get('sl') or 0):.2f}"
+                f"Entry: {float(sig.get('entry') or 0):.2f}    SL: {self._format_live_sl_value(sig)}"
             )
             lines.append(self._format_active_tp_line(sig))
         meta = sig.get("meta") or {}

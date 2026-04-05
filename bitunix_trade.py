@@ -359,6 +359,41 @@ class TradeExecutor:
         self.mode = mode
         self.enabled = enabled_raw == "true" and self.mode in {"demo", "live"}
 
+    def _current_sl_price(self, signal: Dict[str, Any], execution: Dict[str, Any]) -> Optional[float]:
+        try:
+            moved = float(execution.get("sl_moved_to")) if execution.get("sl_moved_to") not in (None, "", "None") else None
+        except Exception:
+            moved = None
+        if moved and moved > 0:
+            return moved
+        try:
+            sl = float(signal.get("sl") or 0)
+        except Exception:
+            sl = 0.0
+        return sl if sl > 0 else None
+
+    def _current_position_tp_price(self, signal: Dict[str, Any], execution: Dict[str, Any]) -> Optional[float]:
+        for order in execution.get("tp_orders") or []:
+            if str(order.get("kind", "")).upper() == "POSITION_TP":
+                try:
+                    price = float(order.get("price") or 0)
+                except Exception:
+                    price = 0.0
+                if price > 0:
+                    return price
+        qtys = list(execution.get("tp_qtys") or [0.0, 0.0, 0.0])
+        active_indices = [i + 1 for i, q in enumerate(qtys[:3]) if float(q or 0) > 0]
+        if len(active_indices) == 1:
+            idx = active_indices[0]
+            targets = list(execution.get("tp_targets") or [signal.get("tp1"), signal.get("tp2"), signal.get("tp3")])
+            try:
+                price = float(targets[idx - 1] or 0)
+            except Exception:
+                price = 0.0
+            if price > 0:
+                return price
+        return None
+
     def can_trade(self) -> bool:
         self._refresh_state()
         return self.enabled
@@ -550,6 +585,7 @@ class TradeExecutor:
                     tp_index=idx,
                     plan=plan,
                     use_position_tp=(single_tp_index == idx),
+                    current_sl_price=float(signal["sl"]),
                 )
                 if tp_warning:
                     protection_warnings.append(tp_warning)
@@ -628,7 +664,8 @@ class TradeExecutor:
                 execution["active"] = False
                 execution["sl_moved_to"] = None
                 return ExecutionResult(self.mode, True, "TP1 closed the full position.", execution)
-            self.client.modify_position_tpsl(symbol, str(position_id), None, float(signal["entry"]))
+            current_tp_price = self._current_position_tp_price(signal, execution)
+            self.client.modify_position_tpsl(symbol, str(position_id), current_tp_price, float(signal["entry"]))
             execution["sl_moved_to"] = float(signal["entry"])
             return ExecutionResult(self.mode, True, "Moved SL to entry after TP1.", execution)
 
@@ -974,12 +1011,13 @@ class TradeExecutor:
         tp_index: int,
         plan: Dict[str, Any],
         use_position_tp: bool = False,
+        current_sl_price: Optional[float] = None,
     ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
         if use_position_tp:
             try:
-                tp_res = self.client.modify_position_tpsl(symbol, str(position_id), float(tp_price), None)
+                tp_res = self.client.modify_position_tpsl(symbol, str(position_id), float(tp_price), current_sl_price)
             except BitunixTradeError:
-                tp_res = self.client.place_position_tpsl(symbol, str(position_id), float(tp_price), None)
+                tp_res = self.client.place_position_tpsl(symbol, str(position_id), float(tp_price), current_sl_price)
             data = tp_res.get("data", {}) or {}
             return ({
                 "index": tp_index,
@@ -1134,7 +1172,8 @@ class TradeExecutor:
             signal["sl"] = new_sl
             execution["sl_moved_to"] = new_sl
             return ExecutionResult(self.mode, True, "Demo stop moved.", execution)
-        self.client.modify_position_tpsl(symbol, str(position_id), None, new_sl)
+        current_tp_price = self._current_position_tp_price(signal, execution)
+        self.client.modify_position_tpsl(symbol, str(position_id), current_tp_price, new_sl)
         signal["sl"] = new_sl
         execution["sl_moved_to"] = new_sl
         return ExecutionResult(self.mode, True, f"Moved SL to {new_sl:.2f}.", execution)
@@ -1171,7 +1210,8 @@ class TradeExecutor:
             return ExecutionResult(self.mode, True, f"Demo TP{tp_index} updated.", execution)
 
         if existing and str(existing.get("kind", "")).upper() == "POSITION_TP":
-            self.client.modify_position_tpsl(symbol, str(position_id), float(new_price), None)
+            current_sl_price = self._current_sl_price(signal, execution)
+            self.client.modify_position_tpsl(symbol, str(position_id), float(new_price), current_sl_price)
             existing["price"] = float(new_price)
         else:
             if existing:
@@ -1192,6 +1232,7 @@ class TradeExecutor:
                 tp_index=tp_index,
                 plan=plan,
                 use_position_tp=use_position_tp,
+                current_sl_price=self._current_sl_price(signal, execution),
             )
             if new_order is None:
                 return ExecutionResult(self.mode, False, warning or f"Failed to update TP{tp_index}.", execution)
@@ -1236,10 +1277,11 @@ class TradeExecutor:
                     self._cancel_tp_order_record(execution, order)
                 except Exception:
                     pass
+            current_sl_price = self._current_sl_price(signal, execution)
             try:
-                tp_res = self.client.modify_position_tpsl(symbol, str(position_id), float(new_price), None)
+                tp_res = self.client.modify_position_tpsl(symbol, str(position_id), float(new_price), current_sl_price)
             except BitunixTradeError:
-                tp_res = self.client.place_position_tpsl(symbol, str(position_id), float(new_price), None)
+                tp_res = self.client.place_position_tpsl(symbol, str(position_id), float(new_price), current_sl_price)
             data = tp_res.get("data", {}) or {}
             execution["tp_orders"] = [{
                 "index": 1,
@@ -1570,6 +1612,7 @@ class TradeExecutor:
             "configured": self.client.is_configured(),
             "matched": 0,
             "inactive_marked": 0,
+            "state_updated": 0,
             "orphan_positions": [],
             "missing_protection": [],
             "errors": [],
@@ -1634,6 +1677,38 @@ class TradeExecutor:
             }
             has_sl = (not sl_id) or (sl_id in live_tpsl_ids)
             has_any_tp = (not tp_ids) or any((tp_id in live_tpsl_ids or tp_id in live_order_ids) for tp_id in tp_ids)
+            if sl_id and sl_id not in live_tpsl_ids:
+                execution["sl_order"] = {}
+                report["state_updated"] += 1
+            if tp_orders:
+                live_tp_orders = []
+                removed_tp_indices = []
+                for order in tp_orders:
+                    order_id = str(order.get("orderId") or order.get("id") or "").strip()
+                    if order_id and (order_id in live_tpsl_ids or order_id in live_order_ids):
+                        live_tp_orders.append(order)
+                    else:
+                        try:
+                            idx = int(order.get("index") or 0)
+                        except Exception:
+                            idx = 0
+                        if idx in {1, 2, 3}:
+                            removed_tp_indices.append(idx)
+                if len(live_tp_orders) != len(tp_orders):
+                    execution["tp_orders"] = live_tp_orders
+                    qtys = list(execution.get("tp_qtys") or [0.0, 0.0, 0.0])
+                    while len(qtys) < 3:
+                        qtys.append(0.0)
+                    for idx in removed_tp_indices:
+                        qtys[idx - 1] = 0.0
+                    execution["tp_qtys"] = qtys
+                    missing = set(int(i) for i in (execution.get("missing_tp_indices") or []))
+                    missing.update(removed_tp_indices)
+                    execution["missing_tp_indices"] = sorted(i for i in missing if i in {1, 2, 3})
+                    execution["protection_ready"] = bool(execution.get("sl_order")) and len(live_tp_orders) == len([q for q in qtys if float(q or 0) > 0])
+                    if not live_tp_orders and not any(float(q or 0) > 0 for q in qtys[:3]):
+                        execution["tp_mode"] = "NONE"
+                    report["state_updated"] += 1
             if not has_sl or not has_any_tp:
                 report["missing_protection"].append({
                     "signal_id": execution.get("signal_id") or sig.get("signal_id"),
