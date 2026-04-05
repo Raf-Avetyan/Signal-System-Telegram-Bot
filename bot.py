@@ -715,14 +715,13 @@ class PonchBot:
 
         def _ask_to_confirm(action_obj, chat_id, source_text=None):
             preview_lines = [
-                "I can do that.",
-                f"What I understood: {self._preview_exec_action(action_obj)}.",
-                "Reply YES to execute or NO to cancel.",
+                f"I can handle that. I will {self._preview_exec_action(action_obj).lower()}.",
+                "Reply YES if you want me to do it, or NO if you want to cancel.",
             ]
             if action_obj.get("signal_id"):
-                preview_lines.insert(2, f"Position ID:\n<pre>{action_obj.get('signal_id')}</pre>")
+                preview_lines.insert(1, f"I matched this position:\n<pre>{action_obj.get('signal_id')}</pre>")
             if action_obj.get("reason") not in (None, "", "n/a"):
-                preview_lines.insert(len(preview_lines) - 1, f"Note: {action_obj.get('reason')}")
+                preview_lines.insert(len(preview_lines) - 1, f"Why I matched it this way: {action_obj.get('reason')}")
             self.pending_exec_action = {
                 "created_at": time.time(),
                 "chat_id": str(chat_id or ""),
@@ -1012,7 +1011,7 @@ class PonchBot:
             block = (
                 f"\n\n{header_block}\n"
                 f"Position ID:\n<pre>{signal_id or 'N/A'}</pre>\n"
-                + "\n".join(detail_lines)
+                f"<pre>{chr(10).join(detail_lines)}</pre>"
             )
             blocks.append(block)
         self._send_private_execution_answer("".join(blocks))
@@ -1038,7 +1037,7 @@ class PonchBot:
             f"{title}\n"
             f"This is your {sig_type} {side} on {tf}.\n"
             f"Position ID:\n<pre>{signal_id or 'N/A'}</pre>\n"
-            f"{details_block}"
+            f"<pre>{details_block}</pre>"
         )
         self._send_private_execution_answer(answer)
 
