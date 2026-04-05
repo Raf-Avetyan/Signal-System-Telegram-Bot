@@ -10,6 +10,10 @@ PRIVATE_CHAT_ID = os.getenv("PRIVATE_CHAT_ID", "")
 CHAT_ID         = PRIVATE_CHAT_ID
 PRIVATE_EXEC_CHAT_ID = os.getenv("PRIVATE_EXEC_CHAT_ID", "").strip()
 EXECUTION_UPDATES_PRIVATE_ONLY = os.getenv("EXECUTION_UPDATES_PRIVATE_ONLY", "true").strip().lower() == "true"
+PRIVATE_EXEC_AI_CONTROL_ENABLED = os.getenv("PRIVATE_EXEC_AI_CONTROL_ENABLED", "true").strip().lower() == "true"
+PRIVATE_EXEC_CONFIRM_TIMEOUT_SEC = int(os.getenv("PRIVATE_EXEC_CONFIRM_TIMEOUT_SEC", "180"))
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip()
 
 # Live Bitunix futures trading
 BITUNIX_FAPI_KEY = os.getenv("BITUNIX_FAPI_KEY", "")

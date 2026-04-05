@@ -8,6 +8,7 @@ detects signals, and sends formatted Telegram alerts.
 import time
 import traceback
 from datetime import datetime, timezone, timedelta
+import json
 
 from config import (
     SYMBOL, SIGNAL_TIMEFRAMES, POLL_INTERVAL,
@@ -54,6 +55,8 @@ from config import (
     LIQ_POOL_EXPANSION_VOLUME_MULT, LIQ_POOL_EXPANSION_BOOK_MULT, LIQ_POOL_EXPANSION_COOLDOWN,
     SMART_MONEY_ENABLED, SMART_MONEY_EXECUTION_TFS, SMART_MONEY_RISK_PCT,
     MIN_SIGNAL_SIZE_PCT, PRIVATE_EXEC_CHAT_ID, EXECUTION_UPDATES_PRIVATE_ONLY,
+    PRIVATE_EXEC_AI_CONTROL_ENABLED, PRIVATE_EXEC_CONFIRM_TIMEOUT_SEC,
+    GEMINI_API_KEY, GEMINI_MODEL, TIMEFRAME_RISK_MULTIPLIERS,
     NEWS_FILTER_ENABLED, get_active_news_blackout, is_ny_market_holiday,
     TRADING_ECONOMICS_NEWS_ENABLED, TRADING_ECONOMICS_API_KEY,
     TRADING_ECONOMICS_COUNTRIES, TRADING_ECONOMICS_MIN_IMPORTANCE,
@@ -70,7 +73,7 @@ from charting import generate_daily_levels_chart
 from data import (
     fetch_klines, fetch_all_timeframes, fetch_daily, fetch_weekly, fetch_monthly, 
     fetch_funding_rate, fetch_open_interest, fetch_liquidations, fetch_global_indicators, fetch_order_book,
-    fetch_trading_economics_calendar
+    fetch_trading_economics_calendar, parse_gemini_trade_instruction
 )
 from tracker import SignalTracker
 from bitunix import verify_bitunix_user
@@ -126,6 +129,8 @@ class PonchBot:
         self.last_market_alert   = state.get("last_market_alert", 0)
         self.last_summary_date   = state.get("last_summary_date")      # New: Track summary schedule
         self.last_daily_report_date = state.get("last_daily_report_date")
+        self.last_exec_snapshot_date = state.get("last_exec_snapshot_date")
+        self.pending_exec_action = state.get("pending_exec_action")
         self.last_scalp_open_alert = state.get("last_scalp_open_alert", {})
         self.scalp_countertrend_hits = state.get("scalp_countertrend_hits", {"LONG": [], "SHORT": []})
         self.scalp_loss_streak = state.get("scalp_loss_streak", {"LONG": 0, "SHORT": 0})
@@ -158,11 +163,10 @@ class PonchBot:
         trade_check = self.trade_executor.startup_self_check()
         print(
             f"[TRADE] Startup check: auth_ok={trade_check.get('auth_ok')} "
-            f"balance={float(trade_check.get('balance_available', 0) or 0):.2f} "
-            f"position_mode={trade_check.get('position_mode')} "
+            f"free={float(trade_check.get('balance_available', 0) or 0):.2f} "
+            f"total={float(trade_check.get('balance_total', 0) or 0):.2f} "
+            f"used={float(trade_check.get('balance_used', 0) or 0):.2f} "
             f"margin_mode={trade_check.get('margin_mode')} "
-            f"required_margin_mode={trade_check.get('required_margin_mode')} "
-            f"margin_mode_ok={trade_check.get('margin_mode_ok')} "
             f"leverage={int(trade_check.get('leverage', 0) or 0)} "
             f"open_positions={int(trade_check.get('open_positions', 0) or 0)} "
             f"sides={trade_check.get('position_sides', [])}"
@@ -189,29 +193,11 @@ class PonchBot:
         for err in reconcile.get("errors", []):
             print(f"[TRADE] Reconcile detail: {err}")
         if self._execution_chat_id():
-            startup_lines = [
-                f"mode={trade_check.get('mode')} enabled={trade_check.get('enabled')} configured={trade_check.get('configured')}",
-                f"auth_ok={trade_check.get('auth_ok')} balance={float(trade_check.get('balance_available', 0) or 0):.2f}",
-                f"margin_mode={trade_check.get('margin_mode')} required={trade_check.get('required_margin_mode')} leverage={int(trade_check.get('leverage', 0) or 0)}",
-                f"open_positions={int(trade_check.get('open_positions', 0) or 0)} matched={int(reconcile.get('matched', 0) or 0)}",
-            ]
-            if NEWS_FILTER_ENABLED and TRADING_ECONOMICS_NEWS_ENABLED:
-                self._refresh_live_news_events(datetime.now(timezone.utc))
-                startup_lines.append(
-                    f"live_news={len(self.live_news_events)} api={TRADING_ECONOMICS_COUNTRIES} key={'set' if TRADING_ECONOMICS_API_KEY else 'missing'}"
-                )
-                if self.last_live_news_error:
-                    startup_lines.append(f"live_news_error={self.last_live_news_error}")
-            if reconcile.get("inactive_marked"):
-                startup_lines.append(f"inactive_marked={int(reconcile.get('inactive_marked', 0) or 0)}")
-            if reconcile.get("orphan_positions"):
-                startup_lines.append(f"orphan_positions={len(reconcile.get('orphan_positions', []))}")
-            if reconcile.get("missing_protection"):
-                startup_lines.append(f"missing_protection={len(reconcile.get('missing_protection', []))}")
-            for err in (trade_check.get("errors") or [])[:1]:
-                startup_lines.append(str(err))
-            for err in (reconcile.get("errors") or [])[:1]:
-                startup_lines.append(str(err))
+            startup_lines = self._build_execution_status_lines(
+                trade_check=trade_check,
+                reconcile=reconcile,
+                now=datetime.now(timezone.utc),
+            )
             self._send_private_execution_notice("Bitunix Startup Check", startup_lines)
         self.last_oi_price = 0
         self.last_liq_alert_time = 0
@@ -257,12 +243,395 @@ class PonchBot:
             return
         tg.send_execution_notice(title, lines=lines, chat_id=exec_chat, icon=icon)
 
+    def _is_private_exec_chat(self, chat_id):
+        exec_chat = str(self._execution_chat_id() or "").strip()
+        return bool(exec_chat and str(chat_id or "").strip() == exec_chat)
+
+    def _active_execution_signals(self):
+        active = []
+        for sig in reversed(self.tracker.signals):
+            execution = (sig or {}).get("execution") or {}
+            if execution.get("active"):
+                active.append(sig)
+        return active
+
+    def _recent_unexecuted_signals(self):
+        pending = []
+        for sig in reversed(self.tracker.signals):
+            if str(sig.get("status", "")).upper() != "OPEN":
+                continue
+            execution = (sig or {}).get("execution") or {}
+            if execution.get("active"):
+                continue
+            pending.append(sig)
+        return pending
+
+    def _control_signal_label(self, sig):
+        signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (((sig.get("execution") or {}).get("signal_id")))
+        return (
+            f"id={signal_id or 'N/A'} type={sig.get('type', 'SCALP')} tf={sig.get('tf', 'N/A')} "
+            f"side={sig.get('side', 'N/A')} entry={float(sig.get('entry', 0) or 0):.2f}"
+        )
+
+    def _build_gemini_trade_context(self):
+        lines = ["Active exchange positions:"]
+        active = self._active_execution_signals()
+        if not active:
+            lines.append("none")
+        for sig in active[:8]:
+            execution = sig.get("execution") or {}
+            lines.append(
+                f"- {self._control_signal_label(sig)} "
+                f"status={sig.get('status')} sl={float(sig.get('sl', 0) or 0):.2f} "
+                f"tp1={float(sig.get('tp1', 0) or 0):.2f} tp2={float(sig.get('tp2', 0) or 0):.2f} "
+                f"tp3={float(sig.get('tp3', 0) or 0):.2f} qty={float(execution.get('qty', 0) or 0):.6f}"
+            )
+        lines.append("Recent tracked signals not opened on exchange:")
+        pending = self._recent_unexecuted_signals()
+        if not pending:
+            lines.append("none")
+        for sig in pending[:8]:
+            lines.append(f"- {self._control_signal_label(sig)} status={sig.get('status')}")
+        return "\n".join(lines)
+
+    def _resolve_signal_for_action(self, payload, *, allow_unexecuted=False):
+        signal_id = str(payload.get("signal_id") or "").strip()
+        side = str(payload.get("side") or "").strip().upper()
+        tf = str(payload.get("tf") or "").strip()
+        pool = self._recent_unexecuted_signals() if allow_unexecuted else self._active_execution_signals()
+
+        if signal_id:
+            for sig in pool:
+                candidate_id = str(
+                    sig.get("signal_id")
+                    or ((sig.get("meta") or {}).get("signal_id"))
+                    or (((sig.get("execution") or {}).get("signal_id")))
+                    or ""
+                ).strip()
+                if candidate_id == signal_id:
+                    return sig
+
+        matches = []
+        for sig in pool:
+            if side and str(sig.get("side", "")).upper() != side:
+                continue
+            if tf and str(sig.get("tf", "")) != tf:
+                continue
+            matches.append(sig)
+        return matches[0] if matches else (pool[0] if pool else None)
+
+    def _preview_exec_action(self, action):
+        kind = str(action.get("action") or "").lower()
+        if kind == "move_sl_entry":
+            return "Move stop to breakeven/entry"
+        if kind == "move_sl":
+            return f"Move stop to {float(action.get('price') or 0):.2f}"
+        if kind == "set_tp":
+            return f"Set TP{int(action.get('tp_index') or 0)} to {float(action.get('price') or 0):.2f}"
+        if kind == "close_full":
+            return "Close full position"
+        if kind == "close_partial":
+            return f"Close {float(action.get('fraction', 0) or 0) * 100:.1f}% of position"
+        if kind == "status":
+            return "Show live status"
+        if kind == "open_signal":
+            return "Open tracked signal on exchange"
+        if kind == "open_manual":
+            return "Open manual market position"
+        return str(action.get("reason") or "Unsupported action")
+
+    def _derive_manual_trade_signal(self, action):
+        side = str(action.get("side") or "").upper()
+        if side not in {"LONG", "SHORT"}:
+            raise ValueError("Manual open needs LONG or SHORT side.")
+        tf = str(action.get("tf") or "5m")
+        df = self.latest_data.get(tf)
+        if df is None or df.empty:
+            raise ValueError(f"No live market data available for {tf}.")
+        df = calculate_channels(df.copy())
+        curr = df.iloc[-1]
+        entry = float(curr["Close"])
+        atr = float(curr["ATR"]) if "ATR" in curr and curr["ATR"] else max(entry * 0.002, 1.0)
+        risk_cfg = TIMEFRAME_RISK_MULTIPLIERS.get(tf, TIMEFRAME_RISK_MULTIPLIERS.get("5m", {}))
+        sl_mult = float(risk_cfg.get("sl", 2.0))
+        tp1_mult = float(risk_cfg.get("tp1", 1.0))
+        tp2_mult = float(risk_cfg.get("tp2", 1.8))
+        tp3_mult = float(risk_cfg.get("tp3", 2.5))
+
+        sl = action.get("sl")
+        tp1 = action.get("tp1")
+        tp2 = action.get("tp2")
+        tp3 = action.get("tp3")
+        if sl is None:
+            sl = entry - atr * sl_mult if side == "LONG" else entry + atr * sl_mult
+        if tp1 is None:
+            tp1 = entry + atr * tp1_mult if side == "LONG" else entry - atr * tp1_mult
+        if tp2 is None:
+            tp2 = entry + atr * tp2_mult if side == "LONG" else entry - atr * tp2_mult
+        if tp3 is None:
+            tp3 = entry + atr * tp3_mult if side == "LONG" else entry - atr * tp3_mult
+
+        meta = {
+            "strategy": "MANUAL_PRIVATE",
+            "size": max(MIN_SIGNAL_SIZE_PCT, float(action.get("size_pct") or MIN_SIGNAL_SIZE_PCT)),
+        }
+        if action.get("margin_usd") is not None:
+            meta["manual_margin_usd"] = float(action.get("margin_usd"))
+        if action.get("leverage") is not None:
+            meta["manual_leverage"] = int(float(action.get("leverage")))
+
+        signal_id = new_signal_id()
+        ts = curr.name.isoformat() if hasattr(curr, "name") else datetime.now(timezone.utc).isoformat()
+        return {
+            "signal_id": signal_id,
+            "type": "MANUAL",
+            "side": side,
+            "entry": float(entry),
+            "sl": float(sl),
+            "tp1": float(tp1),
+            "tp2": float(tp2),
+            "tp3": float(tp3),
+            "tf": tf,
+            "timestamp": ts,
+            "status": "OPEN",
+            "meta": meta,
+        }
+
+    def _apply_private_exec_action(self, action):
+        action_type = str(action.get("action") or "").lower()
+        if action_type == "status":
+            self._send_execution_status_snapshot(datetime.now(timezone.utc), title="Bitunix Live Status")
+            return True
+
+        if action_type == "open_signal":
+            sig = self._resolve_signal_for_action(action, allow_unexecuted=True)
+            if not sig:
+                self._send_private_execution_notice("Exec Control", ["No tracked pending signal matched your request."], icon="⚠️")
+                return False
+            self._execute_exchange_trade(sig)
+            return True
+
+        if action_type == "open_manual":
+            sig = self._derive_manual_trade_signal(action)
+            self.tracker.log_signal(
+                side=sig["side"], entry=sig["entry"], sl=sig["sl"], tp1=sig["tp1"], tp2=sig["tp2"], tp3=sig["tp3"],
+                tf=sig["tf"], timestamp=sig["timestamp"], msg_id=None, chat_id=self._execution_chat_id(),
+                signal_type="MANUAL", meta=sig.get("meta") or {}
+            )
+            self.tracker.signals[-1]["signal_id"] = sig["signal_id"]
+            self._execute_exchange_trade(self.tracker.signals[-1])
+            return True
+
+        sig = self._resolve_signal_for_action(action, allow_unexecuted=False)
+        if not sig:
+            self._send_private_execution_notice("Exec Control", ["No active exchange position matched your request."], icon="⚠️")
+            return False
+
+        if action_type == "move_sl_entry":
+            result = self.trade_executor.manual_move_stop(sig, float(sig.get("entry") or 0))
+        elif action_type == "move_sl":
+            result = self.trade_executor.manual_move_stop(sig, float(action.get("price") or 0))
+        elif action_type == "set_tp":
+            result = self.trade_executor.manual_set_tp(sig, int(action.get("tp_index") or 0), float(action.get("price") or 0))
+        elif action_type == "close_full":
+            result = self.trade_executor.manual_close_position(sig, 1.0)
+        elif action_type == "close_partial":
+            result = self.trade_executor.manual_close_position(sig, float(action.get("fraction") or 0))
+        else:
+            self._send_private_execution_notice("Exec Control", [f"Unsupported action: {action_type}"], icon="⚠️")
+            return False
+
+        if result.payload:
+            sig["execution"] = result.payload
+        self._save_state()
+        self._send_private_execution_notice(
+            "Exec Action Result",
+            self._format_execution_lines(
+                sig,
+                extra=[f"action={action_type}", f"message={result.message}", f"accepted={result.accepted}"],
+            ),
+            icon="✅" if result.accepted else "⚠️",
+        )
+        return result.accepted
+
+    def _handle_private_exec_message(self, message):
+        if not PRIVATE_EXEC_AI_CONTROL_ENABLED or not self._is_private_exec_chat((message.get("chat") or {}).get("id")):
+            return False
+        text = str(message.get("text") or "").strip()
+        if not text:
+            return False
+
+        lower = text.lower()
+        position_phrases = [
+            "all open positions", "open positions", "show positions", "show my positions",
+            "give me positions", "what positions", "what are open", "which positions are open",
+            "list positions", "show all trades", "give me all trades"
+        ]
+        if any(phrase in lower for phrase in position_phrases):
+            self._send_open_positions_snapshot("Open Positions")
+            return True
+
+        if self.pending_exec_action:
+            pending_chat = str((self.pending_exec_action or {}).get("chat_id") or "")
+            expired = (time.time() - float((self.pending_exec_action or {}).get("created_at") or 0)) > max(30, PRIVATE_EXEC_CONFIRM_TIMEOUT_SEC)
+            if expired:
+                self.pending_exec_action = None
+                self._save_state()
+                self._send_private_execution_notice("Exec Control", ["Pending action expired. Send the request again."], icon="⏰")
+                return True
+            if pending_chat == str((message.get("chat") or {}).get("id") or ""):
+                if lower in {"yes", "y", "confirm", "do it", "execute"}:
+                    action = self.pending_exec_action.get("action") or {}
+                    self.pending_exec_action = None
+                    self._save_state()
+                    self._apply_private_exec_action(action)
+                    return True
+                if lower in {"no", "n", "cancel", "stop"}:
+                    self.pending_exec_action = None
+                    self._save_state()
+                    self._send_private_execution_notice("Exec Control", ["Pending action cancelled."], icon="❌")
+                    return True
+
+        if not GEMINI_API_KEY:
+            self._send_private_execution_notice("Exec Control", ["GEMINI_API_KEY is missing in .env."], icon="⚠️")
+            return True
+
+        parsed = parse_gemini_trade_instruction(
+            GEMINI_API_KEY,
+            GEMINI_MODEL,
+            text,
+            self._build_gemini_trade_context(),
+        )
+        if not parsed:
+            self._send_private_execution_notice("Exec Control", ["I could not understand that request clearly."], icon="⚠️")
+            return True
+
+        action_type = str(parsed.get("action") or "unsupported").lower()
+        if action_type == "unsupported":
+            self._send_private_execution_notice("Exec Control", [str(parsed.get("reason") or "Request is unclear or unsupported.")], icon="⚠️")
+            return True
+
+        preview_lines = [
+            f"request={text}",
+            f"parsed_action={action_type}",
+            f"target_id={parsed.get('signal_id') or 'auto'}",
+            f"side={parsed.get('side') or 'auto'} tf={parsed.get('tf') or 'auto'}",
+            f"details={self._preview_exec_action(parsed)}",
+            f"reason={parsed.get('reason') or 'n/a'}",
+            "Reply YES to execute or NO to cancel.",
+        ]
+        self.pending_exec_action = {
+            "created_at": time.time(),
+            "chat_id": str((message.get("chat") or {}).get("id") or ""),
+            "action": parsed,
+        }
+        self._save_state()
+        self._send_private_execution_notice("Confirm Exec Action", preview_lines, icon="🤖")
+        return True
+
+    def _format_balance_line(self, trade_check):
+        total = float(trade_check.get("balance_total", 0) or 0)
+        free = float(trade_check.get("balance_available", 0) or 0)
+        used = float(trade_check.get("balance_used", 0) or 0)
+        if total <= 0 and free > 0:
+            total = free
+        if used <= 0 and total > 0:
+            used = max(0.0, total - free)
+        return f"Balance: total={total:.2f} free={free:.2f} used={used:.2f}"
+
+    def _format_news_status_line(self, now):
+        if not NEWS_FILTER_ENABLED:
+            return "News: filter off"
+        news_blackout = self._get_active_news_block(now)
+        if news_blackout:
+            label = str(news_blackout.get("label") or "High Impact News")
+            source = str(news_blackout.get("source") or "manual")
+            end = news_blackout.get("end")
+            end_txt = end.astimezone(timezone.utc).strftime("%H:%M UTC") if isinstance(end, datetime) else "active"
+            return f"News: BLOCK {label} via {source} until {end_txt}"
+        if TRADING_ECONOMICS_NEWS_ENABLED:
+            self._refresh_live_news_events(now)
+            upcoming = [event for event in self.live_news_events if event.get("datetime") and event["datetime"] >= now]
+            if upcoming:
+                next_event = upcoming[0]
+                event_dt = next_event["datetime"].astimezone(timezone.utc).strftime("%d %b %H:%M UTC")
+                return f"News: next {next_event['event']} at {event_dt}"
+            if self.last_live_news_error:
+                return f"News: feed issue ({self.last_live_news_error})"
+            return "News: no upcoming high-impact US events"
+        manual = get_active_news_blackout(now)
+        if manual:
+            return f"News: manual block {manual.get('label', 'active')}"
+        return "News: manual blackout only"
+
+    def _build_execution_status_lines(self, trade_check=None, reconcile=None, now=None):
+        now = now or datetime.now(timezone.utc)
+        trade_check = trade_check or self.trade_executor.startup_self_check()
+        reconcile = reconcile or self.trade_executor.reconcile_execution_state(self.tracker.signals)
+        lines = [
+            f"Mode: {trade_check.get('mode')} | Auth: {'OK' if trade_check.get('auth_ok') else 'FAIL'} | Symbol: {SYMBOL}",
+            self._format_balance_line(trade_check),
+            (
+                f"Account: {trade_check.get('margin_mode') or 'N/A'} "
+                f"{int(trade_check.get('leverage', 0) or 0)}x | "
+                f"Positions: {int(trade_check.get('open_positions', 0) or 0)} open"
+            ),
+        ]
+        matched = int(reconcile.get("matched", 0) or 0)
+        orphan_count = len(reconcile.get("orphan_positions", []) or [])
+        missing_protection = len(reconcile.get("missing_protection", []) or [])
+        if matched or orphan_count or missing_protection:
+            lines.append(
+                f"Tracker: matched={matched} orphans={orphan_count} missing_protection={missing_protection}"
+            )
+        lines.append(self._format_news_status_line(now))
+
+        errors = []
+        errors.extend([str(err) for err in (trade_check.get("errors") or [])[:1]])
+        errors.extend([str(err) for err in (reconcile.get("errors") or [])[:1]])
+        if errors:
+            lines.extend(errors[:2])
+        return lines
+
+    def _send_execution_status_snapshot(self, now=None, title="Bitunix Noon Check"):
+        if not self._execution_chat_id():
+            return
+        now = now or datetime.now(timezone.utc)
+        trade_check = self.trade_executor.startup_self_check()
+        reconcile = self.trade_executor.reconcile_execution_state(self.tracker.signals)
+        if reconcile.get("inactive_marked"):
+            self.tracker.persist()
+        lines = self._build_execution_status_lines(trade_check=trade_check, reconcile=reconcile, now=now)
+        self._send_private_execution_notice(title, lines)
+
+    def _send_open_positions_snapshot(self, title="Open Positions"):
+        active = self._active_execution_signals()
+        if not active:
+            self._send_private_execution_notice(title, ["No active exchange positions found."], icon="📂")
+            return
+        lines = [f"count={len(active)}"]
+        for sig in active[:10]:
+            execution = sig.get("execution") or {}
+            signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (execution.get("signal_id"))
+            lines.append(
+                f"ID: {signal_id or 'N/A'} | {sig.get('type', 'SCALP')} {sig.get('side', 'N/A')} {sig.get('tf', 'N/A')} "
+                f"| entry={float(sig.get('entry', 0) or 0):.2f} sl={float(sig.get('sl', 0) or 0):.2f}"
+            )
+            lines.append(
+                f"tp1={float(sig.get('tp1', 0) or 0):.2f} tp2={float(sig.get('tp2', 0) or 0):.2f} "
+                f"tp3={float(sig.get('tp3', 0) or 0):.2f} qty={float(execution.get('qty', 0) or 0):.6f}"
+            )
+        self._send_private_execution_notice(title, lines, icon="📂")
+
     def _format_execution_lines(self, sig=None, extra=None):
         sig = sig or {}
         lines = []
         tf = sig.get("tf")
         sig_type = sig.get("type")
         side = sig.get("side")
+        signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (((sig.get("execution") or {}).get("signal_id")))
+        if signal_id:
+            lines.append(f"ID: {signal_id}")
         if tf or sig_type or side:
             lines.append(f"type={sig_type or 'N/A'} tf={tf or 'N/A'} side={side or 'N/A'}")
         if sig.get("entry") is not None:
@@ -1107,6 +1476,8 @@ class PonchBot:
                 "last_market_alert": self.last_market_alert,
                 "last_summary_date": self.last_summary_date,
                 "last_daily_report_date": self.last_daily_report_date,
+                "last_exec_snapshot_date": self.last_exec_snapshot_date,
+                "pending_exec_action": self.pending_exec_action,
                 "last_scalp_open_alert": self.last_scalp_open_alert,
                 "scalp_countertrend_hits": self.scalp_countertrend_hits,
                 "scalp_loss_streak": self.scalp_loss_streak,
@@ -1188,6 +1559,10 @@ class PonchBot:
             if self.last_daily_report_date != today_str:
                 self._send_daily_report(now)
                 self.last_daily_report_date = today_str
+                self._save_state()
+            if self.last_exec_snapshot_date != today_str:
+                self._send_execution_status_snapshot(now)
+                self.last_exec_snapshot_date = today_str
                 self._save_state()
 
         # 2. Fetch Global context
@@ -1983,11 +2358,15 @@ class PonchBot:
         for up in updates.get("result", []):
             self.last_update_id = up["update_id"]
             
-            message = up.get("message")
+            message = up.get("message") or up.get("channel_post")
             if not message or "text" not in message:
                 continue
 
-            user_id = message["from"]["id"]
+            if self._handle_private_exec_message(message):
+                self._save_state()
+                continue
+
+            user_id = (message.get("from") or {}).get("id") or (message.get("chat") or {}).get("id")
             text = message["text"].strip()
             
             if text == "/start":

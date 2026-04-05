@@ -1,5 +1,6 @@
 # ─── PONCH DATA FETCHER (OKX V5 REST API) ────────────────────
 
+import json
 import pandas as pd
 import requests
 import time
@@ -143,6 +144,85 @@ def fetch_trading_economics_calendar(api_key, countries="united states", importa
     except Exception as e:
         print(f"[NEWS ERROR] TradingEconomics fetch failed: {e}")
         return []
+
+
+def parse_gemini_trade_instruction(api_key, model, user_text, context_text):
+    """
+    Use Gemini to convert a free-form trade-control message into structured JSON.
+    Returns a dict or None on failure.
+    """
+    if not api_key or not model or not user_text:
+        return None
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    prompt = (
+        "You are a parser for a live crypto trading bot. "
+        "Convert the user's message into a single JSON object only. "
+        "Do not include markdown.\n\n"
+        "Allowed actions: status, open_signal, open_manual, move_sl, move_sl_entry, set_tp, close_full, close_partial, cancel_tp, unsupported.\n"
+        "JSON schema:\n"
+        "{"
+        "\"action\": string,"
+        "\"signal_id\": string|null,"
+        "\"side\": \"LONG\"|\"SHORT\"|null,"
+        "\"tf\": \"5m\"|\"15m\"|\"1h\"|\"4h\"|null,"
+        "\"tp_index\": 1|2|3|null,"
+        "\"price\": number|null,"
+        "\"margin_usd\": number|null,"
+        "\"leverage\": number|null,"
+        "\"tp1\": number|null,"
+        "\"tp2\": number|null,"
+        "\"tp3\": number|null,"
+        "\"sl\": number|null,"
+        "\"fraction\": number|null,"
+        "\"reason\": string,"
+        "\"confidence\": number"
+        "}\n\n"
+        "Rules:\n"
+        "- Use action=open_signal only if the user clearly wants to open a tracked signal.\n"
+        "- Use action=open_manual if the user wants a fresh manual market position.\n"
+        "- Use move_sl_entry for breakeven/entry stop moves.\n"
+        "- For close half/30 percent etc, return close_partial with fraction from 0 to 1.\n"
+        "- For set tp1/tp2/tp3, fill tp_index and price.\n"
+        "- If user asks for something dangerous or unclear, use unsupported.\n"
+        "- Prefer signal_id if the user mentions one.\n"
+        "- If no signal_id is given, preserve side/tf hints when present.\n\n"
+        f"Active signal context:\n{context_text}\n\n"
+        f"User message:\n{user_text}"
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.1,
+            "responseMimeType": "application/json",
+        },
+    }
+    try:
+        resp = requests.post(url, params={"key": api_key}, json=payload, timeout=25)
+        resp.raise_for_status()
+        data = resp.json()
+        text = (
+            data.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("text", "")
+        )
+        if not text:
+            return None
+        text = text.strip()
+        if text.startswith("```"):
+            text = text.split("```", 2)[1]
+            text = text.replace("json", "", 1).strip()
+        try:
+            return json.loads(text)
+        except Exception:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start >= 0 and end > start:
+                return json.loads(text[start:end + 1])
+    except Exception as e:
+        print(f"[GEMINI ERROR] Trade instruction parse failed: {e}")
+    return None
 
 
 def fetch_weekly(symbol=SYMBOL, limit=52):

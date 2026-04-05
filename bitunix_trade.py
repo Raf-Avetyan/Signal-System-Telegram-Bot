@@ -5,6 +5,7 @@ import secrets
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 
@@ -380,6 +381,8 @@ class TradeExecutor:
             "configured": self.client.is_configured(),
             "auth_ok": False,
             "balance_available": 0.0,
+            "balance_total": 0.0,
+            "balance_used": 0.0,
             "open_positions": 0,
             "position_sides": [],
             "errors": [],
@@ -390,6 +393,8 @@ class TradeExecutor:
 
         bal = self._safe_get_balance()
         info["balance_available"] = float(bal.get("available", 0) or 0)
+        info["balance_total"] = float(bal.get("total", 0) or 0)
+        info["balance_used"] = float(bal.get("used", 0) or 0)
         raw = bal.get("raw") or {}
         info["position_mode"] = str(raw.get("positionMode") or BITUNIX_POSITION_MODE or "UNKNOWN").strip().upper()
         info["leverage"] = int(raw.get("leverage") or BITUNIX_DEFAULT_LEVERAGE or 0)
@@ -658,6 +663,19 @@ class TradeExecutor:
         min_base_qty = float(symbol_rules.get("min_base_qty") or BITUNIX_MIN_BASE_QTY)
         qty_step = float(symbol_rules.get("qty_step") or BITUNIX_QTY_STEP)
         desired_leverage = int(BITUNIX_DEFAULT_LEVERAGE or 1)
+        meta = signal.get("meta") or {}
+        manual_margin_usd = meta.get("manual_margin_usd")
+        manual_leverage = meta.get("manual_leverage")
+        try:
+            manual_margin_usd = float(manual_margin_usd) if manual_margin_usd is not None else None
+        except Exception:
+            manual_margin_usd = None
+        try:
+            manual_leverage = int(float(manual_leverage)) if manual_leverage is not None else None
+        except Exception:
+            manual_leverage = None
+        if manual_leverage is not None and manual_leverage > 0:
+            desired_leverage = int(manual_leverage)
         leverage = int(raw_account.get("leverage") or desired_leverage or 1)
         margin_mode = "ISOLATION"
         if self.client.is_configured():
@@ -670,7 +688,6 @@ class TradeExecutor:
         tf_max_leverage = int(BITUNIX_LIQUIDATION_MAX_LEVERAGE_BY_TF.get(tf_name, leverage) or leverage)
         target_leverage = max(1, min(desired_leverage, tf_max_leverage))
         leverage = target_leverage
-        meta = signal.get("meta") or {}
         signal_size_pct = meta.get("size", signal.get("size", 0))
         try:
             signal_size_pct = float(signal_size_pct or 0)
@@ -680,9 +697,15 @@ class TradeExecutor:
         risk_from_balance = balance_available * effective_risk_cap_pct
         risk_budget = min(BITUNIX_MAX_RISK_USD, risk_from_balance) if balance_available > 0 else 0.0
         risk_qty = (risk_budget / risk_per_unit) if risk_budget > 0 else 0.0
-        affordable_notional = max(0.0, balance_available * leverage * 0.98)
+        margin_budget = balance_available
+        if manual_margin_usd is not None:
+            margin_budget = min(balance_available, max(0.0, manual_margin_usd))
+        affordable_notional = max(0.0, margin_budget * leverage * 0.98)
         affordable_qty = (affordable_notional / entry) if entry > 0 else 0.0
-        qty = min(risk_qty, affordable_qty) if affordable_qty > 0 else 0.0
+        if manual_margin_usd is not None and manual_margin_usd > 0:
+            qty = affordable_qty
+        else:
+            qty = min(risk_qty, affordable_qty) if affordable_qty > 0 else 0.0
         if (
             qty > 0
             and balance_available >= BITUNIX_MIN_NOTIONAL_USD
@@ -731,6 +754,8 @@ class TradeExecutor:
             "risk_budget_usd": risk_budget,
             "risk_cap_pct": effective_risk_cap_pct,
             "signal_size_pct": signal_size_pct,
+            "manual_margin_usd": manual_margin_usd,
+            "manual_leverage": manual_leverage,
             "risk_qty": risk_qty,
             "affordable_qty": affordable_qty,
             "affordable_notional": affordable_notional,
@@ -749,9 +774,10 @@ class TradeExecutor:
 
     def _safe_get_balance(self) -> Dict[str, Any]:
         if self.mode == "demo":
-            return {"available": max(BITUNIX_MIN_NOTIONAL_USD * 5, BITUNIX_MAX_RISK_USD * 10)}
+            available = max(BITUNIX_MIN_NOTIONAL_USD * 5, BITUNIX_MAX_RISK_USD * 10)
+            return {"available": available, "total": available, "used": 0.0}
         if not self.client.is_configured():
-            return {"available": 0}
+            return {"available": 0.0, "total": 0.0, "used": 0.0}
         try:
             raw = self.client.get_single_account(BITUNIX_MARGIN_COIN).get("data", {})
             if isinstance(raw, list):
@@ -763,10 +789,33 @@ class TradeExecutor:
                 or raw.get("marginBalance")
                 or 0
             )
-            return {"available": float(available or 0), "raw": raw}
+            total = (
+                raw.get("marginBalance")
+                or raw.get("accountEquity")
+                or raw.get("equity")
+                or raw.get("walletBalance")
+                or raw.get("balance")
+                or available
+                or 0
+            )
+            position_margin = (
+                raw.get("positionMargin")
+                or raw.get("maintMargin")
+                or raw.get("usedMargin")
+                or raw.get("frozenMargin")
+                or 0
+            )
+            available_f = float(available or 0)
+            total_f = float(total or 0)
+            used_f = float(position_margin or 0)
+            if used_f <= 0 and total_f > 0:
+                used_f = max(0.0, total_f - available_f)
+            return {"available": available_f, "total": total_f, "used": used_f, "raw": raw}
         except Exception as e:
             return {
-                "available": 0,
+                "available": 0.0,
+                "total": 0.0,
+                "used": 0.0,
                 "error": str(e),
                 "endpoint": getattr(e, "endpoint", "GET /api/v1/futures/account"),
                 "response_text": getattr(e, "response_text", None),
@@ -1031,7 +1080,7 @@ class TradeExecutor:
             order_id = order.get("orderId") or order.get("id")
             if not order_id:
                 continue
-            if str(order.get("kind", "")).upper() == "TPSL":
+            if str(order.get("kind", "")).upper() in {"TPSL", "POSITION_TP"}:
                 tpsl_ids.append(str(order_id))
             else:
                 limit_ids.append(str(order_id))
@@ -1046,6 +1095,213 @@ class TradeExecutor:
                 self.client.cancel_orders(symbol, limit_ids)
             except Exception:
                 pass
+
+    def _cancel_tp_order_record(self, execution: Dict[str, Any], order: Dict[str, Any]) -> None:
+        symbol = execution.get("symbol")
+        if not symbol or not order:
+            return
+        order_id = order.get("orderId") or order.get("id")
+        if not order_id:
+            return
+        kind = str(order.get("kind", "")).upper()
+        if kind == "TPSL":
+            self.client.cancel_tpsl(symbol, str(order_id))
+        elif kind == "LIMIT":
+            self.client.cancel_orders(symbol, [str(order_id)])
+
+    def manual_move_stop(self, signal: Dict[str, Any], new_sl: float) -> ExecutionResult:
+        self._refresh_state()
+        execution = (signal or {}).get("execution") or {}
+        if not execution or not execution.get("active"):
+            return ExecutionResult(self.mode, False, "No active exchange execution found for this signal.", {})
+        symbol = execution.get("symbol")
+        position_id = execution.get("position_id")
+        if not symbol or not position_id:
+            return ExecutionResult(self.mode, False, "Missing exchange position reference.", execution)
+        if self.mode != "live":
+            signal["sl"] = float(new_sl)
+            execution["sl_moved_to"] = float(new_sl)
+            return ExecutionResult(self.mode, True, "Demo stop moved.", execution)
+        self.client.modify_position_tpsl(symbol, str(position_id), None, float(new_sl))
+        signal["sl"] = float(new_sl)
+        execution["sl_moved_to"] = float(new_sl)
+        return ExecutionResult(self.mode, True, f"Moved SL to {float(new_sl):.2f}.", execution)
+
+    def manual_set_tp(self, signal: Dict[str, Any], tp_index: int, new_price: float) -> ExecutionResult:
+        self._refresh_state()
+        execution = (signal or {}).get("execution") or {}
+        if not execution or not execution.get("active"):
+            return ExecutionResult(self.mode, False, "No active exchange execution found for this signal.", {})
+        if tp_index not in {1, 2, 3}:
+            return ExecutionResult(self.mode, False, "TP index must be 1, 2, or 3.", execution)
+        if signal.get(f"tp{tp_index}_hit"):
+            return ExecutionResult(self.mode, False, f"TP{tp_index} is already marked as hit.", execution)
+        qtys = list(execution.get("tp_qtys") or [0.0, 0.0, 0.0])
+        if tp_index > len(qtys) or float(qtys[tp_index - 1] or 0) <= 0:
+            return ExecutionResult(self.mode, False, f"TP{tp_index} has no active quantity left.", execution)
+
+        symbol = execution.get("symbol")
+        position_id = execution.get("position_id")
+        if not symbol or not position_id:
+            return ExecutionResult(self.mode, False, "Missing exchange position reference.", execution)
+
+        tp_orders = list(execution.get("tp_orders") or [])
+        existing = next((o for o in tp_orders if int(o.get("index", 0) or 0) == tp_index), None)
+        if self.mode != "live":
+            signal[f"tp{tp_index}"] = float(new_price)
+            execution.setdefault("tp_targets", [signal.get("tp1"), signal.get("tp2"), signal.get("tp3")])[tp_index - 1] = float(new_price)
+            return ExecutionResult(self.mode, True, f"Demo TP{tp_index} updated.", execution)
+
+        if existing and str(existing.get("kind", "")).upper() == "POSITION_TP":
+            self.client.modify_position_tpsl(symbol, str(position_id), float(new_price), None)
+            existing["price"] = float(new_price)
+        else:
+            if existing:
+                self._cancel_tp_order_record(execution, existing)
+            plan = {
+                "exit_reduce_only": execution.get("exit_reduce_only"),
+                "exit_trade_side": execution.get("exit_trade_side"),
+            }
+            active_indices = [i + 1 for i, q in enumerate(qtys) if float(q or 0) > 0]
+            use_position_tp = len(active_indices) == 1 and active_indices[0] == tp_index
+            new_order, warning = self._place_take_profit_order(
+                symbol=symbol,
+                position_id=str(position_id),
+                exit_side=execution.get("exit_side"),
+                qty_part=float(qtys[tp_index - 1]),
+                tp_price=float(new_price),
+                signal_id=execution.get("signal_id", new_signal_id()),
+                tp_index=tp_index,
+                plan=plan,
+                use_position_tp=use_position_tp,
+            )
+            if new_order is None:
+                return ExecutionResult(self.mode, False, warning or f"Failed to update TP{tp_index}.", execution)
+            tp_orders = [o for o in tp_orders if int(o.get("index", 0) or 0) != tp_index]
+            tp_orders.append(new_order)
+            execution["tp_orders"] = tp_orders
+            if warning:
+                execution.setdefault("protection_warnings", []).append(warning)
+
+        signal[f"tp{tp_index}"] = float(new_price)
+        targets = list(execution.get("tp_targets") or [signal.get("tp1"), signal.get("tp2"), signal.get("tp3")])
+        while len(targets) < 3:
+            targets.append(None)
+        targets[tp_index - 1] = float(new_price)
+        execution["tp_targets"] = targets
+        return ExecutionResult(self.mode, True, f"Updated TP{tp_index} to {float(new_price):.2f}.", execution)
+
+    def manual_close_position(self, signal: Dict[str, Any], fraction: float = 1.0) -> ExecutionResult:
+        self._refresh_state()
+        execution = (signal or {}).get("execution") or {}
+        if not execution or not execution.get("active"):
+            return ExecutionResult(self.mode, False, "No active exchange execution found for this signal.", {})
+        symbol = execution.get("symbol")
+        position_id = execution.get("position_id")
+        if not symbol or not position_id:
+            return ExecutionResult(self.mode, False, "Missing exchange position reference.", execution)
+
+        fraction = max(0.0, min(1.0, float(fraction or 0)))
+        if fraction <= 0:
+            return ExecutionResult(self.mode, False, "Close fraction must be greater than zero.", execution)
+
+        if self.mode != "live":
+            if fraction >= 0.999:
+                execution["active"] = False
+                signal["status"] = "CLOSED"
+                signal["closed_at"] = datetime.now(timezone.utc).isoformat()
+                return ExecutionResult(self.mode, True, "Demo full close completed.", execution)
+            return ExecutionResult(self.mode, True, "Demo partial close recorded.", execution)
+
+        rules = self._get_symbol_rules(symbol)
+        step = float(rules.get("qty_step") or BITUNIX_QTY_STEP)
+        min_qty = float(rules.get("min_base_qty") or BITUNIX_MIN_BASE_QTY)
+        total_qty = self._round_qty_down(float(execution.get("qty", 0) or 0), step)
+        if total_qty <= 0:
+            return ExecutionResult(self.mode, False, "Tracked position quantity is zero.", execution)
+
+        if fraction >= 0.999:
+            self.client.flash_close_position(str(position_id))
+            self._cancel_remaining_protection(execution)
+            sl_order = execution.get("sl_order") or {}
+            sl_order_id = sl_order.get("orderId") or sl_order.get("id")
+            if sl_order_id:
+                try:
+                    self.client.cancel_tpsl(symbol, str(sl_order_id))
+                except Exception:
+                    pass
+            execution["active"] = False
+            signal["status"] = "CLOSED"
+            signal["closed_at"] = datetime.now(timezone.utc).isoformat()
+            return ExecutionResult(self.mode, True, "Closed full position on Bitunix.", execution)
+
+        if signal.get("tp1_hit") or signal.get("tp2_hit") or signal.get("tp3_hit"):
+            return ExecutionResult(
+                self.mode,
+                False,
+                "Partial manual close after TP progression is not supported yet; close full or adjust TP/SL instead.",
+                execution,
+            )
+
+        close_qty = self._round_qty_down(total_qty * fraction, step)
+        if close_qty < min_qty:
+            return ExecutionResult(self.mode, False, "Requested partial close is below Bitunix minimum quantity.", execution)
+        remaining_qty = self._round_qty_down(total_qty - close_qty, step)
+        if remaining_qty < min_qty:
+            return self.manual_close_position(signal, 1.0)
+
+        self.client.place_order(
+            symbol=symbol,
+            side=execution.get("exit_side"),
+            qty=float(close_qty),
+            order_type="MARKET",
+            reduce_only=execution.get("exit_reduce_only"),
+            client_id=f"{execution.get('signal_id', new_signal_id())}-manual-close",
+            trade_side=execution.get("exit_trade_side"),
+            position_id=str(position_id) if execution.get("exit_trade_side") else None,
+        )
+        self._cancel_remaining_protection(execution)
+        execution["qty"] = float(remaining_qty)
+        tp_targets = list(execution.get("tp_targets") or [signal.get("tp1"), signal.get("tp2"), signal.get("tp3")])
+        new_tp_qtys, warning = self._split_qty(remaining_qty, min_base_qty=min_qty, step=step)
+        execution["tp_qtys"] = new_tp_qtys
+        execution["tp_orders"] = []
+        execution["missing_tp_indices"] = []
+        protection_warnings = []
+        if warning:
+            protection_warnings.append(warning)
+        active_tp_indices = [i + 1 for i, q in enumerate(new_tp_qtys) if float(q or 0) > 0]
+        single_tp_index = active_tp_indices[0] if len(active_tp_indices) == 1 else None
+        plan = {
+            "exit_reduce_only": execution.get("exit_reduce_only"),
+            "exit_trade_side": execution.get("exit_trade_side"),
+        }
+        for idx, qty_part in enumerate(new_tp_qtys, start=1):
+            if qty_part <= 0:
+                continue
+            target_price = float(tp_targets[idx - 1] or signal.get(f"tp{idx}") or 0)
+            if target_price <= 0:
+                continue
+            tp_record, tp_warning = self._place_take_profit_order(
+                symbol=symbol,
+                position_id=str(position_id),
+                exit_side=execution.get("exit_side"),
+                qty_part=float(qty_part),
+                tp_price=target_price,
+                signal_id=execution.get("signal_id", new_signal_id()),
+                tp_index=idx,
+                plan=plan,
+                use_position_tp=(single_tp_index == idx),
+            )
+            if tp_warning:
+                protection_warnings.append(tp_warning)
+            if tp_record is None:
+                execution["missing_tp_indices"].append(idx)
+            else:
+                execution["tp_orders"].append(tp_record)
+        execution["protection_warnings"] = protection_warnings
+        execution["protection_ready"] = bool(execution.get("sl_order")) and len(execution["tp_orders"]) == len(active_tp_indices)
+        return ExecutionResult(self.mode, True, f"Closed {close_qty:.6f} and rebuilt protection for remaining position.", execution)
 
     def get_exchange_open_position_count(self) -> int:
         self._refresh_state()
