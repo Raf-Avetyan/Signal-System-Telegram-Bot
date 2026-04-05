@@ -15,6 +15,7 @@ from config import (
     BITUNIX_FAPI_BASE_URL,
     BITUNIX_FAPI_KEY,
     BITUNIX_FAPI_SECRET,
+    BITUNIX_FETCH_SYMBOL_RULES,
     BITUNIX_LIQUIDATION_MAX_LEVERAGE_BY_TF,
     BITUNIX_LIQUIDATION_SAFETY_BUFFER_R,
     BITUNIX_LIQUIDATION_SAFETY_ENABLED,
@@ -104,6 +105,36 @@ class BitunixFuturesClient:
 
         try:
             resp = requests.request(method, url, headers=headers, data=(body or None), timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+        except requests.HTTPError as e:
+            text = e.response.text if e.response is not None else None
+            raise BitunixTradeError(
+                f"HTTP error on {method} {path}: {e}",
+                endpoint=f"{method} {path}",
+                response_text=text,
+            ) from e
+        except Exception as e:
+            raise BitunixTradeError(
+                f"Request failed on {method} {path}: {e}",
+                endpoint=f"{method} {path}",
+            ) from e
+        code = str(data.get("code"))
+        if code not in {"0", "200"}:
+            raise BitunixTradeError(
+                f"Bitunix API error {code}: {data.get('msg', 'unknown error')}",
+                endpoint=f"{method} {path}",
+                response_text=json.dumps(data),
+            )
+        return data
+
+    def _public_request(self, method: str, path: str, query: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        query = query or {}
+        url = f"{self.base_url}{path}"
+        if query:
+            url = f"{url}?{self._build_query(query)}"
+        try:
+            resp = requests.request(method, url, timeout=20)
             resp.raise_for_status()
             data = resp.json()
         except requests.HTTPError as e:
@@ -272,6 +303,18 @@ class BitunixFuturesClient:
             query["positionId"] = position_id
         return self._request("GET", "/api/v1/futures/tpsl/get_pending_orders", query=query)
 
+    def get_pending_orders(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        query: Dict[str, Any] = {}
+        if symbol:
+            query["symbol"] = symbol
+        return self._request("GET", "/api/v1/futures/trade/get_pending_orders", query=query)
+
+    def get_trading_pairs(self, symbols: Optional[str] = None) -> Dict[str, Any]:
+        query: Dict[str, Any] = {}
+        if symbols:
+            query["symbols"] = symbols
+        return self._public_request("GET", "/api/v1/futures/market/trading_pairs", query=query)
+
     def modify_position_tpsl(self, symbol: str, position_id: str, tp_price: Optional[float], sl_price: Optional[float]) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "symbol": symbol,
@@ -307,6 +350,7 @@ class TradeExecutor:
         self.client = BitunixFuturesClient()
         self.mode = BITUNIX_TRADING_MODE
         self.enabled = BITUNIX_TRADING_ENABLED and self.mode in {"demo", "live"}
+        self._symbol_rules_cache: Dict[str, Dict[str, Any]] = {}
 
     def _refresh_state(self):
         mode = os.getenv("BITUNIX_TRADING_MODE", self.mode).strip().lower()
@@ -378,6 +422,9 @@ class TradeExecutor:
                 info["margin_mode_ok"] = info["margin_mode"] == BITUNIX_REQUIRED_MARGIN_MODE
             except Exception as e:
                 info["errors"].append(f"margin_mode: {e}")
+
+        rules = self._get_symbol_rules(SYMBOL)
+        info["symbol_rules"] = rules
 
         return info
 
@@ -607,6 +654,9 @@ class TradeExecutor:
             position_mode = str(BITUNIX_POSITION_MODE or "ONE_WAY").strip().upper()
         tf_name = str(signal.get("tf") or signal.get("execution_tf") or "5m")
         symbol = SYMBOL
+        symbol_rules = self._get_symbol_rules(symbol)
+        min_base_qty = float(symbol_rules.get("min_base_qty") or BITUNIX_MIN_BASE_QTY)
+        qty_step = float(symbol_rules.get("qty_step") or BITUNIX_QTY_STEP)
         desired_leverage = int(BITUNIX_DEFAULT_LEVERAGE or 1)
         leverage = int(raw_account.get("leverage") or desired_leverage or 1)
         margin_mode = "ISOLATION"
@@ -640,7 +690,11 @@ class TradeExecutor:
             and qty * entry < BITUNIX_MIN_NOTIONAL_USD
         ):
             qty = min(BITUNIX_MIN_NOTIONAL_USD / entry, affordable_qty)
-        tp_qtys, tp_split_warning = self._split_qty(qty)
+        qty = self._round_qty_down(qty, qty_step)
+        if qty < min_base_qty:
+            qty = min_base_qty if affordable_qty >= min_base_qty else 0.0
+        qty = self._round_qty_down(qty, qty_step)
+        tp_qtys, tp_split_warning = self._split_qty(qty, min_base_qty=min_base_qty, step=qty_step)
         is_hedge = position_mode == "HEDGE"
         entry_side = "BUY" if signal["side"] == "LONG" else "SELL"
         exit_side = entry_side if is_hedge else ("SELL" if signal["side"] == "LONG" else "BUY")
@@ -686,6 +740,7 @@ class TradeExecutor:
             "required_margin_mode": BITUNIX_REQUIRED_MARGIN_MODE,
             "tf": tf_name,
             "notional": qty * entry,
+            "symbol_rules": symbol_rules,
             "pre_liq_estimate": pre_liq.get("liq_price"),
             "pre_liq_safe": pre_liq.get("safe"),
             "pre_liq_reason": pre_liq.get("reason"),
@@ -1031,9 +1086,9 @@ class TradeExecutor:
         return max(0.0, int(float(qty) / step) * step)
 
     @classmethod
-    def _split_qty(cls, qty: float) -> tuple[List[float], Optional[str]]:
-        step = max(float(BITUNIX_QTY_STEP or 0), 0.00000001)
-        min_leg = max(float(BITUNIX_MIN_BASE_QTY or 0), step)
+    def _split_qty(cls, qty: float, *, min_base_qty: Optional[float] = None, step: Optional[float] = None) -> tuple[List[float], Optional[str]]:
+        step = max(float(step or BITUNIX_QTY_STEP or 0), 0.00000001)
+        min_leg = max(float(min_base_qty or BITUNIX_MIN_BASE_QTY or 0), step)
         total = cls._round_qty_down(float(qty), step)
         if total <= 0:
             return [0.0, 0.0, 0.0], "TP legs skipped: quantity rounded to zero."
@@ -1064,6 +1119,139 @@ class TradeExecutor:
         return [total, 0.0, 0.0], (
             f"Compressed TP legs to TP1-only because partial TP legs fall below Bitunix min qty {min_leg:.8f}."
         )
+
+    def _get_symbol_rules(self, symbol: str) -> Dict[str, Any]:
+        symbol_key = str(symbol or SYMBOL).upper()
+        cached = self._symbol_rules_cache.get(symbol_key)
+        if cached:
+            return cached
+
+        rules = {
+            "symbol": symbol_key,
+            "min_base_qty": float(BITUNIX_MIN_BASE_QTY),
+            "qty_step": float(BITUNIX_QTY_STEP),
+        }
+        if not BITUNIX_FETCH_SYMBOL_RULES:
+            self._symbol_rules_cache[symbol_key] = rules
+            return rules
+
+        try:
+            data = self.client.get_trading_pairs(symbol_key).get("data", []) or []
+            if isinstance(data, dict):
+                data = data.get("list") or data.get("data") or []
+            row = next((item for item in data if str(item.get("symbol", "")).upper() == symbol_key), None)
+            if row:
+                base_precision = int(row.get("basePrecision") or 0)
+                qty_step = float(f"1e-{base_precision}") if base_precision > 0 else float(BITUNIX_QTY_STEP)
+                min_trade_volume = float(row.get("minTradeVolume") or BITUNIX_MIN_BASE_QTY)
+                rules.update({
+                    "min_base_qty": max(float(BITUNIX_MIN_BASE_QTY), min_trade_volume),
+                    "qty_step": max(float(BITUNIX_QTY_STEP), qty_step),
+                    "max_leverage": int(row.get("maxLeverage") or 0),
+                    "min_leverage": int(row.get("minLeverage") or 0),
+                    "default_leverage": int(row.get("defaultLeverage") or 0),
+                    "base_precision": base_precision,
+                    "quote_precision": int(row.get("quotePrecision") or 0),
+                    "symbol_status": str(row.get("symbolStatus") or ""),
+                })
+        except Exception:
+            pass
+
+        self._symbol_rules_cache[symbol_key] = rules
+        return rules
+
+    def reconcile_execution_state(self, signals: List[Dict[str, Any]]) -> Dict[str, Any]:
+        self._refresh_state()
+        report: Dict[str, Any] = {
+            "mode": self.mode,
+            "configured": self.client.is_configured(),
+            "matched": 0,
+            "inactive_marked": 0,
+            "orphan_positions": [],
+            "missing_protection": [],
+            "errors": [],
+        }
+        if self.mode != "live" or not self.client.is_configured():
+            return report
+
+        try:
+            positions = self._pending_positions_list(SYMBOL)
+        except Exception as e:
+            report["errors"].append(f"positions: {e}")
+            return report
+
+        try:
+            pending_tpsl = self.client.get_pending_tpsl(SYMBOL).get("data", []) or []
+            if isinstance(pending_tpsl, dict):
+                pending_tpsl = pending_tpsl.get("orderList") or pending_tpsl.get("data") or []
+        except Exception as e:
+            pending_tpsl = []
+            report["errors"].append(f"tpsl: {e}")
+
+        try:
+            pending_orders = self.client.get_pending_orders(SYMBOL).get("data", []) or []
+            if isinstance(pending_orders, dict):
+                pending_orders = pending_orders.get("orderList") or pending_orders.get("data") or []
+        except Exception as e:
+            pending_orders = []
+            report["errors"].append(f"orders: {e}")
+
+        live_positions = {
+            str(pos.get("positionId")): pos
+            for pos in positions
+            if str(pos.get("positionId") or "").strip() and self._position_qty(pos) > 0
+        }
+        referenced_positions = set()
+        live_tpsl_ids = {str(o.get("orderId") or o.get("id")) for o in pending_tpsl if str(o.get("orderId") or o.get("id") or "").strip()}
+        live_order_ids = {str(o.get("orderId") or o.get("id")) for o in pending_orders if str(o.get("orderId") or o.get("id") or "").strip()}
+
+        for sig in signals or []:
+            execution = (sig or {}).get("execution") or {}
+            if not execution:
+                continue
+            position_id = str(execution.get("position_id") or "").strip()
+            if not position_id:
+                continue
+            if not execution.get("active", True):
+                continue
+            referenced_positions.add(position_id)
+            if position_id not in live_positions:
+                execution["active"] = False
+                report["inactive_marked"] += 1
+                continue
+
+            report["matched"] += 1
+            sl_order = execution.get("sl_order") or {}
+            sl_id = str(sl_order.get("orderId") or sl_order.get("id") or "").strip()
+            tp_orders = execution.get("tp_orders") or []
+            tp_ids = {
+                str(order.get("orderId") or order.get("id") or "").strip()
+                for order in tp_orders
+                if str(order.get("orderId") or order.get("id") or "").strip()
+            }
+            has_sl = (not sl_id) or (sl_id in live_tpsl_ids)
+            has_any_tp = (not tp_ids) or any((tp_id in live_tpsl_ids or tp_id in live_order_ids) for tp_id in tp_ids)
+            if not has_sl or not has_any_tp:
+                report["missing_protection"].append({
+                    "signal_id": execution.get("signal_id") or sig.get("signal_id"),
+                    "position_id": position_id,
+                    "side": sig.get("side"),
+                    "tf": sig.get("tf"),
+                    "missing_sl": not has_sl,
+                    "missing_tp": not has_any_tp,
+                })
+
+        for position_id, pos in live_positions.items():
+            if position_id in referenced_positions:
+                continue
+            report["orphan_positions"].append({
+                "position_id": position_id,
+                "side": str(pos.get("side") or pos.get("positionSide") or ""),
+                "qty": float(pos.get("qty") or pos.get("positionQty") or 0),
+                "symbol": str(pos.get("symbol") or SYMBOL),
+            })
+
+        return report
 
     def _evaluate_liquidation_safety(self, position: Dict[str, Any], signal: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
         liq_raw = position.get("liqPrice") or position.get("liquidationPrice") or position.get("liq_price")

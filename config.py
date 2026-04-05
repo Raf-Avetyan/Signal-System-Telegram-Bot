@@ -8,6 +8,8 @@ load_dotenv()
 BOT_TOKEN      = os.getenv("BOT_TOKEN", "")
 PRIVATE_CHAT_ID = os.getenv("PRIVATE_CHAT_ID", "")
 CHAT_ID         = PRIVATE_CHAT_ID
+PRIVATE_EXEC_CHAT_ID = os.getenv("PRIVATE_EXEC_CHAT_ID", "").strip()
+EXECUTION_UPDATES_PRIVATE_ONLY = os.getenv("EXECUTION_UPDATES_PRIVATE_ONLY", "true").strip().lower() == "true"
 
 # Live Bitunix futures trading
 BITUNIX_FAPI_KEY = os.getenv("BITUNIX_FAPI_KEY", "")
@@ -27,6 +29,7 @@ BITUNIX_TP_SPLITS = (0.30, 0.40, 0.30)
 BITUNIX_TPSL_TRIGGER_TYPE = os.getenv("BITUNIX_TPSL_TRIGGER_TYPE", "MARK_PRICE").strip().upper()
 BITUNIX_MIN_BASE_QTY = float(os.getenv("BITUNIX_MIN_BASE_QTY", "0.0001"))
 BITUNIX_QTY_STEP = float(os.getenv("BITUNIX_QTY_STEP", "0.0001"))
+BITUNIX_FETCH_SYMBOL_RULES = os.getenv("BITUNIX_FETCH_SYMBOL_RULES", "true").strip().lower() == "true"
 
 # в”Ђв”Ђв”Ђ SYMBOL в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 SYMBOL = "BTCUSDT"
@@ -440,6 +443,134 @@ SESSIONS = {
     "LONDON": {"open": 8.0,  "close": 16.0},
     "NY":     {"open": 13.5, "close": 20.0}, # Stock Market: 9:30 AM - 4:00 PM ET
 }
+
+NEWS_FILTER_ENABLED = os.getenv("NEWS_FILTER_ENABLED", "true").strip().lower() == "true"
+NY_HOLIDAY_FILTER_ENABLED = os.getenv("NY_HOLIDAY_FILTER_ENABLED", "true").strip().lower() == "true"
+HIGH_IMPACT_NEWS_BLACKOUT_WINDOWS_UTC = os.getenv("HIGH_IMPACT_NEWS_BLACKOUT_WINDOWS_UTC", "").strip()
+TRADING_ECONOMICS_NEWS_ENABLED = os.getenv("TRADING_ECONOMICS_NEWS_ENABLED", "true").strip().lower() == "true"
+TRADING_ECONOMICS_API_KEY = os.getenv("TRADING_ECONOMICS_API_KEY", "guest:guest").strip()
+TRADING_ECONOMICS_COUNTRIES = os.getenv("TRADING_ECONOMICS_COUNTRIES", "united states").strip()
+TRADING_ECONOMICS_MIN_IMPORTANCE = int(os.getenv("TRADING_ECONOMICS_MIN_IMPORTANCE", "3"))
+TRADING_ECONOMICS_REFRESH_SEC = int(os.getenv("TRADING_ECONOMICS_REFRESH_SEC", "600"))
+TRADING_ECONOMICS_BLOCK_BEFORE_MIN = int(os.getenv("TRADING_ECONOMICS_BLOCK_BEFORE_MIN", "60"))
+TRADING_ECONOMICS_BLOCK_AFTER_MIN = int(os.getenv("TRADING_ECONOMICS_BLOCK_AFTER_MIN", "30"))
+
+
+def _observed_date(year, month, day):
+    from datetime import datetime, timedelta
+    dt = datetime(year, month, day)
+    if dt.weekday() == 5:
+        return (dt - timedelta(days=1)).date()
+    if dt.weekday() == 6:
+        return (dt + timedelta(days=1)).date()
+    return dt.date()
+
+
+def _nth_weekday_of_month(year, month, weekday, n):
+    from datetime import datetime, timedelta
+    dt = datetime(year, month, 1)
+    while dt.weekday() != weekday:
+        dt += timedelta(days=1)
+    dt += timedelta(days=7 * (n - 1))
+    return dt.date()
+
+
+def _last_weekday_of_month(year, month, weekday):
+    from datetime import datetime, timedelta
+    if month == 12:
+        dt = datetime(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        dt = datetime(year, month + 1, 1) - timedelta(days=1)
+    while dt.weekday() != weekday:
+        dt -= timedelta(days=1)
+    return dt.date()
+
+
+def _easter_date(year):
+    # Anonymous Gregorian algorithm.
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    from datetime import date
+    return date(year, month, day)
+
+
+def get_us_market_holidays(year):
+    from datetime import timedelta
+    easter = _easter_date(year)
+    return {
+        _observed_date(year, 1, 1),                          # New Year
+        _nth_weekday_of_month(year, 1, 0, 3),               # MLK
+        _nth_weekday_of_month(year, 2, 0, 3),               # Presidents Day
+        easter - timedelta(days=2),                         # Good Friday
+        _last_weekday_of_month(year, 5, 0),                 # Memorial Day
+        _observed_date(year, 6, 19),                        # Juneteenth
+        _observed_date(year, 7, 4),                         # Independence Day
+        _nth_weekday_of_month(year, 9, 0, 1),               # Labor Day
+        _nth_weekday_of_month(year, 11, 3, 4),              # Thanksgiving
+        _observed_date(year, 12, 25),                       # Christmas
+    }
+
+
+def is_ny_market_holiday(dt):
+    if not NY_HOLIDAY_FILTER_ENABLED:
+        return False
+    d = dt.date()
+    return d in get_us_market_holidays(dt.year)
+
+
+def get_manual_news_blackouts():
+    windows = []
+    raw = HIGH_IMPACT_NEWS_BLACKOUT_WINDOWS_UTC
+    if not raw:
+        return windows
+    from datetime import datetime, timezone
+    for chunk in raw.split(";"):
+        parts = [p.strip() for p in chunk.split("|") if p.strip()]
+        if len(parts) < 2:
+            continue
+        try:
+            start = datetime.fromisoformat(parts[0].replace("Z", "+00:00"))
+            end = datetime.fromisoformat(parts[1].replace("Z", "+00:00"))
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            else:
+                start = start.astimezone(timezone.utc)
+            if end.tzinfo is None:
+                end = end.replace(tzinfo=timezone.utc)
+            else:
+                end = end.astimezone(timezone.utc)
+            windows.append({
+                "start": start,
+                "end": end,
+                "label": parts[2] if len(parts) > 2 else "High Impact News",
+            })
+        except Exception:
+            continue
+    return windows
+
+
+def get_active_news_blackout(dt):
+    if not NEWS_FILTER_ENABLED:
+        return None
+    from datetime import timezone
+    check_dt = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    check_dt = check_dt.astimezone(timezone.utc)
+    for window in get_manual_news_blackouts():
+        if window["start"] <= check_dt <= window["end"]:
+            return window
+    return None
 
 def get_adjusted_sessions(dt):
     """Returns adjusted SESSIONS mapping for a given UTC datetime (handles NY DST)."""

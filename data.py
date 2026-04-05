@@ -3,6 +3,7 @@
 import pandas as pd
 import requests
 import time
+from urllib.parse import quote
 from config import SYMBOL, KLINE_LIMITS
 
 OKX_BASE = "https://www.okx.com"
@@ -118,6 +119,30 @@ def fetch_all_timeframes(symbol=SYMBOL, timeframes=None):
 def fetch_daily(symbol=SYMBOL, limit=120):
     """Convenience: fetch daily data for levels calculation."""
     return fetch_klines(symbol=symbol, interval="1d", limit=limit)
+
+
+def fetch_trading_economics_calendar(api_key, countries="united states", importance=3):
+    """
+    Fetch live economic calendar events from Trading Economics.
+    Returns a list of event dicts or [] on failure.
+    """
+    if not api_key:
+        return []
+
+    countries_path = quote(str(countries).strip(), safe=",")
+    url = f"https://api.tradingeconomics.com/calendar/country/{countries_path}"
+    params = {
+        "c": api_key,
+        "importance": int(importance),
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        print(f"[NEWS ERROR] TradingEconomics fetch failed: {e}")
+        return []
 
 
 def fetch_weekly(symbol=SYMBOL, limit=52):

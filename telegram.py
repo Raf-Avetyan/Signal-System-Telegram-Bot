@@ -1,7 +1,7 @@
 ﻿import os
 import json
 import requests
-from config import BOT_TOKEN, CHAT_ID, SYMBOL, PRIVATE_CHAT_ID
+from config import BOT_TOKEN, CHAT_ID, SYMBOL, PRIVATE_CHAT_ID, PRIVATE_EXEC_CHAT_ID
 
 API_URL_MSG   = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 API_URL_PHOTO = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
@@ -47,6 +47,18 @@ def send(text, parse_mode=None, chat_id=None, reply_markup=None, reply_to_messag
         print(f"[TG ERROR] {e}")
         return None
 
+
+def send_execution_notice(title, lines=None, chat_id=None, icon="🔐"):
+    """Send a private execution/update notice to the execution channel."""
+    target_chat = chat_id if chat_id else (PRIVATE_EXEC_CHAT_ID or PRIVATE_CHAT_ID or CHAT_ID)
+    body = ""
+    if lines:
+        clean_lines = [str(line) for line in lines if str(line).strip()]
+        if clean_lines:
+            body = "\n<pre>" + "\n".join(clean_lines) + "</pre>"
+    msg = f"{icon} <b>{title}</b>{body}"
+    return send(msg, parse_mode="HTML", chat_id=target_chat)
+
 def send_tp1_hit_congrats(
     chat_id, message_id, tf, side=None, lock_price=None,
     entry=None, sl=None, tp1=None, tp2=None, size=None
@@ -54,9 +66,9 @@ def send_tp1_hit_congrats(
     """Send a reply for hitting TP1 and moving stop to breakeven."""
     import random
     messages = [
-        f"рџџў <b>TP1 HIT!</b> [{tf}] First target reached. Trade is protected now.",
-        f"вњ… <b>FIRST TARGET CLEARED!</b> [{tf}] Good reaction. Risk is off the table.",
-        f"рџ›Ў <b>BREAKEVEN PROTECTION ON</b> [{tf}] TP1 was reached cleanly.",
+        f"🟢 <b>TP1 HIT!</b> [{tf}] First target reached. Trade is protected now.",
+        f"✅ <b>FIRST TARGET CLEARED!</b> [{tf}] Good reaction. Risk is off the table.",
+        f"🛡 <b>BREAKEVEN PROTECTION ON</b> [{tf}] TP1 was reached cleanly.",
     ]
     txt = random.choice(messages)
 
@@ -76,9 +88,9 @@ def send_tp2_hit_congrats(
     """Send a reply for hitting TP2 without moving the stop beyond breakeven."""
     import random
     messages = [
-        f"вљЎпёЏ <b>TARGET 2 SMACKED!</b> [{tf}] Moving fast! Final goal in sight.",
-        f"рџ’№ <b>TP2 REACHED!</b> [{tf}] Trade stays protected at breakeven.",
-        f"рџ”Ґ <b>MID-TARGET HIT!</b> [{tf}] 2/3 TPs done. Let the runner work.",
+        f"⚡️ <b>TARGET 2 SMACKED!</b> [{tf}] Moving fast! Final goal in sight.",
+        f"💹 <b>TP2 REACHED!</b> [{tf}] Trade stays protected at breakeven.",
+        f"🔥 <b>MID-TARGET HIT!</b> [{tf}] 2/3 TPs done. Let the runner work.",
     ]
     txt = random.choice(messages)
     return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
@@ -87,24 +99,24 @@ def send_tp3_hit_congrats(chat_id, message_id, tf):
     """Send a congratulatory reply for hitting TP3."""
     import random
     messages = [
-        f"рџЋЇ <b>TP3 HIT!</b> [{tf}] All targets achieved. Incredible trade! рџ”Ґ",
-        f"рџљЂ <b>BOOM! TP3 SMASHED!</b> [{tf}] The trend was our friend today! рџ’°",
-        f"рџ’Ћ <b>GOLDEN SIGNAL!</b> [{tf}] TP3 reached. Max profit secured! рџ’№",
-        f"рџ“Љ <b>PERFECT TRADE!</b> [{tf}] 3/3 Targets Hit. Pure accuracy. вњ…",
+        f"🎯 <b>TP3 HIT!</b> [{tf}] All targets achieved. Incredible trade! 🔥",
+        f"🚀 <b>BOOM! TP3 SMASHED!</b> [{tf}] The trend was our friend today! 💰",
+        f"💎 <b>GOLDEN SIGNAL!</b> [{tf}] TP3 reached. Max profit secured! 💹",
+        f"📊 <b>PERFECT TRADE!</b> [{tf}] 3/3 Targets Hit. Pure accuracy. ✅",
     ]
     txt = random.choice(messages)
     return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
 
 def send_breakeven_alert(chat_id, message_id, tf):
     """Send a reply when price returns to entry after TPs hit."""
-    txt = f"рџ“‰ <b>REVERSAL ALERT!</b> [{tf}] Price returned to Entry level after hitting targets. Signal closed at Breakeven. вљ–пёЏ"
+    txt = f"📉 <b>REVERSAL ALERT!</b> [{tf}] Price returned to Entry level after hitting targets. Signal closed at Breakeven. ⚖️"
     return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
 
 def send_profit_sl_alert(chat_id, message_id, tf):
     """Send a reply when protected stop is hit in profit after targets."""
     txt = (
-        f"рџ›Ў <b>PROTECTED EXIT!</b> [{tf}] Stop-loss was hit in <b>profit</b> "
-        f"after targets. Trade closed safely with locked gains. вњ…"
+        f"🛡 <b>PROTECTED EXIT!</b> [{tf}] Stop-loss was hit in <b>profit</b> "
+        f"after targets. Trade closed safely with locked gains. ✅"
     )
     return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
 
@@ -198,7 +210,7 @@ def fmt_price(price):
 
 def send_liquidity_sweep(side, level, price, points, strength, note="", chat_id=None):
     """
-    рџ§№ Liquidity Sweep
+    🧹 Liquidity Sweep
     """
     code_part = (
         f"Points:    {points}\n"
@@ -210,7 +222,7 @@ def send_liquidity_sweep(side, level, price, points, strength, note="", chat_id=
     )
     
     msg = (
-        f"<b>рџ§№ Liquidity Sweep</b>\n"
+        f"<b>🧹 Liquidity Sweep</b>\n"
         f"<pre>{code_part}</pre>"
     )
     send(msg, parse_mode="HTML", chat_id=chat_id)
@@ -221,7 +233,7 @@ def send_liquidity_pool_alert(timeframe, side, level_price, size_usd, probabilit
     Alert about large visible order-book liquidity pool likely to be swept.
     side LONG -> pool above price, SHORT -> pool below price.
     """
-    side_emoji = "рџџў" if side == "LONG" else "рџ”ґ"
+    side_emoji = "🟢" if side == "LONG" else "🔴"
     code_part = (
         f"Timeframe:   {timeframe}\n"
         f"Direction:   {side}\n"
@@ -232,7 +244,7 @@ def send_liquidity_pool_alert(timeframe, side, level_price, size_usd, probabilit
         f"Sweep Prob:  {probability_pct:.0f}%"
     )
     msg = (
-        f"<b>рџ§І Liquidity Pool Alert</b>\n"
+        f"<b>🧲 Liquidity Pool Alert</b>\n"
         f"<b>{side_emoji} {side}</b>\n"
         f"<pre>{code_part}</pre>"
     )
@@ -245,7 +257,7 @@ def send_liquidity_pool_alert(timeframe, side, level_price, size_usd, probabilit
 
 def send_volatility_touch(side, level, price, points, strength, note="", chat_id=None):
     """
-    рџ“Љ Volatility Zone Touch
+    📊 Volatility Zone Touch
     """
     code_part = (
         f"Points:    {points}\n"
@@ -257,7 +269,7 @@ def send_volatility_touch(side, level, price, points, strength, note="", chat_id
     )
     
     msg = (
-        f"<b>рџ“Љ Volatility Zone Touch</b>\n"
+        f"<b>📊 Volatility Zone Touch</b>\n"
         f"<pre>{code_part}</pre>"
     )
     send(msg, parse_mode="HTML", chat_id=chat_id)
@@ -269,10 +281,10 @@ def send_volatility_touch(side, level, price, points, strength, note="", chat_id
 
 def send_scalp_open(timeframe, side, price, emoji="⚡️", chat_id=None):
     """
-    вљЎпёЏ/рџљЂ SCALP WINDOW OPEN [TF] рџџў/рџ”ґ SIDE
+    ⚡️/🚀 SCALP WINDOW OPEN [TF] 🟢/🔴 SIDE
     """
     label = "SCALP" if timeframe.lower() in ["5m", "15m"] else "SIGNAL"
-    side_emoji = "рџџў" if side == "LONG" else "рџ”ґ"
+    side_emoji = "🟢" if side == "LONG" else "🔴"
     code_part = (
         f"Momentum: Zone Entry\n"
         f"Price:    {fmt_price(price)}"
@@ -288,16 +300,16 @@ def send_scalp_open(timeframe, side, price, emoji="⚡️", chat_id=None):
 
 def send_scalp_closed(timeframe, side, price, emoji="❌", chat_id=None):
     """
-    вќЊ SCALP WINDOW CLOSED [TF] вЂ” no confirmation
+    ❌ SCALP WINDOW CLOSED [TF] - no confirmation
     """
     label = "SCALP" if timeframe.lower() in ["5m", "15m"] else "SIGNAL"
-    side_emoji = "рџџў" if side == "LONG" else "рџ”ґ"
+    side_emoji = "🟢" if side == "LONG" else "🔴"
     code_part = (
         f"Momentum: Window Expired\n"
         f"Price:    {fmt_price(price)}"
     )
     msg = (
-        f"<b>вќЊ {label} WINDOW CLOSED</b> [{timeframe.upper()}]\n"
+        f"<b>❌ {label} WINDOW CLOSED</b> [{timeframe.upper()}]\n"
         f"<b>{side_emoji} {side}</b>\n"
         f"<pre>{code_part}</pre>"
     )
@@ -306,7 +318,7 @@ def send_scalp_closed(timeframe, side, price, emoji="❌", chat_id=None):
 
 def send_scalp_prepare(timeframe, side, points=None, strength=None, emoji="⚠️", chat_id=None):
     """
-    вљ пёЏ PREPARE FOR ENTRY [TF] рџџў/рџ”ґ SIDE
+    ⚠️ PREPARE FOR ENTRY [TF] 🟢/🔴 SIDE
     """
     side_emoji = "🟢" if side == "LONG" else "🔴"
     msg = (
@@ -328,10 +340,10 @@ def send_scalp_prepare(timeframe, side, points=None, strength=None, emoji="⚠�
     send(msg, parse_mode="HTML", chat_id=chat_id)
 
 
-# в”Ђв”Ђв”Ђ Formatting Helpers в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
+# --- Formatting Helpers -------------------------------------
 def fmt_hit(is_hit):
     """Return a checkmark if level was hit."""
-    return " вњ…" if is_hit else ""
+    return " ?" if is_hit else ""
 
 def get_signal_levels_code(entry, sl, tp1, tp2, tp3, status="OPEN", tp1_h=False, tp2_h=False, tp3_h=False, sl_h=False, initial_sl=None):
     """Format the levels block with hit markers."""
@@ -446,7 +458,7 @@ def send_scalp_confirmed(timeframe, side, entry, sl, tp1, tp2, tp3,
                          strength, size, score=None, trend=None, reasons=None, chat_id=None,
                          tp_liq_prob=None, tp_liq_usd=None, tp_liq_target=None,
                          trigger_label=None, initial_sl=None):
-    """вљЎпёЏ/рџљЂ SCALP ENTRY CONFIRMED"""
+    """⚡️/🚀 SCALP ENTRY CONFIRMED"""
     html = get_signal_html("SCALP", side, timeframe, entry, sl, tp1, tp2, tp3,
                            score=score, trend=trend, reasons=reasons, size=size,
                            tp_liq_prob=tp_liq_prob, tp_liq_usd=tp_liq_usd, tp_liq_target=tp_liq_target,
@@ -456,7 +468,7 @@ def send_scalp_confirmed(timeframe, side, entry, sl, tp1, tp2, tp3,
 
 def send_strong(side, total_points, confirmations, indicators_list, price=None, sl=None, tp1=None, tp2=None, tp3=None, size=None, chat_id=None,
                 tp_liq_prob=None, tp_liq_usd=None, tp_liq_target=None):
-    """вњ… STRONG CONFLUENCE"""
+    """✅ STRONG CONFLUENCE"""
     tfs = sorted(list(set(ind.get('tf', 'N/A') for ind in indicators_list)))
     tf_summary = ", ".join(tfs)
 
@@ -468,7 +480,7 @@ def send_strong(side, total_points, confirmations, indicators_list, price=None, 
 
 def send_extreme(side, total_points, confirmations, indicators_list, price=None, sl=None, tp1=None, tp2=None, tp3=None, size=None, chat_id=None,
                  tp_liq_prob=None, tp_liq_usd=None, tp_liq_target=None):
-    """рџ”Ґ EXTREME CONFLUENCE"""
+    """🔥 EXTREME CONFLUENCE"""
     tfs = sorted(list(set(ind.get('tf', 'N/A') for ind in indicators_list)))
     tf_summary = ", ".join(tfs)
 
@@ -532,27 +544,27 @@ def get_daily_levels_html(date_str, daily_open, resistance, resistance_pct,
         dxy = indicators.get("DXY_change", 0)
         indicator_part = (
             f"\n"
-            f"<b>рџЊЌ GLOBAL CONTEXT</b>\n"
+        f"<b>🌍 GLOBAL CONTEXT</b>\n"
             f"<blockquote>"
-            f"вЂў BTC.D: {'+' if btc_d >= 0 else ''}{btc_d:.2f}%\n"
-            f"вЂў DXY Proxy: {'+' if dxy >= 0 else ''}{dxy:.2f}%"
+            f"• BTC.D: {'+' if btc_d >= 0 else ''}{btc_d:.2f}%\n"
+            f"• DXY Proxy: {'+' if dxy >= 0 else ''}{dxy:.2f}%"
             f"</blockquote>\n"
             f"\n"
         )
 
     quote = (
         f"Level            Value\n"
-        f"рџџҐ Resistance     {fmt_price(resistance)}  ({resistance_pct:.2f}%)\n"
-        f"рџџ© Support        {fmt_price(support)}  ({support_pct:.2f}%)\n"
-        f"рџџЁ Volatility     {fmt_price(volatility)}   ({volatility_pct:.2f}%)\n"
-        f"рџљЁ Critical High  {fmt_price(critical_high)}\n"
-        f"рџљЁ Critical Low   {fmt_price(critical_low)}"
+        f"🟥 Resistance     {fmt_price(resistance)}  ({resistance_pct:.2f}%)\n"
+        f"🟩 Support        {fmt_price(support)}  ({support_pct:.2f}%)\n"
+        f"🟨 Volatility     {fmt_price(volatility)}   ({volatility_pct:.2f}%)\n"
+        f"🚨 Critical High  {fmt_price(critical_high)}\n"
+        f"🚨 Critical Low   {fmt_price(critical_low)}"
     )
     msg = (
-        f"<b>рџ“Љ {SYMBOL} DAILY LEVELS</b>\n"
+        f"<b>📊 {SYMBOL} DAILY LEVELS</b>\n"
         f"<blockquote>"
-        f"вЂў Date: <i>{date_str}</i>\n"
-        f"вЂў DO:   {fmt_price(daily_open)}\n"
+        f"• Date: <i>{date_str}</i>\n"
+        f"• DO:   {fmt_price(daily_open)}\n"
         f"</blockquote>\n"
         f"{indicator_part}"
         f"<pre>{quote}</pre>"
@@ -563,7 +575,7 @@ def send_daily_levels(date_str, daily_open, resistance, resistance_pct,
                       support, support_pct, volatility, volatility_pct,
                       critical_high, critical_low, indicators=None, chart_path=None, chat_id=None):
     """
-    рџ“Љ DAILY LEVELS
+    📊 DAILY LEVELS
     """
     msg = get_daily_levels_html(
         date_str, daily_open, resistance, resistance_pct,
@@ -587,18 +599,42 @@ def send_performance_summary(stats, chat_id=None):
     if not stats or stats["total"] == 0:
         return
 
+    insight_lines = []
+    best_tf = stats.get("best_timeframe")
+    worst_tf = stats.get("worst_timeframe")
+    best_strategy = stats.get("best_strategy")
+    worst_strategy = stats.get("worst_strategy")
+    if best_tf:
+        insight_lines.append(
+            f"Best TF:   {best_tf['name']} ({float(best_tf['win_rate']):.1f}% / {int(best_tf['trades'])} trades)"
+        )
+    if worst_tf:
+        insight_lines.append(
+            f"Worst TF:  {worst_tf['name']} ({float(worst_tf['win_rate']):.1f}% / {int(worst_tf['trades'])} trades)"
+        )
+    if best_strategy:
+        insight_lines.append(
+            f"Best Mod:  {best_strategy['name']} ({float(best_strategy['win_rate']):.1f}% / {int(best_strategy['trades'])} trades)"
+        )
+    if worst_strategy:
+        insight_lines.append(
+            f"Worst Mod: {worst_strategy['name']} ({float(worst_strategy['win_rate']):.1f}% / {int(worst_strategy['trades'])} trades)"
+        )
+
     formatted_stats = (
         f"TP1 Hit:  {stats['tp1_hits']}\n"
         f"TP2 Hit:  {stats['tp2_hits']}\n"
         f"TP3 Hit:  {stats['tp3_hits']}\n"
         f"SL Hit:   {stats['sl_hits']}\n"
         f"Open:     {stats['still_open']}\n"
-        f"в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ\n"
+        f"-------------------\n"
         f"Win Rate: {stats['win_rate']:.1f}%"
     )
+    if insight_lines:
+        formatted_stats += "\n" + "\n".join(insight_lines)
 
     msg = (
-        f"рџ“Љ SIGNAL PERFORMANCE\n"
+        f"📊 SIGNAL PERFORMANCE\n"
         f"\n"
         f"Total Signals: {stats['total']}\n"
         f"<pre>{formatted_stats}</pre>"
@@ -621,7 +657,7 @@ def send_approaching_level(level_name, level_price, current_price, distance_pct,
     )
     
     msg = (
-        f"вљ пёЏ PRICE APPROACHING TO {level_name.upper()} LEVEL\n"
+        f"⚠️ PRICE APPROACHING TO {level_name.upper()} LEVEL\n"
         f"\n"
         f"<pre>{code_part}</pre>"
     )
@@ -635,7 +671,7 @@ def send_approaching_level(level_name, level_price, current_price, distance_pct,
 def send_funding_alert(rate, direction, chat_id=None):
     """Alert when funding rate is extreme."""
     rate_pct = rate * 100
-    emoji = "рџџў" if direction == "POSITIVE" else "рџ”ґ"
+    emoji = "🟢" if direction == "POSITIVE" else "🔴"
     
     code_part = (
         f"{emoji} Rate: {rate_pct:.4f}%\n"
@@ -644,7 +680,7 @@ def send_funding_alert(rate, direction, chat_id=None):
     )
     
     msg = (
-        f"рџ’° EXTREME FUNDING RATE\n"
+        f"💰 EXTREME FUNDING RATE\n"
         f"\n"
         f"<pre>{code_part}</pre>"
     )
@@ -652,9 +688,9 @@ def send_funding_alert(rate, direction, chat_id=None):
 
 
 def send_oi_divergence(price_change, oi_change, note, chat_id=None):
-    """вљ пёЏ OI DIVERGENCE (Private)"""
+    """⚠️ OI DIVERGENCE (Private)"""
     msg = (
-        f"вљ пёЏ <b>OPEN INTEREST DIVERGENCE</b>\n"
+        f"⚠️ <b>OPEN INTEREST DIVERGENCE</b>\n"
         f"\n"
         f"Price Change: <b>{price_change:+.2f}%</b>\n"
         f"OI Change:    <b>{oi_change:+.2f}%</b>\n"
@@ -664,9 +700,9 @@ def send_oi_divergence(price_change, oi_change, note, chat_id=None):
     send(msg, parse_mode="HTML", chat_id=chat_id)
 
 def send_squeeze_alert(total_liq, price, chat_id=None):
-    """рџљЁ LIQUIDATION SQUEEZE (Private)"""
+    """🚨 LIQUIDATION SQUEEZE (Private)"""
     msg = (
-        f"рџљЁ <b>LIQUIDATION SQUEEZE ALERT</b>\n"
+        f"🚨 <b>LIQUIDATION SQUEEZE ALERT</b>\n"
         f"\n"
         f"Total Liquidated: <b>${total_liq/1_000_000:.1f}M</b>\n"
         f"Current Price:    <b>{fmt_price(price)}</b>\n"
@@ -689,7 +725,7 @@ def send_volume_spike(tf, current_vol, avg_vol, multiplier, price, chat_id=None)
     )
     
     msg = (
-        f"рџ“€ VOLUME SPIKE [{tf.upper()}]\n"
+        f"📈 VOLUME SPIKE [{tf.upper()}]\n"
         f"\n"
         f"<pre>{code_part}</pre>"
     )
@@ -697,14 +733,14 @@ def send_volume_spike(tf, current_vol, avg_vol, multiplier, price, chat_id=None)
 
 
 def send_market_alert(pct_change, duration_hours, start_price, end_price, chat_id=None):
-    """рџљЁ BTC FAST MOVE ALERT"""
+    """🚨 BTC FAST MOVE ALERT"""
     direction = "UP" if pct_change >= 0 else "DOWN"
-    emoji = "рџљЂ" if pct_change >= 0 else "рџ“‰"
+    emoji = "🚀" if pct_change >= 0 else "📉"
     
     msg = (
-        f"рџљЁ <b>MARKET ALERT</b>\n"
+        f"🚨 <b>MARKET ALERT</b>\n"
         f"\n"
-        f"вЂў BTC just moved {direction} {abs(pct_change):.1f}% in the last {duration_hours} hours {emoji}\n"
+        f"• BTC just moved {direction} {abs(pct_change):.1f}% in the last {duration_hours} hours {emoji}\n"
         f"Price went from ${fmt_price(start_price)} to ${fmt_price(end_price)}."
     )
     send(msg, parse_mode="HTML", chat_id=chat_id)
@@ -732,7 +768,7 @@ def get_session_open_html(session_name, open_price, current_price=None, history=
     code_part = "\n".join(lines)
     
     msg = (
-        f"<b>рџ•ђ {session_name} SESSION OPENED</b>\n"
+        f"<b>🕐 {session_name} SESSION OPENED</b>\n"
         f"\n"
         f"<pre>{code_part}</pre>"
     )
@@ -765,13 +801,13 @@ def send_session_summary(session_name, price_open, price_close, signals_count, l
         f"Low:    {fmt_price(low)}" if low else None,
         f"Close:  {fmt_price(price_close)}",
         f"Change: {direction}{fmt_price(change)} ({direction}{change_pct:.2f}%)",
-        f"в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ",
+        f"-------------------",
         f"Levels Tested: {levels_tested}"
     ]
     code_part = "\n".join([l for l in lines if l])
 
     msg = (
-        f"<b>рџ•ђ {session_name} SESSION CLOSED</b>\n"
+        f"<b>🕐 {session_name} SESSION CLOSED</b>\n"
         f"\n"
         f"<pre>{code_part}</pre>"
     )
@@ -811,7 +847,7 @@ def send_batched_alerts(alerts, chat_id=None):
     code_part = "\n".join(lines).strip()
     
     msg = (
-        f"рџ”” ALERT BATCH ({len(alerts)} signals)\n"
+        f"🔔 ALERT BATCH ({len(alerts)} signals)\n"
         f"\n"
         f"<pre>{code_part}</pre>"
     )
@@ -819,8 +855,8 @@ def send_batched_alerts(alerts, chat_id=None):
     send(msg, parse_mode="HTML", chat_id=chat_id)
 
 def send_performance_summary(stats, chat_id=None):
-    """рџ“ў DAILY PERFORMANCE SUMMARY (Public)"""
-    score_emoji = "рџЏ†" if stats["win_rate"] >= 70 else "рџ“€"
+    """📣 DAILY PERFORMANCE SUMMARY (Public)"""
+    score_emoji = "🏆" if stats["win_rate"] >= 70 else "📈"
     
     code_part = (
         f"Total Signals: {stats['total']}\n"

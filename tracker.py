@@ -314,6 +314,13 @@ class SignalTracker:
             return None
 
         wins = losses = breakeven = 0
+        by_tf = {}
+        by_strategy = {}
+
+        def ensure_bucket(bucket, key):
+            if key not in bucket:
+                bucket[key] = {"trades": 0, "wins": 0, "losses": 0, "breakeven": 0}
+
         for sig in generated:
             outcome, _ = self._metric_outcome(sig)
             if outcome == "wins":
@@ -322,8 +329,35 @@ class SignalTracker:
                 losses += 1
             elif outcome == "breakeven":
                 breakeven += 1
+            tf = str(sig.get("tf", "N/A"))
+            strategy = str((sig.get("meta") or {}).get("strategy", "UNKNOWN"))
+            ensure_bucket(by_tf, tf)
+            ensure_bucket(by_strategy, strategy)
+            for bucket in (by_tf[tf], by_strategy[strategy]):
+                bucket["trades"] += 1
+                if outcome in bucket:
+                    bucket[outcome] += 1
         resolved = wins + losses
         win_rate = (wins / resolved * 100.0) if resolved > 0 else 0.0
+
+        def classify_best_worst(bucket):
+            ranked = []
+            for key, stats in bucket.items():
+                closed = int(stats["wins"]) + int(stats["losses"])
+                wr = (float(stats["wins"]) / closed * 100.0) if closed else 0.0
+                ranked.append((key, wr, int(stats["trades"]), closed))
+            ranked = [item for item in ranked if item[2] > 0]
+            if not ranked:
+                return None, None
+            best = max(ranked, key=lambda item: (item[1], item[2], -item[3]))
+            worst = min(ranked, key=lambda item: (item[1], -item[2], item[3]))
+            return (
+                {"name": best[0], "win_rate": best[1], "trades": best[2], "closed": best[3]},
+                {"name": worst[0], "win_rate": worst[1], "trades": worst[2], "closed": worst[3]},
+            )
+
+        best_tf, worst_tf = classify_best_worst(by_tf)
+        best_strategy, worst_strategy = classify_best_worst(by_strategy)
 
         return {
             "total": total,
@@ -338,6 +372,12 @@ class SignalTracker:
             "win_rate": win_rate,
             "window_start": window_start.isoformat(),
             "window_end": window_end.isoformat(),
+            "by_timeframe": by_tf,
+            "by_strategy": by_strategy,
+            "best_timeframe": best_tf,
+            "worst_timeframe": worst_tf,
+            "best_strategy": best_strategy,
+            "worst_strategy": worst_strategy,
         }
 
     def get_session_stats(self, session_start_hour, session_end_hour):
@@ -420,6 +460,7 @@ class SignalTracker:
         by_side = {"LONG": {"trades": 0, "avg_r": 0.0}, "SHORT": {"trades": 0, "avg_r": 0.0}}
         by_session = {}
         by_type = {}
+        by_strategy = {}
         r_values = []
 
         def ensure_bucket(bucket, key):
@@ -429,6 +470,22 @@ class SignalTracker:
         def ensure_type_bucket(key):
             if key not in by_type:
                 by_type[key] = {
+                    "generated": 0,
+                    "trades": 0,
+                    "open": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "breakeven": 0,
+                    "avg_r": 0.0,
+                    "expectancy_r": 0.0,
+                    "win_rate": 0.0,
+                    "hit_rate": 0.0,
+                    "_r_values": [],
+                }
+
+        def ensure_strategy_bucket(key):
+            if key not in by_strategy:
+                by_strategy[key] = {
                     "generated": 0,
                     "trades": 0,
                     "open": 0,
@@ -457,13 +514,17 @@ class SignalTracker:
                 continue
 
             sig_type = str(sig.get("type", "SCALP")).upper()
+            strategy = str((sig.get("meta") or {}).get("strategy", "UNKNOWN"))
             ensure_type_bucket(sig_type)
+            ensure_strategy_bucket(strategy)
             by_type[sig_type]["generated"] += 1
+            by_strategy[strategy]["generated"] += 1
             totals["generated"] += 1
 
             closed_statuses = {"SL", "TP3", "ENTRY_CLOSE", "PROFIT_SL"}
             if status not in closed_statuses:
                 by_type[sig_type]["open"] += 1
+                by_strategy[strategy]["open"] += 1
                 totals["open"] += 1
                 continue
 
@@ -475,6 +536,9 @@ class SignalTracker:
             by_type[sig_type]["trades"] += 1
             by_type[sig_type][outcome] += 1
             by_type[sig_type]["_r_values"].append(r_mult)
+            by_strategy[strategy]["trades"] += 1
+            by_strategy[strategy][outcome] += 1
+            by_strategy[strategy]["_r_values"].append(r_mult)
 
             tf = sig.get("tf", "N/A")
             side = sig.get("side", "N/A")
@@ -508,13 +572,49 @@ class SignalTracker:
                 bucket["hit_rate"] = (bucket["wins"] / bucket["generated"] * 100.0) if bucket["generated"] else 0.0
             bucket.pop("_r_values", None)
 
+        for key, bucket in by_strategy.items():
+            if bucket["trades"] > 0 and bucket["_r_values"]:
+                bucket["avg_r"] = sum(bucket["_r_values"]) / len(bucket["_r_values"])
+                bucket["expectancy_r"] = bucket["avg_r"]
+                closed = bucket["wins"] + bucket["losses"]
+                bucket["win_rate"] = (bucket["wins"] / closed * 100.0) if closed else 0.0
+                bucket["hit_rate"] = (bucket["wins"] / bucket["generated"] * 100.0) if bucket["generated"] else 0.0
+            bucket.pop("_r_values", None)
+
+        def best_worst(bucket):
+            ranked = []
+            for key, stats in bucket.items():
+                closed = int(stats.get("wins", 0)) + int(stats.get("losses", 0))
+                trades = int(stats.get("trades", 0))
+                wr = float(stats.get("win_rate", 0.0))
+                avg_r = float(stats.get("avg_r", 0.0))
+                if trades <= 0:
+                    continue
+                ranked.append((key, wr, avg_r, trades, closed))
+            if not ranked:
+                return None, None
+            best = max(ranked, key=lambda item: (item[1], item[2], item[3]))
+            worst = min(ranked, key=lambda item: (item[1], item[2], -item[3]))
+            return (
+                {"name": best[0], "win_rate": best[1], "avg_r": best[2], "trades": best[3], "closed": best[4]},
+                {"name": worst[0], "win_rate": worst[1], "avg_r": worst[2], "trades": worst[3], "closed": worst[4]},
+            )
+
+        best_tf, worst_tf = best_worst(by_tf)
+        best_strategy, worst_strategy = best_worst(by_strategy)
+
         return {
             "period_days": days,
             "totals": totals,
             "by_signal_type": by_type,
+            "by_strategy": by_strategy,
             "by_timeframe": by_tf,
             "by_side": by_side,
             "by_session": by_session,
+            "best_timeframe": best_tf,
+            "worst_timeframe": worst_tf,
+            "best_strategy": best_strategy,
+            "worst_strategy": worst_strategy,
         }
 
     def get_open_signal_counts(self, signal_type="SCALP"):
