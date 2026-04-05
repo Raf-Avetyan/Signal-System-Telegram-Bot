@@ -559,7 +559,6 @@ class PonchBot:
                     result = self.trade_executor.manual_set_single_tp(sig, float(action.get("price")))
                 else:
                     result = self.trade_executor.manual_set_tp(sig, tp_index, float(action.get("price")))
-            result = self.trade_executor.manual_set_tp(sig, tp_index, float(action.get("price")))
         elif action_type == "cancel_tp":
             tp_index = int(action.get("tp_index") or 0)
             if tp_index not in {1, 2, 3}:
