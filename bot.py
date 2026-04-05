@@ -260,7 +260,7 @@ class PonchBot:
         answer = str(text or "").strip()
         if not answer:
             return
-        tg.send(answer, chat_id=exec_chat)
+        tg.send(answer, chat_id=exec_chat, parse_mode="HTML")
 
     def _is_private_exec_chat(self, chat_id):
         exec_chat = str(self._execution_chat_id() or "").strip()
@@ -849,20 +849,21 @@ class PonchBot:
         if not active:
             self._send_private_execution_answer("You do not have any active exchange positions right now.")
             return
-        blocks = [f"Open positions: {len(active)}"]
+        blocks = [f"{title}\n<pre>Open positions: {len(active)}</pre>"]
         for sig in active[:10]:
             execution = sig.get("execution") or {}
             signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (execution.get("signal_id"))
             sl_text = self._format_live_sl_value(sig)
-            details_block = (
-                f"{sig.get('type', 'SCALP')} {sig.get('side', 'N/A')} [{sig.get('tf', 'N/A')}]\n"
+            header_block = f"{sig.get('type', 'SCALP')} {sig.get('side', 'N/A')} [{sig.get('tf', 'N/A')}]"
+            price_block = (
                 f"Entry: {float(sig.get('entry', 0) or 0):.2f}    SL: {sl_text}\n"
                 f"{self._format_active_tp_line(sig)}\n"
                 f"Qty: {float(execution.get('qty', 0) or 0):.6f}"
             )
             block = (
-                f"\n\nPosition ID:\n{signal_id or 'N/A'}\n"
-                f"{details_block}"
+                f"\n\n{header_block}\n"
+                f"Position ID:\n<pre>{signal_id or 'N/A'}</pre>\n"
+                f"<pre>{price_block}</pre>"
             )
             blocks.append(block)
         self._send_private_execution_answer("".join(blocks))
@@ -878,7 +879,6 @@ class PonchBot:
         status = str(sig.get("status") or "OPEN").upper()
         sl_text = self._format_live_sl_value(sig)
         details_block = (
-            f"This is your {sig_type} {side} on {tf}.\n"
             f"Status: {status}\n"
             f"Entry: {float(sig.get('entry', 0) or 0):.2f}    SL: {sl_text}\n"
             f"{self._format_active_tp_line(sig)}\n"
@@ -886,8 +886,9 @@ class PonchBot:
         )
         answer = (
             f"{title}\n"
-            f"Position ID:\n{signal_id or 'N/A'}\n\n"
-            f"{details_block}"
+            f"This is your {sig_type} {side} on {tf}.\n"
+            f"Position ID:\n<pre>{signal_id or 'N/A'}</pre>\n"
+            f"<pre>{details_block}</pre>"
         )
         self._send_private_execution_answer(answer)
 
