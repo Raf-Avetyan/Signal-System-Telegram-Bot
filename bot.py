@@ -267,22 +267,6 @@ class PonchBot:
         exec_chat = str(self._execution_chat_id() or "").strip()
         return bool(exec_chat and str(chat_id or "").strip() == exec_chat)
 
-    def _private_chat_smalltalk_reply(self, text):
-        lower = str(text or "").strip().lower()
-        if not lower:
-            return None
-        greeting_tokens = [
-            "hi", "hello", "hey", "how are you", "what's up", "whats up",
-            "good morning", "good afternoon", "good evening", "yo"
-        ]
-        thanks_tokens = ["thanks", "thank you", "thx", "ty"]
-        if any(token in lower for token in greeting_tokens):
-            return "I’m good, thanks 🙂 I’m here and ready to help with your trades or any quick question."
-        if any(token in lower for token in thanks_tokens):
-            return "Always here 🙂 If you want, we can keep going."
-        if lower in {"ok", "okay", "nice", "cool", "great"}:
-            return "Perfect 🙂"
-        return None
 
     def _refresh_private_execution_state(self):
         reconcile = self.trade_executor.reconcile_execution_state(self.tracker.signals)
@@ -761,10 +745,6 @@ class PonchBot:
             self._send_open_positions_snapshot("Open Positions")
             return True
 
-        smalltalk = self._private_chat_smalltalk_reply(text)
-        if smalltalk:
-            self._send_private_execution_answer(smalltalk)
-            return True
 
         if self.pending_exec_action:
             pending_chat = str((self.pending_exec_action or {}).get("chat_id") or "")
