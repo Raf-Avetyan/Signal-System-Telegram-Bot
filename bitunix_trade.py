@@ -1209,6 +1209,62 @@ class TradeExecutor:
         execution["tp_targets"] = targets
         return ExecutionResult(self.mode, True, f"Updated TP{tp_index} to {float(new_price):.2f}.", execution)
 
+    def manual_set_single_tp(self, signal: Dict[str, Any], new_price: float) -> ExecutionResult:
+        self._refresh_state()
+        execution = (signal or {}).get("execution") or {}
+        if not execution or not execution.get("active"):
+            return ExecutionResult(self.mode, False, "No active exchange execution found for this signal.", {})
+        try:
+            new_price = float(new_price)
+        except Exception:
+            return ExecutionResult(self.mode, False, "Take-profit price is invalid.", execution)
+        if new_price <= 0:
+            return ExecutionResult(self.mode, False, "Take-profit price must be greater than 0.", execution)
+
+        symbol = execution.get("symbol")
+        position_id = execution.get("position_id")
+        total_qty = float(execution.get("qty", 0) or 0)
+        if not symbol or not position_id:
+            return ExecutionResult(self.mode, False, "Missing exchange position reference.", execution)
+        if total_qty <= 0:
+            return ExecutionResult(self.mode, False, "Position quantity is invalid.", execution)
+
+        tp_orders = list(execution.get("tp_orders") or [])
+        if self.mode == "live":
+            for order in tp_orders:
+                try:
+                    self._cancel_tp_order_record(execution, order)
+                except Exception:
+                    pass
+            try:
+                tp_res = self.client.modify_position_tpsl(symbol, str(position_id), float(new_price), None)
+            except BitunixTradeError:
+                tp_res = self.client.place_position_tpsl(symbol, str(position_id), float(new_price), None)
+            data = tp_res.get("data", {}) or {}
+            execution["tp_orders"] = [{
+                "index": 1,
+                "kind": "POSITION_TP",
+                "qty": float(total_qty),
+                "price": float(new_price),
+                "orderId": data.get("orderId") or data.get("id"),
+                "raw": data,
+            }]
+        else:
+            execution["tp_orders"] = [{
+                "index": 1,
+                "kind": "POSITION_TP",
+                "qty": float(total_qty),
+                "price": float(new_price),
+            }]
+
+        execution["tp_qtys"] = [float(total_qty), 0.0, 0.0]
+        execution["tp_targets"] = [float(new_price), None, None]
+        execution["missing_tp_indices"] = [2, 3]
+        execution["tp_mode"] = "POSITION_TP"
+        execution["protection_ready"] = bool(execution.get("sl_order"))
+        signal["tp1"] = float(new_price)
+        return ExecutionResult(self.mode, True, f"Set take profit to {float(new_price):.2f}.", execution)
+
     def manual_cancel_tp(self, signal: Dict[str, Any], tp_index: int) -> ExecutionResult:
         self._refresh_state()
         execution = (signal or {}).get("execution") or {}

@@ -336,6 +336,8 @@ class PonchBot:
         if kind == "move_sl":
             return f"Move stop to {float(action.get('price') or 0):.2f}"
         if kind == "set_tp":
+            if int(action.get("tp_index") or 0) not in {1, 2, 3}:
+                return f"Set take profit to {float(action.get('price') or 0):.2f}"
             return f"Set TP{int(action.get('tp_index') or 0)} to {float(action.get('price') or 0):.2f}"
         if kind == "cancel_tp":
             if int(action.get("tp_index") or 0) not in {1, 2, 3}:
@@ -397,10 +399,17 @@ class PonchBot:
 
         if action_type == "set_tp":
             tp_index = int(action.get("tp_index") or 0)
-            if tp_index not in {1, 2, 3}:
-                return "Which target do you want to change: TP1, TP2, or TP3?"
+            sig = self._resolve_signal_for_action(action, allow_unexecuted=False)
+            execution = (sig or {}).get("execution") or {}
+            active_indices = [i + 1 for i, q in enumerate(list(execution.get("tp_qtys") or [0.0, 0.0, 0.0])) if float(q or 0) > 0]
             if action.get("price") in (None, "", 0, 0.0, "0"):
-                return f"What price do you want for TP{tp_index}?"
+                if tp_index in {1, 2, 3}:
+                    return f"What price do you want for TP{tp_index}?"
+                return "What take-profit price do you want?"
+            if tp_index not in {1, 2, 3}:
+                if len(active_indices) <= 1:
+                    return None
+                return "Which target do you want to change: TP1, TP2, or TP3?"
             return None
 
         if action_type == "close_partial":
@@ -518,26 +527,38 @@ class PonchBot:
                     icon="⚠️",
                 )
                 return False
-            result = self.trade_executor.manual_move_stop(sig, float(action.get("price")))
         elif action_type == "set_tp":
             tp_index = int(action.get("tp_index") or 0)
-            if tp_index not in {1, 2, 3}:
-                self._send_private_execution_notice(
-                    "Exec Control",
-                    ["I need TP1, TP2, or TP3 to change a target."],
-                    icon="⚠️",
-                )
-                return False
             if action.get("price") in (None, "", 0, 0.0, "0"):
                 self._send_private_execution_notice(
                     "Exec Control",
                     [
-                        f"I understood a TP{tp_index} change, but no valid price was found.",
-                        f"Please say the exact TP{tp_index} price, for example: set tp{tp_index} to 67120",
+                        "I understood a take-profit change, but no valid price was found.",
+                        "Please say the exact take-profit price, for example: set tp to 67120",
                     ],
-                    icon="⚠️",
+                    icon="??",
                 )
                 return False
+            execution = (sig or {}).get("execution") or {}
+            active_indices = [i + 1 for i, q in enumerate(list(execution.get("tp_qtys") or [0.0, 0.0, 0.0])) if float(q or 0) > 0]
+            if tp_index not in {1, 2, 3}:
+                if len(active_indices) <= 1:
+                    if len(active_indices) == 1:
+                        result = self.trade_executor.manual_set_tp(sig, active_indices[0], float(action.get("price")))
+                    else:
+                        result = self.trade_executor.manual_set_single_tp(sig, float(action.get("price")))
+                else:
+                    self._send_private_execution_notice(
+                        "Exec Control",
+                        ["I need TP1, TP2, or TP3 to change a target."],
+                        icon="??",
+                    )
+                    return False
+            else:
+                if not active_indices:
+                    result = self.trade_executor.manual_set_single_tp(sig, float(action.get("price")))
+                else:
+                    result = self.trade_executor.manual_set_tp(sig, tp_index, float(action.get("price")))
             result = self.trade_executor.manual_set_tp(sig, tp_index, float(action.get("price")))
         elif action_type == "cancel_tp":
             tp_index = int(action.get("tp_index") or 0)
