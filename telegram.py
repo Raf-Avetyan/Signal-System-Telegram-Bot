@@ -304,13 +304,13 @@ def send_scalp_closed(timeframe, side, price, emoji="❌", chat_id=None):
     send(msg, parse_mode="HTML", chat_id=chat_id)
 
 
-def send_scalp_prepare(timeframe, side, points=None, strength=None, emoji="вљЎпёЏ", chat_id=None):
+def send_scalp_prepare(timeframe, side, points=None, strength=None, emoji="⚠️", chat_id=None):
     """
     вљ пёЏ PREPARE FOR ENTRY [TF] рџџў/рџ”ґ SIDE
     """
-    side_emoji = "рџџў" if side == "LONG" else "рџ”ґ"
+    side_emoji = "🟢" if side == "LONG" else "🔴"
     msg = (
-        f"вљ пёЏ <b>PREPARE FOR ENTRY</b> [{timeframe.upper()}]\n"
+        f"⚠️ <b>PREPARE FOR ENTRY</b> [{timeframe.upper()}]\n"
         f"<b>{side_emoji} {side}</b>\n"
         f"<pre>"
     )

@@ -587,7 +587,8 @@ class TradeExecutor:
             position_mode = str(BITUNIX_POSITION_MODE or "ONE_WAY").strip().upper()
         tf_name = str(signal.get("tf") or signal.get("execution_tf") or "5m")
         symbol = SYMBOL
-        leverage = int(raw_account.get("leverage") or BITUNIX_DEFAULT_LEVERAGE or 1)
+        desired_leverage = int(BITUNIX_DEFAULT_LEVERAGE or 1)
+        leverage = int(raw_account.get("leverage") or desired_leverage or 1)
         margin_mode = "ISOLATION"
         if self.client.is_configured():
             try:
@@ -597,7 +598,8 @@ class TradeExecutor:
             except Exception:
                 margin_mode = str(raw_account.get("marginMode") or margin_mode).strip().upper()
         tf_max_leverage = int(BITUNIX_LIQUIDATION_MAX_LEVERAGE_BY_TF.get(tf_name, leverage) or leverage)
-        leverage = max(1, min(leverage, tf_max_leverage))
+        target_leverage = max(1, min(desired_leverage, tf_max_leverage))
+        leverage = target_leverage
         meta = signal.get("meta") or {}
         signal_size_pct = meta.get("size", signal.get("size", 0))
         try:
@@ -649,6 +651,8 @@ class TradeExecutor:
             "qty": qty,
             "tp_qtys": tp_qtys,
             "leverage": leverage,
+            "current_exchange_leverage": int(raw_account.get("leverage") or 0),
+            "target_leverage": target_leverage,
             "risk_budget_usd": risk_budget,
             "risk_cap_pct": effective_risk_cap_pct,
             "signal_size_pct": signal_size_pct,
