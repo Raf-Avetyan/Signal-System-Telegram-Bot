@@ -328,6 +328,8 @@ class PonchBot:
             return f"Move stop to {float(action.get('price') or 0):.2f}"
         if kind == "set_tp":
             return f"Set TP{int(action.get('tp_index') or 0)} to {float(action.get('price') or 0):.2f}"
+        if kind == "cancel_tp":
+            return f"Cancel TP{int(action.get('tp_index') or 0)}"
         if kind == "close_full":
             return "Close full position"
         if kind == "close_partial":
@@ -461,6 +463,16 @@ class PonchBot:
                 )
                 return False
             result = self.trade_executor.manual_set_tp(sig, tp_index, float(action.get("price")))
+        elif action_type == "cancel_tp":
+            tp_index = int(action.get("tp_index") or 0)
+            if tp_index not in {1, 2, 3}:
+                self._send_private_execution_notice(
+                    "Exec Control",
+                    ["I need TP1, TP2, or TP3 to cancel a target."],
+                    icon="⚠️",
+                )
+                return False
+            result = self.trade_executor.manual_cancel_tp(sig, tp_index)
         elif action_type == "close_full":
             result = self.trade_executor.manual_close_position(sig, 1.0)
         elif action_type == "close_partial":
@@ -476,7 +488,11 @@ class PonchBot:
             "Exec Action Result",
             self._format_execution_lines(
                 sig,
-                extra=[f"action={action_type}", f"message={result.message}", f"accepted={result.accepted}"],
+                extra=[
+                    f"Action: {self._preview_exec_action(action)}",
+                    f"Result: {result.message}",
+                    "Exchange: accepted" if result.accepted else "Exchange: rejected",
+                ],
             ),
             icon="✅" if result.accepted else "⚠️",
         )
@@ -540,14 +556,17 @@ class PonchBot:
             return True
 
         preview_lines = [
-            f"request={text}",
-            f"parsed_action={action_type}",
-            f"target_id={parsed.get('signal_id') or 'auto'}",
-            f"side={parsed.get('side') or 'auto'} tf={parsed.get('tf') or 'auto'}",
-            f"details={self._preview_exec_action(parsed)}",
-            f"reason={parsed.get('reason') or 'n/a'}",
+            f"You wrote: {text}",
+            f"I understood: {self._preview_exec_action(parsed)}",
+            f"Why: {parsed.get('reason') or 'n/a'}",
             "Reply YES to execute or NO to cancel.",
         ]
+        if parsed.get("signal_id"):
+            preview_lines.insert(2, f"Target ID: {parsed.get('signal_id')}")
+        if parsed.get("side"):
+            preview_lines.insert(3 if parsed.get("signal_id") else 2, f"Side: {parsed.get('side')}")
+        if parsed.get("tf"):
+            preview_lines.insert(4 if parsed.get("signal_id") and parsed.get("side") else len(preview_lines) - 2, f"Timeframe: {parsed.get('tf')}")
         self.pending_exec_action = {
             "created_at": time.time(),
             "chat_id": str((message.get("chat") or {}).get("id") or ""),
@@ -565,7 +584,7 @@ class PonchBot:
             total = free
         if used <= 0 and total > 0:
             used = max(0.0, total - free)
-        return f"Balance: total={total:.2f} free={free:.2f} used={used:.2f}"
+        return f"Balance: {total:.2f} total, {free:.2f} free, {used:.2f} in positions"
 
     def _format_news_status_line(self, now):
         if not NEWS_FILTER_ENABLED:
@@ -597,21 +616,16 @@ class PonchBot:
         trade_check = trade_check or self.trade_executor.startup_self_check()
         reconcile = reconcile or self.trade_executor.reconcile_execution_state(self.tracker.signals)
         lines = [
-            f"Mode: {trade_check.get('mode')} | Auth: {'OK' if trade_check.get('auth_ok') else 'FAIL'} | Symbol: {SYMBOL}",
+            f"Bot is {trade_check.get('mode')} on {SYMBOL}. Auth: {'OK' if trade_check.get('auth_ok') else 'FAIL'}",
             self._format_balance_line(trade_check),
-            (
-                f"Account: {trade_check.get('margin_mode') or 'N/A'} "
-                f"{int(trade_check.get('leverage', 0) or 0)}x | "
-                f"Positions: {int(trade_check.get('open_positions', 0) or 0)} open"
-            ),
+            f"Account mode: {trade_check.get('margin_mode') or 'N/A'} at {int(trade_check.get('leverage', 0) or 0)}x",
+            f"Open positions: {int(trade_check.get('open_positions', 0) or 0)}",
         ]
         matched = int(reconcile.get("matched", 0) or 0)
         orphan_count = len(reconcile.get("orphan_positions", []) or [])
         missing_protection = len(reconcile.get("missing_protection", []) or [])
         if matched or orphan_count or missing_protection:
-            lines.append(
-                f"Tracker: matched={matched} orphans={orphan_count} missing_protection={missing_protection}"
-            )
+            lines.append(f"Tracker: {matched} matched, {orphan_count} orphan, {missing_protection} missing protection")
         lines.append(self._format_news_status_line(now))
 
         errors = []
@@ -637,21 +651,49 @@ class PonchBot:
         if not active:
             self._send_private_execution_notice(title, ["No active exchange positions found."], icon="📂")
             return
-        lines = [f"Open positions: {len(active)}"]
+        self._send_private_execution_notice(title, [f"Open positions: {len(active)}"], icon="📂")
         for sig in active[:10]:
             execution = sig.get("execution") or {}
             signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (execution.get("signal_id"))
-            lines.append(f"ID: {signal_id or 'N/A'}")
-            lines.append(f"{sig.get('type', 'SCALP')} {sig.get('side', 'N/A')} [{sig.get('tf', 'N/A')}]")
-            lines.append(
-                f"Entry: {float(sig.get('entry', 0) or 0):.2f}    SL: {float(sig.get('sl', 0) or 0):.2f}"
+            self._send_private_execution_notice(
+                "Position ID",
+                [f"{signal_id or 'N/A'}"],
+                icon="🆔",
             )
-            lines.append(
-                f"TPs: {float(sig.get('tp1', 0) or 0):.2f} / {float(sig.get('tp2', 0) or 0):.2f} / {float(sig.get('tp3', 0) or 0):.2f}"
+            self._send_private_execution_notice(
+                "Position Details",
+                [
+                    f"{sig.get('type', 'SCALP')} {sig.get('side', 'N/A')} [{sig.get('tf', 'N/A')}]",
+                    f"Entry: {float(sig.get('entry', 0) or 0):.2f}    SL: {float(sig.get('sl', 0) or 0):.2f}",
+                    self._format_active_tp_line(sig),
+                    f"Qty: {float(execution.get('qty', 0) or 0):.6f}",
+                ],
+                icon="📂",
             )
-            lines.append(f"Qty: {float(execution.get('qty', 0) or 0):.6f}")
-            lines.append("")
-        self._send_private_execution_notice(title, lines, icon="📂")
+
+    def _format_active_tp_line(self, sig):
+        execution = (sig or {}).get("execution") or {}
+        tp_qtys = list(execution.get("tp_qtys") or [])
+        tp_targets = list(execution.get("tp_targets") or [sig.get("tp1"), sig.get("tp2"), sig.get("tp3")])
+        active_parts = []
+        for idx, qty in enumerate(tp_qtys[:3], start=1):
+            try:
+                qty_val = float(qty or 0)
+            except Exception:
+                qty_val = 0.0
+            if qty_val <= 0:
+                continue
+            target = float(tp_targets[idx - 1] or sig.get(f"tp{idx}") or 0)
+            if target > 0:
+                active_parts.append(f"TP{idx} {target:.2f}")
+        if active_parts:
+            label = "Active TP" if len(active_parts) == 1 else "Active TPs"
+            return f"{label}: " + " / ".join(active_parts)
+        return (
+            f"TPs: {float(sig.get('tp1', 0) or 0):.2f} / "
+            f"{float(sig.get('tp2', 0) or 0):.2f} / "
+            f"{float(sig.get('tp3', 0) or 0):.2f}"
+        )
 
     def _format_execution_lines(self, sig=None, extra=None):
         sig = sig or {}
@@ -663,17 +705,22 @@ class PonchBot:
         if signal_id:
             lines.append(f"ID: {signal_id}")
         if tf or sig_type or side:
-            lines.append(f"type={sig_type or 'N/A'} tf={tf or 'N/A'} side={side or 'N/A'}")
+            lines.append(f"{sig_type or 'Signal'} {side or 'N/A'} [{tf or 'N/A'}]")
         if sig.get("entry") is not None:
             lines.append(
-                f"entry={float(sig.get('entry') or 0):.2f} sl={float(sig.get('sl') or 0):.2f} "
-                f"tp1={float(sig.get('tp1') or 0):.2f} tp2={float(sig.get('tp2') or 0):.2f} tp3={float(sig.get('tp3') or 0):.2f}"
+                f"Entry: {float(sig.get('entry') or 0):.2f}    SL: {float(sig.get('sl') or 0):.2f}"
             )
+            lines.append(self._format_active_tp_line(sig))
         meta = sig.get("meta") or {}
-        if meta.get("strategy") or meta.get("size") or meta.get("score") is not None:
-            lines.append(
-                f"strategy={meta.get('strategy', 'N/A')} size={meta.get('size', 'N/A')}% score={meta.get('score', 'N/A')}"
-            )
+        size = meta.get("size")
+        score = meta.get("score")
+        strategy = meta.get("strategy")
+        if size not in (None, "", "N/A"):
+            lines.append(f"Risk size: {size}%")
+        if score not in (None, "", "N/A"):
+            lines.append(f"Score: {score}")
+        if strategy not in (None, "", "N/A"):
+            lines.append(f"Model: {strategy}")
         if extra:
             lines.extend([str(line) for line in extra if str(line).strip()])
         return lines
@@ -2655,13 +2702,13 @@ class PonchBot:
         notice_lines = self._format_execution_lines(
             sig_obj,
             extra=[
-                f"mode={result.mode} status={status}",
-                f"message={result.message}",
-                f"balance={float(details.get('balance_available', 0) or 0):.2f}" if "balance_available" in details else None,
-                f"risk_budget={float(details.get('risk_budget_usd', 0) or 0):.2f}" if "risk_budget_usd" in details else None,
-                f"qty={float(details.get('qty', 0) or 0):.6f} notional={float(details.get('notional', 0) or 0):.4f}" if details else None,
-                f"position_id={details.get('position_id')}" if details.get("position_id") else None,
-                f"tp_mode={','.join(sorted({str(o.get('kind', 'N/A')) for o in (details.get('tp_orders') or [])}))}" if details.get("tp_orders") else None,
+                f"Exchange status: {'accepted' if result.accepted else 'blocked'}",
+                f"Result: {result.message}",
+                f"Free balance: {float(details.get('balance_available', 0) or 0):.2f}" if "balance_available" in details else None,
+                f"Risk budget: {float(details.get('risk_budget_usd', 0) or 0):.2f}" if "risk_budget_usd" in details else None,
+                f"Order size: {float(details.get('qty', 0) or 0):.6f} ({float(details.get('notional', 0) or 0):.4f} notional)" if details else None,
+                f"Bitunix position ID: {details.get('position_id')}" if details.get("position_id") else None,
+                f"TP mode: {', '.join(sorted({str(o.get('kind', 'N/A')) for o in (details.get('tp_orders') or [])}))}" if details.get("tp_orders") else None,
             ] + list(details.get("protection_warnings", []) or [])
         )
         self._send_private_execution_notice(
@@ -2706,10 +2753,10 @@ class PonchBot:
             self._format_execution_lines(
                 sig_obj,
                 extra=[
-                    f"message={result.message}",
-                    f"position_id={result.payload.get('position_id')}" if result.payload else None,
-                    f"sl_moved_to={result.payload.get('sl_moved_to')}" if (result.payload or {}).get("sl_moved_to") is not None else None,
-                    f"active={result.payload.get('active')}" if result.payload else None,
+                    f"Result: {result.message}",
+                    f"Bitunix position ID: {result.payload.get('position_id')}" if result.payload else None,
+                    f"New stop: {float(result.payload.get('sl_moved_to') or 0):.2f}" if (result.payload or {}).get("sl_moved_to") is not None else None,
+                    f"Still active: {'yes' if result.payload.get('active') else 'no'}" if result.payload else None,
                 ],
             ),
         )

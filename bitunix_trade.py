@@ -411,6 +411,12 @@ class TradeExecutor:
         pos = self._safe_get_open_positions()
         info["open_positions"] = int(pos.get("count", 0) or 0)
         info["position_sides"] = pos.get("sides", [])
+        position_margin_used = float(pos.get("used_margin", 0) or 0)
+        if position_margin_used > 0:
+            if info["balance_used"] <= 0:
+                info["balance_used"] = position_margin_used
+            if info["balance_total"] <= info["balance_available"]:
+                info["balance_total"] = float(info["balance_available"] or 0) + position_margin_used
         if pos.get("error"):
             info["errors"].append(f"positions: {pos.get('error')}")
             if pos.get("endpoint"):
@@ -1203,6 +1209,40 @@ class TradeExecutor:
         execution["tp_targets"] = targets
         return ExecutionResult(self.mode, True, f"Updated TP{tp_index} to {float(new_price):.2f}.", execution)
 
+    def manual_cancel_tp(self, signal: Dict[str, Any], tp_index: int) -> ExecutionResult:
+        self._refresh_state()
+        execution = (signal or {}).get("execution") or {}
+        if not execution or not execution.get("active"):
+            return ExecutionResult(self.mode, False, "No active exchange execution found for this signal.", {})
+        if tp_index not in {1, 2, 3}:
+            return ExecutionResult(self.mode, False, "TP index must be 1, 2, or 3.", execution)
+        if signal.get(f"tp{tp_index}_hit"):
+            return ExecutionResult(self.mode, False, f"TP{tp_index} is already marked as hit.", execution)
+
+        qtys = list(execution.get("tp_qtys") or [0.0, 0.0, 0.0])
+        if tp_index > len(qtys) or float(qtys[tp_index - 1] or 0) <= 0:
+            return ExecutionResult(self.mode, False, f"TP{tp_index} is not active.", execution)
+
+        tp_orders = list(execution.get("tp_orders") or [])
+        existing = next((o for o in tp_orders if int(o.get("index", 0) or 0) == tp_index), None)
+        if self.mode == "live" and existing:
+            self._cancel_tp_order_record(execution, existing)
+
+        execution["tp_orders"] = [o for o in tp_orders if int(o.get("index", 0) or 0) != tp_index]
+        execution["tp_qtys"][tp_index - 1] = 0.0
+        targets = list(execution.get("tp_targets") or [signal.get("tp1"), signal.get("tp2"), signal.get("tp3")])
+        while len(targets) < 3:
+            targets.append(None)
+        execution["tp_targets"] = targets
+        signal[f"tp{tp_index}"] = float(targets[tp_index - 1] or signal.get(f"tp{tp_index}") or 0)
+
+        missing = set(int(i) for i in (execution.get("missing_tp_indices") or []))
+        missing.discard(tp_index)
+        execution["missing_tp_indices"] = sorted(missing)
+        active_tp_count = len([q for q in execution.get("tp_qtys", []) if float(q or 0) > 0])
+        execution["protection_ready"] = bool(execution.get("sl_order")) and len(execution.get("tp_orders") or []) == active_tp_count
+        return ExecutionResult(self.mode, True, f"Cancelled TP{tp_index}.", execution)
+
     def manual_close_position(self, signal: Dict[str, Any], fraction: float = 1.0) -> ExecutionResult:
         self._refresh_state()
         execution = (signal or {}).get("execution") or {}
@@ -1323,13 +1363,14 @@ class TradeExecutor:
 
     def _safe_get_open_positions(self) -> Dict[str, Any]:
         if not self.client.is_configured():
-            return {"count": 0, "sides": [], "error": "Bitunix futures API credentials are not configured."}
+            return {"count": 0, "sides": [], "used_margin": 0.0, "error": "Bitunix futures API credentials are not configured."}
         try:
             data = self.client.get_pending_positions().get("data", [])
             if isinstance(data, dict):
                 data = data.get("positionList") or data.get("data") or []
             count = 0
             sides = []
+            used_margin = 0.0
             for pos in data or []:
                 qty = float(pos.get("qty") or pos.get("positionQty") or 0)
                 if qty > 0:
@@ -1337,11 +1378,24 @@ class TradeExecutor:
                     side = str(pos.get("side") or pos.get("positionSide") or "").upper()
                     if side:
                         sides.append(side)
-            return {"count": count, "sides": sides}
+                    pos_margin = (
+                        pos.get("positionMargin")
+                        or pos.get("margin")
+                        or pos.get("initialMargin")
+                        or pos.get("marginFrozen")
+                        or pos.get("positionValue")
+                        or 0
+                    )
+                    try:
+                        used_margin += float(pos_margin or 0)
+                    except Exception:
+                        pass
+            return {"count": count, "sides": sides, "used_margin": used_margin}
         except Exception as e:
             return {
                 "count": 0,
                 "sides": [],
+                "used_margin": 0.0,
                 "error": str(e),
                 "endpoint": getattr(e, "endpoint", "GET /api/v1/futures/position/get_pending_positions"),
                 "response_text": getattr(e, "response_text", None),
