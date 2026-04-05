@@ -772,13 +772,11 @@ class PonchBot:
 
         def _ask_to_confirm(action_obj, chat_id, source_text=None):
             preview_lines = [
-                f"I can handle that. I will {self._preview_exec_action(action_obj).lower()}.",
-                "Reply YES if you want me to do it, or NO if you want to cancel.",
+                f"I will {self._preview_exec_action(action_obj).lower()}.",
+                "Reply YES to continue or NO to cancel.",
             ]
             if action_obj.get("signal_id"):
-                preview_lines.insert(1, f"I matched this position:\n<pre>{action_obj.get('signal_id')}</pre>")
-            if action_obj.get("reason") not in (None, "", "n/a"):
-                preview_lines.insert(len(preview_lines) - 1, f"Why I matched it this way: {action_obj.get('reason')}")
+                preview_lines.insert(1, f"Position ID:\n<pre>{action_obj.get('signal_id')}</pre>")
             self.pending_exec_action = {
                 "created_at": time.time(),
                 "chat_id": str(chat_id or ""),
