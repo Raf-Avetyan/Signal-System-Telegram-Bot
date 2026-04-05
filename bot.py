@@ -430,9 +430,37 @@ class PonchBot:
         if action_type == "move_sl_entry":
             result = self.trade_executor.manual_move_stop(sig, float(sig.get("entry") or 0))
         elif action_type == "move_sl":
-            result = self.trade_executor.manual_move_stop(sig, float(action.get("price") or 0))
+            if action.get("price") in (None, "", 0, 0.0, "0"):
+                self._send_private_execution_notice(
+                    "Exec Control",
+                    [
+                        "I understood a stop-loss change, but no valid stop price was found.",
+                        "Please say the exact stop price, for example: move stop to 67120",
+                    ],
+                    icon="⚠️",
+                )
+                return False
+            result = self.trade_executor.manual_move_stop(sig, float(action.get("price")))
         elif action_type == "set_tp":
-            result = self.trade_executor.manual_set_tp(sig, int(action.get("tp_index") or 0), float(action.get("price") or 0))
+            tp_index = int(action.get("tp_index") or 0)
+            if tp_index not in {1, 2, 3}:
+                self._send_private_execution_notice(
+                    "Exec Control",
+                    ["I need TP1, TP2, or TP3 to change a target."],
+                    icon="⚠️",
+                )
+                return False
+            if action.get("price") in (None, "", 0, 0.0, "0"):
+                self._send_private_execution_notice(
+                    "Exec Control",
+                    [
+                        f"I understood a TP{tp_index} change, but no valid price was found.",
+                        f"Please say the exact TP{tp_index} price, for example: set tp{tp_index} to 67120",
+                    ],
+                    icon="⚠️",
+                )
+                return False
+            result = self.trade_executor.manual_set_tp(sig, tp_index, float(action.get("price")))
         elif action_type == "close_full":
             result = self.trade_executor.manual_close_position(sig, 1.0)
         elif action_type == "close_partial":
@@ -609,18 +637,20 @@ class PonchBot:
         if not active:
             self._send_private_execution_notice(title, ["No active exchange positions found."], icon="📂")
             return
-        lines = [f"count={len(active)}"]
+        lines = [f"Open positions: {len(active)}"]
         for sig in active[:10]:
             execution = sig.get("execution") or {}
             signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (execution.get("signal_id"))
+            lines.append(f"ID: {signal_id or 'N/A'}")
+            lines.append(f"{sig.get('type', 'SCALP')} {sig.get('side', 'N/A')} [{sig.get('tf', 'N/A')}]")
             lines.append(
-                f"ID: {signal_id or 'N/A'} | {sig.get('type', 'SCALP')} {sig.get('side', 'N/A')} {sig.get('tf', 'N/A')} "
-                f"| entry={float(sig.get('entry', 0) or 0):.2f} sl={float(sig.get('sl', 0) or 0):.2f}"
+                f"Entry: {float(sig.get('entry', 0) or 0):.2f}    SL: {float(sig.get('sl', 0) or 0):.2f}"
             )
             lines.append(
-                f"tp1={float(sig.get('tp1', 0) or 0):.2f} tp2={float(sig.get('tp2', 0) or 0):.2f} "
-                f"tp3={float(sig.get('tp3', 0) or 0):.2f} qty={float(execution.get('qty', 0) or 0):.6f}"
+                f"TPs: {float(sig.get('tp1', 0) or 0):.2f} / {float(sig.get('tp2', 0) or 0):.2f} / {float(sig.get('tp3', 0) or 0):.2f}"
             )
+            lines.append(f"Qty: {float(execution.get('qty', 0) or 0):.6f}")
+            lines.append("")
         self._send_private_execution_notice(title, lines, icon="📂")
 
     def _format_execution_lines(self, sig=None, extra=None):

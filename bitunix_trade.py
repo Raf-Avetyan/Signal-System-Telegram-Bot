@@ -1114,18 +1114,24 @@ class TradeExecutor:
         execution = (signal or {}).get("execution") or {}
         if not execution or not execution.get("active"):
             return ExecutionResult(self.mode, False, "No active exchange execution found for this signal.", {})
+        try:
+            new_sl = float(new_sl)
+        except Exception:
+            return ExecutionResult(self.mode, False, "Stop price is invalid.", execution)
+        if new_sl <= 0:
+            return ExecutionResult(self.mode, False, "Stop price must be greater than 0.", execution)
         symbol = execution.get("symbol")
         position_id = execution.get("position_id")
         if not symbol or not position_id:
             return ExecutionResult(self.mode, False, "Missing exchange position reference.", execution)
         if self.mode != "live":
-            signal["sl"] = float(new_sl)
-            execution["sl_moved_to"] = float(new_sl)
+            signal["sl"] = new_sl
+            execution["sl_moved_to"] = new_sl
             return ExecutionResult(self.mode, True, "Demo stop moved.", execution)
-        self.client.modify_position_tpsl(symbol, str(position_id), None, float(new_sl))
-        signal["sl"] = float(new_sl)
-        execution["sl_moved_to"] = float(new_sl)
-        return ExecutionResult(self.mode, True, f"Moved SL to {float(new_sl):.2f}.", execution)
+        self.client.modify_position_tpsl(symbol, str(position_id), None, new_sl)
+        signal["sl"] = new_sl
+        execution["sl_moved_to"] = new_sl
+        return ExecutionResult(self.mode, True, f"Moved SL to {new_sl:.2f}.", execution)
 
     def manual_set_tp(self, signal: Dict[str, Any], tp_index: int, new_price: float) -> ExecutionResult:
         self._refresh_state()
@@ -1134,6 +1140,12 @@ class TradeExecutor:
             return ExecutionResult(self.mode, False, "No active exchange execution found for this signal.", {})
         if tp_index not in {1, 2, 3}:
             return ExecutionResult(self.mode, False, "TP index must be 1, 2, or 3.", execution)
+        try:
+            new_price = float(new_price)
+        except Exception:
+            return ExecutionResult(self.mode, False, f"TP{tp_index} price is invalid.", execution)
+        if new_price <= 0:
+            return ExecutionResult(self.mode, False, f"TP{tp_index} price must be greater than 0.", execution)
         if signal.get(f"tp{tp_index}_hit"):
             return ExecutionResult(self.mode, False, f"TP{tp_index} is already marked as hit.", execution)
         qtys = list(execution.get("tp_qtys") or [0.0, 0.0, 0.0])
