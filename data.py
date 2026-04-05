@@ -238,10 +238,13 @@ def ask_gemini_trade_question(api_key, model, user_text, context_text):
     prompt = (
         "You are an assistant inside a live crypto trading bot's private execution chat. "
         "The user may ask about positions, bot behavior, controls, or how a requested action would work. "
-        "Answer briefly, clearly, and in plain language. "
+        "Answer briefly, clearly, and in simple human language. "
+        "Sound like a helpful assistant, not a system alert. "
+        "You may use an occasional fitting emoji to keep the conversation alive, but keep it light. "
         "If the answer depends on the current tracked positions, use the provided context. "
         "Do not invent trades or exchange state that is not in the context. "
-        "Do not output markdown tables or JSON.\n\n"
+        "Do not output markdown tables or JSON. "
+        "Prefer short paragraphs or short bullet points only when helpful.\n\n"
         f"Active signal context:\n{context_text}\n\n"
         f"User question:\n{user_text}"
     )

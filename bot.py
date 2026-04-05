@@ -9,6 +9,7 @@ import time
 import traceback
 from datetime import datetime, timezone, timedelta
 import json
+import re
 
 from config import (
     SYMBOL, SIGNAL_TIMEFRAMES, POLL_INTERVAL,
@@ -388,6 +389,103 @@ class PonchBot:
             return " ".join(parts)
         return str(action.get("reason") or "Unsupported action")
 
+    def _extract_followup_price(self, text, reference=None):
+        raw_text = str(text or "").strip()
+        if not raw_text:
+            return None
+        tokens = re.findall(r'(?<!\w)(\d[\d.,]{0,20})(?!\w)', raw_text)
+        if not tokens:
+            return None
+
+        ref = 0.0
+        try:
+            ref = float(reference or 0)
+        except Exception:
+            ref = 0.0
+
+        for token in reversed(tokens):
+            token = token.strip()
+            normalized = token.replace(" ", "")
+            candidate = None
+
+            try_forms = []
+            if "," in normalized and "." in normalized:
+                if normalized.rfind(",") > normalized.rfind("."):
+                    try_forms.append(normalized.replace(".", "").replace(",", "."))
+                try_forms.append(normalized.replace(",", ""))
+            else:
+                try_forms.append(normalized.replace(",", ""))
+                if ref >= 10000 and re.fullmatch(r"\d{1,3}[.,]\d{3}", normalized):
+                    try_forms.insert(0, normalized.replace(".", "").replace(",", ""))
+
+            for form in try_forms:
+                try:
+                    value = float(form)
+                except Exception:
+                    continue
+                if value <= 0:
+                    continue
+                if ref >= 10000 and value < 1000 and re.fullmatch(r"\d{1,3}[.,]\d{3}", normalized):
+                    value = float(normalized.replace(".", "").replace(",", ""))
+                candidate = value
+                break
+
+            if candidate and candidate > 0:
+                return candidate
+        return None
+
+    def _apply_followup_to_pending_action(self, action, text):
+        action = dict(action or {})
+        lower = str(text or "").strip().lower()
+        if not action or not lower:
+            return action
+
+        sig = self._resolve_signal_for_action(action, allow_unexecuted=False)
+        reference = float((sig or {}).get("entry") or 0)
+
+        if action.get("action") == "open_manual":
+            if str(action.get("side") or "").upper() not in {"LONG", "SHORT"}:
+                if "long" in lower:
+                    action["side"] = "LONG"
+                elif "short" in lower:
+                    action["side"] = "SHORT"
+
+        if action.get("action") == "set_tp":
+            if action.get("tp_index") in (None, "", 0, 0.0, "0"):
+                if "tp1" in lower:
+                    action["tp_index"] = 1
+                elif "tp2" in lower:
+                    action["tp_index"] = 2
+                elif "tp3" in lower:
+                    action["tp_index"] = 3
+
+        if action.get("action") in {"move_sl", "set_tp"}:
+            price = self._extract_followup_price(text, reference=reference)
+            if price:
+                action["price"] = price
+
+        if action.get("action") == "close_partial":
+            match = re.search(r'(\d+(?:[.,]\d+)?)\s*%', lower)
+            if match:
+                try:
+                    action["fraction"] = max(0.0, min(1.0, float(match.group(1).replace(",", ".")) / 100.0))
+                except Exception:
+                    pass
+            else:
+                match = re.search(r'(\d+(?:[.,]\d+)?)', lower)
+                if match and any(word in lower for word in ["half", "percent", "portion", "part"]):
+                    try:
+                        value = float(match.group(1).replace(",", "."))
+                        if value > 1:
+                            value = value / 100.0
+                        action["fraction"] = max(0.0, min(1.0, value))
+                    except Exception:
+                        pass
+            if "half" in lower and not action.get("fraction"):
+                action["fraction"] = 0.5
+
+        return action
+
     def _needs_exec_clarification(self, action):
         action_type = str(action.get("action") or "").lower()
         active = self._active_execution_signals()
@@ -600,12 +698,10 @@ class PonchBot:
             self._format_execution_lines(
                 sig,
                 extra=[
-                    f"Action: {self._preview_exec_action(action)}",
-                    f"Result: {result.message}",
-                    "Exchange: accepted" if result.accepted else "Exchange: rejected",
+                    f"Done: {result.message}" if result.accepted else f"Could not do it: {result.message}",
                 ],
             ),
-            icon="✅" if result.accepted else "⚠️",
+            icon="?" if result.accepted else "??",
         )
         return result.accepted
 
@@ -616,7 +712,28 @@ class PonchBot:
         if not text:
             return False
 
+        def _ask_to_confirm(action_obj, chat_id, source_text=None):
+            preview_lines = [
+                f"Action: {self._preview_exec_action(action_obj)}",
+                "Reply YES to execute or NO to cancel.",
+            ]
+            if action_obj.get("signal_id"):
+                preview_lines.insert(1, f"Target ID: {action_obj.get('signal_id')}")
+            if action_obj.get("reason") not in (None, "", "n/a"):
+                preview_lines.insert(len(preview_lines) - 1, f"Note: {action_obj.get('reason')}")
+            self.pending_exec_action = {
+                "created_at": time.time(),
+                "chat_id": str(chat_id or ""),
+                "action": action_obj,
+                "mode": "confirm",
+            }
+            if source_text is not None:
+                self.pending_exec_action["source_text"] = source_text
+            self._save_state()
+            self._send_private_execution_notice("Confirm Exec Action", preview_lines, icon="??")
+
         lower = text.lower()
+        chat_id = str((message.get("chat") or {}).get("id") or "")
         position_phrases = [
             "all open positions", "open positions", "show positions", "show my positions",
             "give me positions", "what positions", "what are open", "which positions are open",
@@ -632,22 +749,47 @@ class PonchBot:
             if expired:
                 self.pending_exec_action = None
                 self._save_state()
-                self._send_private_execution_notice("Exec Control", ["Pending action expired. Send the request again."], icon="?")
+                self._send_private_execution_notice("Exec Control", ["Pending action expired. Send the request again."], icon="??")
                 return True
-            if pending_chat == str((message.get("chat") or {}).get("id") or ""):
+            if pending_chat == chat_id:
                 pending_mode = str((self.pending_exec_action or {}).get("mode") or "confirm").lower()
+                pending_action = dict((self.pending_exec_action or {}).get("action") or {})
+                pending_source = str((self.pending_exec_action or {}).get("source_text") or "")
+                locally_updated = self._apply_followup_to_pending_action(pending_action, text)
+                local_changed = json.dumps(locally_updated, sort_keys=True, default=str) != json.dumps(pending_action, sort_keys=True, default=str)
+
                 if pending_mode == "clarify":
                     if lower in {"no", "n", "cancel", "stop"}:
                         self.pending_exec_action = None
                         self._save_state()
-                        self._send_private_execution_notice("Exec Control", ["Pending request cancelled."], icon="❌")
+                        self._send_private_execution_notice("Exec Control", ["Pending request cancelled."], icon="?")
                         return True
-                    followup_seed = str((self.pending_exec_action or {}).get("source_text") or "")
-                    combined_text = f"{followup_seed}\nUser follow-up: {text}".strip()
+                    if local_changed:
+                        need_more = self._needs_exec_clarification(locally_updated)
+                        if need_more:
+                            self.pending_exec_action = {
+                                "created_at": time.time(),
+                                "chat_id": chat_id,
+                                "action": locally_updated,
+                                "mode": "clarify",
+                                "source_text": pending_source or text,
+                            }
+                            self._save_state()
+                            self._send_private_execution_notice("Exec Control", [need_more], icon="??")
+                            return True
+                        if str(locally_updated.get("action") or "").lower() == "status":
+                            self.pending_exec_action = None
+                            self._save_state()
+                            self._apply_private_exec_action(locally_updated)
+                            return True
+                        _ask_to_confirm(locally_updated, chat_id, source_text=pending_source or text)
+                        return True
+
+                    combined_text = f"{pending_source}\nUser follow-up: {text}".strip()
                     self.pending_exec_action = None
                     self._save_state()
                     if not GEMINI_API_KEY:
-                        self._send_private_execution_notice("Exec Control", ["GEMINI_API_KEY is missing in .env."], icon="⚠️")
+                        self._send_private_execution_notice("Exec Control", ["GEMINI_API_KEY is missing in .env."], icon="??")
                         return True
                     parsed = parse_gemini_trade_instruction(
                         GEMINI_API_KEY,
@@ -656,11 +798,11 @@ class PonchBot:
                         self._build_gemini_trade_context(),
                     )
                     if not parsed:
-                        self._send_private_execution_notice("Exec Control", ["I still could not understand the request clearly."], icon="⚠️")
+                        self._send_private_execution_notice("Exec Control", ["I still could not understand the request clearly."], icon="??")
                         return True
                     action_type = str(parsed.get("action") or "unsupported").lower()
                     if action_type == "unsupported":
-                        self._send_private_execution_notice("Exec Control", [str(parsed.get("reason") or "Request is unclear or unsupported.")], icon="⚠️")
+                        self._send_private_execution_notice("Exec Control", [str(parsed.get("reason") or "Request is unclear or unsupported.")], icon="??")
                         return True
                     if action_type == "status":
                         self._apply_private_exec_action(parsed)
@@ -669,31 +811,17 @@ class PonchBot:
                     if need_more:
                         self.pending_exec_action = {
                             "created_at": time.time(),
-                            "chat_id": str((message.get("chat") or {}).get("id") or ""),
+                            "chat_id": chat_id,
                             "action": parsed,
                             "mode": "clarify",
                             "source_text": combined_text,
                         }
                         self._save_state()
-                        self._send_private_execution_notice("Exec Control", [need_more], icon="🤖")
+                        self._send_private_execution_notice("Exec Control", [need_more], icon="??")
                         return True
-                    preview_lines = [
-                        f"Action: {self._preview_exec_action(parsed)}",
-                        "Reply YES to execute or NO to cancel.",
-                    ]
-                    if parsed.get("signal_id"):
-                        preview_lines.insert(1, f"Target ID: {parsed.get('signal_id')}")
-                    if parsed.get("reason") not in (None, "", "n/a"):
-                        preview_lines.insert(len(preview_lines) - 1, f"Note: {parsed.get('reason')}")
-                    self.pending_exec_action = {
-                        "created_at": time.time(),
-                        "chat_id": str((message.get("chat") or {}).get("id") or ""),
-                        "action": parsed,
-                        "mode": "confirm",
-                    }
-                    self._save_state()
-                    self._send_private_execution_notice("Confirm Exec Action", preview_lines, icon="🤖")
+                    _ask_to_confirm(parsed, chat_id, source_text=combined_text)
                     return True
+
                 if lower in {"yes", "y", "confirm", "do it", "execute"}:
                     action = self.pending_exec_action.get("action") or {}
                     self.pending_exec_action = None
@@ -703,11 +831,26 @@ class PonchBot:
                 if lower in {"no", "n", "cancel", "stop"}:
                     self.pending_exec_action = None
                     self._save_state()
-                    self._send_private_execution_notice("Exec Control", ["Pending action cancelled."], icon="❌")
+                    self._send_private_execution_notice("Exec Control", ["Pending action cancelled."], icon="?")
+                    return True
+                if pending_mode == "confirm" and local_changed:
+                    need_more = self._needs_exec_clarification(locally_updated)
+                    if need_more:
+                        self.pending_exec_action = {
+                            "created_at": time.time(),
+                            "chat_id": chat_id,
+                            "action": locally_updated,
+                            "mode": "clarify",
+                            "source_text": pending_source or text,
+                        }
+                        self._save_state()
+                        self._send_private_execution_notice("Exec Control", [need_more], icon="??")
+                        return True
+                    _ask_to_confirm(locally_updated, chat_id, source_text=pending_source or text)
                     return True
 
         if not GEMINI_API_KEY:
-            self._send_private_execution_notice("Exec Control", ["GEMINI_API_KEY is missing in .env."], icon="⚠️")
+            self._send_private_execution_notice("Exec Control", ["GEMINI_API_KEY is missing in .env."], icon="??")
             return True
 
         parsed = parse_gemini_trade_instruction(
@@ -717,7 +860,7 @@ class PonchBot:
             self._build_gemini_trade_context(),
         )
         if not parsed:
-            self._send_private_execution_notice("Exec Control", ["I could not understand that request clearly."], icon="⚠️")
+            self._send_private_execution_notice("Exec Control", ["I could not understand that request clearly."], icon="??")
             return True
 
         action_type = str(parsed.get("action") or "unsupported").lower()
@@ -746,31 +889,16 @@ class PonchBot:
         if need_more:
             self.pending_exec_action = {
                 "created_at": time.time(),
-                "chat_id": str((message.get("chat") or {}).get("id") or ""),
+                "chat_id": chat_id,
                 "action": parsed,
                 "mode": "clarify",
                 "source_text": text,
             }
             self._save_state()
-            self._send_private_execution_notice("Exec Control", [need_more], icon="🤖")
+            self._send_private_execution_notice("Exec Control", [need_more], icon="??")
             return True
 
-        preview_lines = [
-            f"Action: {self._preview_exec_action(parsed)}",
-            "Reply YES to execute or NO to cancel.",
-        ]
-        if parsed.get("signal_id"):
-            preview_lines.insert(1, f"Target ID: {parsed.get('signal_id')}")
-        if parsed.get("reason") not in (None, "", "n/a"):
-            preview_lines.insert(len(preview_lines) - 1, f"Note: {parsed.get('reason')}")
-        self.pending_exec_action = {
-            "created_at": time.time(),
-            "chat_id": str((message.get("chat") or {}).get("id") or ""),
-            "action": parsed,
-            "mode": "confirm",
-        }
-        self._save_state()
-        self._send_private_execution_notice("Confirm Exec Action", preview_lines, icon="🤖")
+        _ask_to_confirm(parsed, chat_id, source_text=text)
         return True
 
     def _format_balance_line(self, trade_check):
@@ -952,16 +1080,6 @@ class PonchBot:
                 f"Entry: {float(sig.get('entry') or 0):.2f}    SL: {self._format_live_sl_value(sig)}"
             )
             lines.append(self._format_active_tp_line(sig))
-        meta = sig.get("meta") or {}
-        size = meta.get("size")
-        score = meta.get("score")
-        strategy = meta.get("strategy")
-        if size not in (None, "", "N/A"):
-            lines.append(f"Risk size: {size}%")
-        if score not in (None, "", "N/A"):
-            lines.append(f"Score: {score}")
-        if strategy not in (None, "", "N/A"):
-            lines.append(f"Model: {strategy}")
         if extra:
             lines.extend([str(line) for line in extra if str(line).strip()])
         return lines
@@ -2952,10 +3070,17 @@ class PonchBot:
                 f"TP mode: {', '.join(sorted({str(o.get('kind', 'N/A')) for o in (details.get('tp_orders') or [])}))}" if details.get("tp_orders") else None,
             ] + list(details.get("protection_warnings", []) or [])
         )
+        notice_lines = self._format_execution_lines(
+            sig_obj,
+            extra=[
+                f"Done: {result.message}" if result.accepted else f"Could not do it: {result.message}",
+                f"Position ID: {details.get('position_id')}" if details.get("position_id") else None,
+            ] + list(details.get("protection_warnings", []) or [])
+        )
         self._send_private_execution_notice(
             f"Exchange {status.title()}: {sig_obj.get('type')} {sig_obj.get('side')}",
             notice_lines,
-            icon="рџ”ђ" if result.accepted else "вљ пёЏ",
+            icon="?" if result.accepted else "??",
         )
         if result.accepted and result.payload:
             sig_obj["execution"] = result.payload
@@ -2982,8 +3107,6 @@ class PonchBot:
                     sig_obj,
                     extra=[
                         str(e),
-                        f"endpoint={endpoint}" if endpoint else None,
-                        f"response={response_text}" if response_text else None,
                     ],
                 ),
             )
@@ -2994,15 +3117,14 @@ class PonchBot:
             self._format_execution_lines(
                 sig_obj,
                 extra=[
-                    f"Result: {result.message}",
-                    f"Bitunix position ID: {result.payload.get('position_id')}" if result.payload else None,
+                    f"Done: {result.message}",
                     f"New stop: {float(result.payload.get('sl_moved_to') or 0):.2f}" if (result.payload or {}).get("sl_moved_to") is not None else None,
-                    f"Still active: {'yes' if result.payload.get('active') else 'no'}" if result.payload else None,
                 ],
             ),
         )
         if result.payload:
             sig_obj["execution"] = result.payload
+            self._save_state()
             self._save_state()
 
 
