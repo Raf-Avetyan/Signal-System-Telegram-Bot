@@ -289,11 +289,11 @@ class PonchBot:
             lines.append("none")
         for sig in active[:8]:
             execution = sig.get("execution") or {}
+            active_tps = self._format_active_tp_line(sig)
             lines.append(
                 f"- {self._control_signal_label(sig)} "
                 f"status={sig.get('status')} sl={float(sig.get('sl', 0) or 0):.2f} "
-                f"tp1={float(sig.get('tp1', 0) or 0):.2f} tp2={float(sig.get('tp2', 0) or 0):.2f} "
-                f"tp3={float(sig.get('tp3', 0) or 0):.2f} qty={float(execution.get('qty', 0) or 0):.6f}"
+                f"{active_tps} qty={float(execution.get('qty', 0) or 0):.6f}"
             )
         lines.append("Recent tracked signals not opened on exchange:")
         pending = self._recent_unexecuted_signals()
@@ -807,9 +807,9 @@ class PonchBot:
     def _send_open_positions_snapshot(self, title="Open Positions"):
         active = self._active_execution_signals()
         if not active:
-            self._send_private_execution_notice(title, ["No active exchange positions found."], icon="????")
+            self._send_private_execution_notice(title, ["No active exchange positions found."], icon="📂")
             return
-        blocks = [f"???? <b>{title}</b>\n<pre>Open positions: {len(active)}</pre>"]
+        blocks = [f"📂 <b>{title}</b>\n<pre>Open positions: {len(active)}</pre>"]
         for sig in active[:10]:
             execution = sig.get("execution") or {}
             signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (execution.get("signal_id"))
@@ -820,9 +820,9 @@ class PonchBot:
                 f"Qty: {float(execution.get('qty', 0) or 0):.6f}"
             )
             block = (
-                f"\n\n???? <b>Position ID</b>\n"
+                f"\n\n🆔 <b>Position ID</b>\n"
                 f"<pre>{signal_id or 'N/A'}</pre>\n"
-                f"???? <b>Position Details</b>\n"
+                f"📂 <b>Position Details</b>\n"
                 f"<pre>{details_block}</pre>"
             )
             blocks.append(block)
@@ -836,15 +836,19 @@ class PonchBot:
         sig_type = str(sig.get("type") or "Signal")
         tf = str(sig.get("tf") or "N/A")
         status = str(sig.get("status") or "OPEN").upper()
+        details_block = (
+            f"This is your {sig_type} {side} on {tf}.\n"
+            f"Status: {status}\n"
+            f"Entry: {float(sig.get('entry', 0) or 0):.2f}    SL: {float(sig.get('sl', 0) or 0):.2f}\n"
+            f"{self._format_active_tp_line(sig)}\n"
+            f"Qty: {float(execution.get('qty', 0) or 0):.6f}"
+        )
         lines = [
             f"📂 <b>{title}</b>",
             "🆔 <b>Position ID</b>",
             f"<pre>{signal_id or 'N/A'}</pre>",
-            f"This is your {sig_type} {side} on {tf}.",
-            f"Status: {status}",
-            f"Entry: {float(sig.get('entry', 0) or 0):.2f}    SL: {float(sig.get('sl', 0) or 0):.2f}",
-            self._format_active_tp_line(sig),
-            f"Qty: {float(execution.get('qty', 0) or 0):.6f}",
+            "📂 <b>Position Details</b>",
+            f"<pre>{details_block}</pre>",
         ]
         tg.send("\n".join(lines), parse_mode="HTML", chat_id=self._execution_chat_id())
 
@@ -866,6 +870,8 @@ class PonchBot:
         if active_parts:
             label = "Active TP" if len(active_parts) == 1 else "Active TPs"
             return f"{label}: " + " / ".join(active_parts)
+        if execution.get("active") and (execution.get("tp_orders") is not None or tp_qtys):
+            return "Active TPs: none"
         return (
             f"TPs: {float(sig.get('tp1', 0) or 0):.2f} / "
             f"{float(sig.get('tp2', 0) or 0):.2f} / "
