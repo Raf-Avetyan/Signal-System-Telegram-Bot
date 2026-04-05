@@ -698,7 +698,7 @@ class PonchBot:
             self._format_execution_lines(
                 sig,
                 extra=[
-                    f"Done: {result.message}" if result.accepted else f"Could not do it: {result.message}",
+                    f"I did it. {result.message}" if result.accepted else f"I could not do that. {result.message}",
                 ],
             ),
             icon="?" if result.accepted else "??",
@@ -714,11 +714,12 @@ class PonchBot:
 
         def _ask_to_confirm(action_obj, chat_id, source_text=None):
             preview_lines = [
-                f"Action: {self._preview_exec_action(action_obj)}",
+                "I can do that.",
+                f"What I understood: {self._preview_exec_action(action_obj)}.",
                 "Reply YES to execute or NO to cancel.",
             ]
             if action_obj.get("signal_id"):
-                preview_lines.insert(1, f"Target ID: {action_obj.get('signal_id')}")
+                preview_lines.insert(2, f"Position ID:\n<pre>{action_obj.get('signal_id')}</pre>")
             if action_obj.get("reason") not in (None, "", "n/a"):
                 preview_lines.insert(len(preview_lines) - 1, f"Note: {action_obj.get('reason')}")
             self.pending_exec_action = {
@@ -977,21 +978,22 @@ class PonchBot:
         if not active:
             self._send_private_execution_answer("You do not have any active exchange positions right now.")
             return
-        blocks = [f"{title}\n<pre>Open positions: {len(active)}</pre>"]
+        blocks = [f"{title}\nYou currently have {len(active)} open position{'s' if len(active) != 1 else ''}."]
         for sig in active[:10]:
             execution = sig.get("execution") or {}
             signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (execution.get("signal_id"))
             sl_text = self._format_live_sl_value(sig)
             header_block = f"{sig.get('type', 'SCALP')} {sig.get('side', 'N/A')} [{sig.get('tf', 'N/A')}]"
-            price_block = (
-                f"Entry: {float(sig.get('entry', 0) or 0):.2f}    SL: {sl_text}\n"
-                f"{self._format_active_tp_line(sig)}\n"
-                f"Qty: {float(execution.get('qty', 0) or 0):.6f}"
-            )
+            detail_lines = [
+                f"Entry: {float(sig.get('entry', 0) or 0):.2f}",
+                f"SL: {sl_text}",
+                self._format_active_tp_line(sig),
+                f"Qty: {float(execution.get('qty', 0) or 0):.6f}",
+            ]
             block = (
                 f"\n\n{header_block}\n"
                 f"Position ID:\n<pre>{signal_id or 'N/A'}</pre>\n"
-                f"<pre>{price_block}</pre>"
+                + "\n".join(detail_lines)
             )
             blocks.append(block)
         self._send_private_execution_answer("".join(blocks))
@@ -1006,17 +1008,18 @@ class PonchBot:
         tf = str(sig.get("tf") or "N/A")
         status = str(sig.get("status") or "OPEN").upper()
         sl_text = self._format_live_sl_value(sig)
-        details_block = (
-            f"Status: {status}\n"
-            f"Entry: {float(sig.get('entry', 0) or 0):.2f}    SL: {sl_text}\n"
-            f"{self._format_active_tp_line(sig)}\n"
-            f"Qty: {float(execution.get('qty', 0) or 0):.6f}"
-        )
+        details_block = "\n".join([
+            f"Status: {status}",
+            f"Entry: {float(sig.get('entry', 0) or 0):.2f}",
+            f"SL: {sl_text}",
+            self._format_active_tp_line(sig),
+            f"Qty: {float(execution.get('qty', 0) or 0):.6f}",
+        ])
         answer = (
             f"{title}\n"
             f"This is your {sig_type} {side} on {tf}.\n"
             f"Position ID:\n<pre>{signal_id or 'N/A'}</pre>\n"
-            f"<pre>{details_block}</pre>"
+            f"{details_block}"
         )
         self._send_private_execution_answer(answer)
 
@@ -1072,13 +1075,13 @@ class PonchBot:
         side = sig.get("side")
         signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (((sig.get("execution") or {}).get("signal_id")))
         if signal_id:
-            lines.append(f"ID: {signal_id}")
+            lines.append("Position ID:")
+            lines.append(f"<pre>{signal_id}</pre>")
         if tf or sig_type or side:
             lines.append(f"{sig_type or 'Signal'} {side or 'N/A'} [{tf or 'N/A'}]")
         if sig.get("entry") is not None:
-            lines.append(
-                f"Entry: {float(sig.get('entry') or 0):.2f}    SL: {self._format_live_sl_value(sig)}"
-            )
+            lines.append(f"Entry: {float(sig.get('entry') or 0):.2f}")
+            lines.append(f"SL: {self._format_live_sl_value(sig)}")
             lines.append(self._format_active_tp_line(sig))
         if extra:
             lines.extend([str(line) for line in extra if str(line).strip()])
