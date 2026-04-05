@@ -25,6 +25,8 @@ BITUNIX_RISK_CAP_PCT = float(os.getenv("BITUNIX_RISK_CAP_PCT", "0.01"))
 BITUNIX_MIN_NOTIONAL_USD = float(os.getenv("BITUNIX_MIN_NOTIONAL_USD", "25"))
 BITUNIX_TP_SPLITS = (0.30, 0.40, 0.30)
 BITUNIX_TPSL_TRIGGER_TYPE = os.getenv("BITUNIX_TPSL_TRIGGER_TYPE", "MARK_PRICE").strip().upper()
+BITUNIX_MIN_BASE_QTY = float(os.getenv("BITUNIX_MIN_BASE_QTY", "0.0001"))
+BITUNIX_QTY_STEP = float(os.getenv("BITUNIX_QTY_STEP", "0.0001"))
 
 # в”Ђв”Ђв”Ђ SYMBOL в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 SYMBOL = "BTCUSDT"

@@ -21,8 +21,10 @@ from config import (
     BITUNIX_MARGIN_COIN,
     BITUNIX_MAX_OPEN_POSITIONS,
     BITUNIX_MAX_RISK_USD,
+    BITUNIX_MIN_BASE_QTY,
     BITUNIX_MIN_NOTIONAL_USD,
     BITUNIX_POSITION_MODE,
+    BITUNIX_QTY_STEP,
     BITUNIX_REQUIRED_MARGIN_MODE,
     BITUNIX_RISK_CAP_PCT,
     BITUNIX_TPSL_TRIGGER_TYPE,
@@ -463,6 +465,8 @@ class TradeExecutor:
                 raise BitunixTradeError(f"Liquidation safety failed: {liq_info.get('reason', 'unsafe liq distance')}")
 
             protection_warnings: List[str] = []
+            if plan.get("tp_split_warning"):
+                protection_warnings.append(str(plan.get("tp_split_warning")))
             sl_order = self._place_initial_stop_or_close(
                 symbol=symbol,
                 position_id=position_id,
@@ -550,6 +554,17 @@ class TradeExecutor:
 
         if event_type == "TP1" and position_id:
             self._ensure_tp_leg_closed(signal, execution, 1)
+            remaining_qty = max(0.0, float(execution.get("qty", 0) or 0) - float((execution.get("tp_qtys") or [0.0])[0] or 0))
+            if remaining_qty <= 1e-12:
+                self._cancel_remaining_protection(execution)
+                if sl_order_id:
+                    try:
+                        self.client.cancel_tpsl(symbol, str(sl_order_id))
+                    except Exception:
+                        pass
+                execution["active"] = False
+                execution["sl_moved_to"] = None
+                return ExecutionResult(self.mode, True, "TP1 closed the full position.", execution)
             self.client.modify_position_tpsl(symbol, str(position_id), None, float(signal["entry"]))
             execution["sl_moved_to"] = float(signal["entry"])
             return ExecutionResult(self.mode, True, "Moved SL to entry after TP1.", execution)
@@ -620,7 +635,7 @@ class TradeExecutor:
             and qty * entry < BITUNIX_MIN_NOTIONAL_USD
         ):
             qty = min(BITUNIX_MIN_NOTIONAL_USD / entry, affordable_qty)
-        tp_qtys = self._split_qty(qty)
+        tp_qtys, tp_split_warning = self._split_qty(qty)
         is_hedge = position_mode == "HEDGE"
         entry_side = "BUY" if signal["side"] == "LONG" else "SELL"
         exit_side = entry_side if is_hedge else ("SELL" if signal["side"] == "LONG" else "BUY")
@@ -650,6 +665,7 @@ class TradeExecutor:
             "exit_reduce_only": None if is_hedge else True,
             "qty": qty,
             "tp_qtys": tp_qtys,
+            "tp_split_warning": tp_split_warning,
             "leverage": leverage,
             "current_exchange_leverage": int(raw_account.get("leverage") or 0),
             "target_leverage": target_leverage,
@@ -977,12 +993,45 @@ class TradeExecutor:
             }
 
     @staticmethod
-    def _split_qty(qty: float) -> List[float]:
+    def _round_qty_down(qty: float, step: float) -> float:
+        if step <= 0:
+            return max(0.0, float(qty))
+        return max(0.0, int(float(qty) / step) * step)
+
+    @classmethod
+    def _split_qty(cls, qty: float) -> tuple[List[float], Optional[str]]:
+        step = max(float(BITUNIX_QTY_STEP or 0), 0.00000001)
+        min_leg = max(float(BITUNIX_MIN_BASE_QTY or 0), step)
+        total = cls._round_qty_down(float(qty), step)
+        if total <= 0:
+            return [0.0, 0.0, 0.0], "TP legs skipped: quantity rounded to zero."
+
+        if total < min_leg:
+            return [0.0, 0.0, 0.0], (
+                f"TP legs skipped: total qty {total:.8f} is below Bitunix min leg {min_leg:.8f}."
+            )
+
         a, b, c = BITUNIX_TP_SPLITS
-        q1 = qty * a
-        q2 = qty * b
-        q3 = max(0.0, qty - q1 - q2)
-        return [q1, q2, q3]
+        q1 = cls._round_qty_down(total * a, step)
+        q2 = cls._round_qty_down(total * b, step)
+        q3 = cls._round_qty_down(max(0.0, total - q1 - q2), step)
+
+        nonzero = [q for q in (q1, q2, q3) if q > 0]
+        if len(nonzero) == 3 and min(nonzero) >= min_leg and abs((q1 + q2 + q3) - total) < (step + 1e-12):
+            return [q1, q2, q3], None
+
+        if total >= (2 * min_leg):
+            q1 = min_leg
+            q2 = 0.0
+            q3 = cls._round_qty_down(total - q1, step)
+            if q3 >= min_leg:
+                return [q1, q2, q3], (
+                    f"Compressed TP legs to TP1+TP3 because 3-way split falls below Bitunix min qty {min_leg:.8f}."
+                )
+
+        return [total, 0.0, 0.0], (
+            f"Compressed TP legs to TP1-only because partial TP legs fall below Bitunix min qty {min_leg:.8f}."
+        )
 
     def _evaluate_liquidation_safety(self, position: Dict[str, Any], signal: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
         liq_raw = position.get("liqPrice") or position.get("liquidationPrice") or position.get("liq_price")
