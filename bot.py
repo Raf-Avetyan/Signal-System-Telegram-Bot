@@ -847,9 +847,9 @@ class PonchBot:
         self._refresh_private_execution_state()
         active = self._active_execution_signals()
         if not active:
-            self._send_private_execution_notice(title, ["No active exchange positions found."], icon="📂")
+            self._send_private_execution_answer("You do not have any active exchange positions right now.")
             return
-        blocks = [f"📂 <b>{title}</b>\n<pre>Open positions: {len(active)}</pre>"]
+        blocks = [f"Open positions: {len(active)}"]
         for sig in active[:10]:
             execution = sig.get("execution") or {}
             signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (execution.get("signal_id"))
@@ -861,13 +861,11 @@ class PonchBot:
                 f"Qty: {float(execution.get('qty', 0) or 0):.6f}"
             )
             block = (
-                f"\n\n🆔 <b>Position ID</b>\n"
-                f"<pre>{signal_id or 'N/A'}</pre>\n"
-                f"📂 <b>Position Details</b>\n"
-                f"<pre>{details_block}</pre>"
+                f"\n\nPosition ID:\n{signal_id or 'N/A'}\n"
+                f"{details_block}"
             )
             blocks.append(block)
-        tg.send("".join(blocks), parse_mode="HTML", chat_id=self._execution_chat_id())
+        self._send_private_execution_answer("".join(blocks))
 
     def _send_single_position_snapshot(self, sig, title="Position Info"):
         self._refresh_private_execution_state()
@@ -886,14 +884,12 @@ class PonchBot:
             f"{self._format_active_tp_line(sig)}\n"
             f"Qty: {float(execution.get('qty', 0) or 0):.6f}"
         )
-        lines = [
-            f"📂 <b>{title}</b>",
-            "🆔 <b>Position ID</b>",
-            f"<pre>{signal_id or 'N/A'}</pre>",
-            "📂 <b>Position Details</b>",
-            f"<pre>{details_block}</pre>",
-        ]
-        tg.send("\n".join(lines), parse_mode="HTML", chat_id=self._execution_chat_id())
+        answer = (
+            f"{title}\n"
+            f"Position ID:\n{signal_id or 'N/A'}\n\n"
+            f"{details_block}"
+        )
+        self._send_private_execution_answer(answer)
 
     def _format_live_sl_value(self, sig):
         execution = (sig or {}).get("execution") or {}

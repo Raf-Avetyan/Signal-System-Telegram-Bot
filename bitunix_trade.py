@@ -1667,6 +1667,23 @@ class TradeExecutor:
                 continue
 
             report["matched"] += 1
+            position_tpsl_rows = [
+                row for row in pending_tpsl
+                if str(row.get("positionId") or row.get("position_id") or "").strip() == position_id
+            ]
+
+            def _has_live_price(row: Dict[str, Any], key: str) -> bool:
+                raw = row.get(key)
+                if raw in (None, "", "0", 0, 0.0):
+                    return False
+                try:
+                    return float(raw) > 0
+                except Exception:
+                    return bool(str(raw).strip())
+
+            live_sl_rows = [row for row in position_tpsl_rows if _has_live_price(row, "slPrice")]
+            live_tp_rows = [row for row in position_tpsl_rows if _has_live_price(row, "tpPrice")]
+
             sl_order = execution.get("sl_order") or {}
             sl_id = str(sl_order.get("orderId") or sl_order.get("id") or "").strip()
             tp_orders = execution.get("tp_orders") or []
@@ -1675,17 +1692,33 @@ class TradeExecutor:
                 for order in tp_orders
                 if str(order.get("orderId") or order.get("id") or "").strip()
             }
-            has_sl = (not sl_id) or (sl_id in live_tpsl_ids)
-            has_any_tp = (not tp_ids) or any((tp_id in live_tpsl_ids or tp_id in live_order_ids) for tp_id in tp_ids)
-            if sl_id and sl_id not in live_tpsl_ids:
+            has_sl = bool(live_sl_rows) if sl_order else False
+            has_any_tp = bool(live_tp_rows) if any(str(o.get("kind", "")).upper() == "POSITION_TP" for o in tp_orders) else ((not tp_ids) or any((tp_id in live_tpsl_ids or tp_id in live_order_ids) for tp_id in tp_ids))
+            if sl_order and not live_sl_rows:
                 execution["sl_order"] = {}
+                execution["sl_moved_to"] = None
+                report["state_updated"] += 1
+            elif (not sl_order) and live_sl_rows:
+                row = live_sl_rows[0]
+                execution["sl_order"] = {
+                    "id": row.get("id") or row.get("orderId"),
+                    "orderId": row.get("id") or row.get("orderId"),
+                    "price": row.get("slPrice"),
+                    "raw": row,
+                }
                 report["state_updated"] += 1
             if tp_orders:
                 live_tp_orders = []
                 removed_tp_indices = []
                 for order in tp_orders:
                     order_id = str(order.get("orderId") or order.get("id") or "").strip()
-                    if order_id and (order_id in live_tpsl_ids or order_id in live_order_ids):
+                    kind = str(order.get("kind", "")).upper()
+                    is_live = False
+                    if kind == "POSITION_TP":
+                        is_live = bool(live_tp_rows)
+                    elif order_id and (order_id in live_tpsl_ids or order_id in live_order_ids):
+                        is_live = True
+                    if is_live:
                         live_tp_orders.append(order)
                     else:
                         try:
@@ -1709,6 +1742,28 @@ class TradeExecutor:
                     if not live_tp_orders and not any(float(q or 0) > 0 for q in qtys[:3]):
                         execution["tp_mode"] = "NONE"
                     report["state_updated"] += 1
+            elif live_tp_rows:
+                row = live_tp_rows[0]
+                try:
+                    tp_qty = float(row.get("tpQty") or execution.get("qty") or 0)
+                except Exception:
+                    tp_qty = float(execution.get("qty") or 0)
+                execution["tp_orders"] = [{
+                    "index": 1,
+                    "kind": "POSITION_TP",
+                    "qty": tp_qty,
+                    "price": float(row.get("tpPrice") or 0),
+                    "orderId": row.get("id") or row.get("orderId"),
+                    "id": row.get("id") or row.get("orderId"),
+                    "raw": row,
+                }]
+                execution["tp_qtys"] = [tp_qty, 0.0, 0.0]
+                execution["tp_targets"] = [float(row.get("tpPrice") or 0), None, None]
+                execution["tp_mode"] = "POSITION_TP"
+                execution["protection_ready"] = bool(execution.get("sl_order"))
+                report["state_updated"] += 1
+            has_sl = bool(execution.get("sl_order"))
+            has_any_tp = bool(execution.get("tp_orders"))
             if not has_sl or not has_any_tp:
                 report["missing_protection"].append({
                     "signal_id": execution.get("signal_id") or sig.get("signal_id"),
