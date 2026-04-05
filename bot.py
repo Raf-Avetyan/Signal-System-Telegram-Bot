@@ -133,6 +133,7 @@ class PonchBot:
         self.last_daily_report_date = state.get("last_daily_report_date")
         self.last_exec_snapshot_date = state.get("last_exec_snapshot_date")
         self.pending_exec_action = state.get("pending_exec_action")
+        self.last_exec_suggested_action = state.get("last_exec_suggested_action")
         self.last_scalp_open_alert = state.get("last_scalp_open_alert", {})
         self.scalp_countertrend_hits = state.get("scalp_countertrend_hits", {"LONG": [], "SHORT": []})
         self.scalp_loss_streak = state.get("scalp_loss_streak", {"LONG": 0, "SHORT": 0})
@@ -348,6 +349,46 @@ class PonchBot:
             "roi_pct": float(roi_pct) if roi_pct is not None else None,
         }
 
+    def _remember_exec_suggestion(self, action):
+        action = dict(action or {})
+        if not action or str(action.get("action") or "").lower() in {"", "unsupported", "status"}:
+            self.last_exec_suggested_action = None
+        else:
+            self.last_exec_suggested_action = {
+                "created_at": time.time(),
+                "action": action,
+            }
+        self._save_state()
+
+    def _recent_exec_suggestion(self):
+        payload = self.last_exec_suggested_action or {}
+        created_at = float(payload.get("created_at") or 0)
+        if not created_at or (time.time() - created_at) > max(60, PRIVATE_EXEC_CONFIRM_TIMEOUT_SEC):
+            self.last_exec_suggested_action = None
+            self._save_state()
+            return None
+        action = payload.get("action") or {}
+        return dict(action)
+
+    def _infer_exec_suggestion_from_text(self, text):
+        lower = str(text or "").strip().lower()
+        if not lower:
+            return None
+        active = self._active_execution_signals()
+        if len(active) != 1:
+            return None
+        sig = active[0]
+        signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (((sig.get("execution") or {}).get("signal_id")))
+        if "close" in lower:
+            return {
+                "action": "close_full",
+                "signal_id": signal_id,
+                "side": sig.get("side"),
+                "tf": sig.get("tf"),
+                "reason": "Recent conversation was about closing the active position",
+            }
+        return None
+
     def _build_gemini_trade_context(self):
         self._refresh_private_execution_state()
         lines = ["Active exchange positions:"]
@@ -406,6 +447,18 @@ class PonchBot:
             matches.append(sig)
         return matches[0] if matches else (pool[0] if pool else None)
 
+    def _resolve_signals_for_bulk_action(self, payload):
+        side = str(payload.get("side") or "").strip().upper()
+        tf = str(payload.get("tf") or "").strip()
+        matches = []
+        for sig in self._active_execution_signals():
+            if side and str(sig.get("side", "")).upper() != side:
+                continue
+            if tf and str(sig.get("tf", "")) != tf:
+                continue
+            matches.append(sig)
+        return matches
+
     def _preview_exec_action(self, action):
         kind = str(action.get("action") or "").lower()
         if kind == "move_sl_entry":
@@ -424,6 +477,16 @@ class PonchBot:
             return "Close full position"
         if kind == "close_partial":
             return f"Close {float(action.get('fraction', 0) or 0) * 100:.1f}% of position"
+        if kind == "close_all_positions":
+            side = str(action.get("side") or "").upper()
+            if side in {"LONG", "SHORT"}:
+                return f"Close all {side.lower()} positions"
+            return "Close all open positions"
+        if kind == "move_all_sl_entry":
+            side = str(action.get("side") or "").upper()
+            if side in {"LONG", "SHORT"}:
+                return f"Move all {side.lower()} stops to breakeven"
+            return "Move all stops to breakeven"
         if kind == "status":
             if action.get("signal_id") or action.get("side") or action.get("tf"):
                 return "Show position details"
@@ -445,6 +508,11 @@ class PonchBot:
             if leverage not in (None, "", 0, 0.0):
                 parts.append(f"at {int(float(leverage))}x")
             return " ".join(parts)
+        if kind == "cancel_all_positions_tps":
+            side = str(action.get("side") or "").upper()
+            if side in {"LONG", "SHORT"}:
+                return f"Cancel all take profits on all {side.lower()} positions"
+            return "Cancel all take profits on all open positions"
         return str(action.get("reason") or "Unsupported action")
 
     def _extract_followup_price(self, text, reference=None):
@@ -566,6 +634,14 @@ class PonchBot:
                 if not active:
                     return "I do not see any active exchange position right now."
 
+        if action_type in {"close_all_positions", "move_all_sl_entry", "cancel_all_positions_tps"}:
+            matches = self._resolve_signals_for_bulk_action(action)
+            if not matches:
+                if not active:
+                    return "I do not see any active exchange position right now."
+                return "I could not find any active positions matching that filter."
+            return None
+
         if action_type == "move_sl":
             if action.get("price") in (None, "", 0, 0.0, "0"):
                 return "What stop-loss price do you want?"
@@ -683,6 +759,46 @@ class PonchBot:
             self._execute_exchange_trade(self.tracker.signals[-1])
             return True
 
+        if action_type in {"close_all_positions", "move_all_sl_entry", "cancel_all_positions_tps"}:
+            targets = self._resolve_signals_for_bulk_action(action)
+            if not targets:
+                self._send_private_execution_answer("I do not see any matching active positions for that.")
+                return False
+
+            results = []
+            for sig_obj in targets:
+                if action_type == "close_all_positions":
+                    result = self.trade_executor.manual_close_position(sig_obj, 1.0)
+                elif action_type == "move_all_sl_entry":
+                    result = self.trade_executor.manual_move_stop(sig_obj, float(sig_obj.get("entry") or 0))
+                else:
+                    result = self.trade_executor.manual_cancel_all_tps(sig_obj)
+                if result.payload:
+                    sig_obj["execution"] = result.payload
+                results.append((sig_obj, result))
+
+            self._save_state()
+
+            done = [item for item in results if item[1].accepted]
+            failed = [item for item in results if not item[1].accepted]
+            if action_type == "close_all_positions":
+                opener = f"I tried to close {len(results)} position{'s' if len(results) != 1 else ''}."
+            elif action_type == "move_all_sl_entry":
+                opener = f"I tried to move {len(results)} stop{'s' if len(results) != 1 else ''} to breakeven."
+            else:
+                opener = f"I tried to cancel take profits on {len(results)} position{'s' if len(results) != 1 else ''}."
+
+            lines = [opener]
+            if done:
+                lines.append(f"Done: {len(done)}")
+            if failed:
+                lines.append(f"Could not do: {len(failed)}")
+                for sig_obj, result in failed[:5]:
+                    signal_id = sig_obj.get("signal_id") or ((sig_obj.get("meta") or {}).get("signal_id")) or (((sig_obj.get("execution") or {}).get("signal_id"))) or "N/A"
+                    lines.append(f"- {signal_id}: {result.message}")
+            self._send_private_execution_answer("\n".join(lines))
+            return len(done) > 0
+
         sig = self._resolve_signal_for_action(action, allow_unexecuted=False)
         if not sig:
             self._send_private_execution_notice("Exec Control", ["No active exchange position matched your request."], icon="⚠️")
@@ -798,6 +914,83 @@ class PonchBot:
         if any(phrase in lower for phrase in position_phrases):
             self._send_open_positions_snapshot("Open Positions")
             return True
+
+        pending_phrases = [
+            "pending signals", "show pending signals", "what signals are pending",
+            "show waiting signals", "waiting signals", "pending setups"
+        ]
+        if any(phrase in lower for phrase in pending_phrases):
+            self._send_pending_signals_snapshot("Pending Signals")
+            return True
+
+        performance_phrases = [
+            "show roi for all positions", "show pnl for all positions", "show performance",
+            "position performance", "how are my positions doing", "show open position roi",
+            "show open position pnl", "all position roi", "all position pnl"
+        ]
+        if any(phrase in lower for phrase in performance_phrases):
+            self._send_positions_performance_snapshot("Position Performance")
+            return True
+
+        status_phrases = [
+            "account status", "show account status", "show live status",
+            "balance summary", "show balance summary", "startup check"
+        ]
+        if any(phrase in lower for phrase in status_phrases):
+            self._send_execution_status_snapshot(datetime.now(timezone.utc), title="Bitunix Live Status")
+            return True
+
+        open_latest_pending_phrases = [
+            "open last pending signal", "open latest pending signal", "open the latest pending signal",
+            "open the last pending signal", "open last waiting signal", "open latest waiting signal"
+        ]
+        if any(phrase in lower for phrase in open_latest_pending_phrases):
+            pending = self._recent_unexecuted_signals()
+            if not pending:
+                self._send_private_execution_answer("I do not see any pending tracked signal right now.")
+                return True
+            signal_id = pending[0].get("signal_id") or ((pending[0].get("meta") or {}).get("signal_id"))
+            action = {"action": "open_signal", "signal_id": signal_id}
+            self._remember_exec_suggestion(action)
+            _ask_to_confirm(action, chat_id, source_text=text)
+            return True
+
+        if ("close all" in lower or "close everything" in lower) and any(word in lower for word in ["position", "positions", "trade", "trades", "everything"]):
+            action = {"action": "close_all_positions"}
+            if "long" in lower:
+                action["side"] = "LONG"
+            elif "short" in lower:
+                action["side"] = "SHORT"
+            self._remember_exec_suggestion(action)
+            _ask_to_confirm(action, chat_id, source_text=text)
+            return True
+
+        if ("cancel all" in lower or "remove all" in lower or "delete all" in lower) and any(word in lower for word in ["tp", "tps", "take profit", "take profits"]):
+            action = {"action": "cancel_all_positions_tps"}
+            if "long" in lower:
+                action["side"] = "LONG"
+            elif "short" in lower:
+                action["side"] = "SHORT"
+            self._remember_exec_suggestion(action)
+            _ask_to_confirm(action, chat_id, source_text=text)
+            return True
+
+        if "all" in lower and any(word in lower for word in ["breakeven", "break even"]) and any(word in lower for word in ["stop", "stops", "sl"]):
+            action = {"action": "move_all_sl_entry"}
+            if "long" in lower:
+                action["side"] = "LONG"
+            elif "short" in lower:
+                action["side"] = "SHORT"
+            self._remember_exec_suggestion(action)
+            _ask_to_confirm(action, chat_id, source_text=text)
+            return True
+
+        affirmative_only = {"yes", "y", "ok", "okay", "ok do", "okay do", "do it", "yes do", "do", "continue"}
+        if lower in affirmative_only and not self.pending_exec_action:
+            suggested = self._recent_exec_suggestion()
+            if suggested:
+                _ask_to_confirm(suggested, chat_id, source_text=text)
+                return True
 
         live_metric_words = ["roi", "pnl", "profit", "loss", "unrealized", "return"]
         if any(word in lower for word in live_metric_words):
@@ -968,6 +1161,9 @@ class PonchBot:
 
         action_type = str(parsed.get("action") or "unsupported").lower()
         if action_type == "unsupported":
+            inferred = self._infer_exec_suggestion_from_text(text)
+            if inferred:
+                self._remember_exec_suggestion(inferred)
             answer = None
             try:
                 answer = ask_gemini_trade_question(
@@ -989,11 +1185,14 @@ class PonchBot:
             return True
 
         if action_type == "status":
+            self.last_exec_suggested_action = None
+            self._save_state()
             self._apply_private_exec_action(parsed)
             return True
 
         need_more = self._needs_exec_clarification(parsed)
         if need_more:
+            self._remember_exec_suggestion(parsed)
             self.pending_exec_action = {
                 "created_at": time.time(),
                 "chat_id": chat_id,
@@ -1005,6 +1204,7 @@ class PonchBot:
             self._send_private_execution_notice("Exec Control", [need_more], icon="??")
             return True
 
+        self._remember_exec_suggestion(parsed)
         _ask_to_confirm(parsed, chat_id, source_text=text)
         return True
 
@@ -1077,6 +1277,66 @@ class PonchBot:
             self.tracker.persist()
         lines = self._build_execution_status_lines(trade_check=trade_check, reconcile=reconcile, now=now)
         self._send_private_execution_notice(title, lines)
+
+    def _send_pending_signals_snapshot(self, title="Pending Signals"):
+        pending = self._recent_unexecuted_signals()
+        if not pending:
+            self._send_private_execution_answer("You do not have any pending tracked signals right now.")
+            return
+        blocks = [f"{title}\nI found {len(pending)} pending signal{'s' if len(pending) != 1 else ''}."]
+        for sig in pending[:10]:
+            signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or "N/A"
+            detail_lines = [
+                f"Type: {sig.get('type', 'SCALP')} {sig.get('side', 'N/A')} [{sig.get('tf', 'N/A')}]",
+                f"Entry: {float(sig.get('entry', 0) or 0):.2f}",
+                f"SL: {float(sig.get('sl', 0) or 0):.2f}",
+                f"TPs: {float(sig.get('tp1', 0) or 0):.2f} / {float(sig.get('tp2', 0) or 0):.2f} / {float(sig.get('tp3', 0) or 0):.2f}",
+            ]
+            blocks.append(
+                f"\n\nSignal ID:\n<pre>{signal_id}</pre>\n"
+                f"<pre>{chr(10).join(detail_lines)}</pre>"
+            )
+        self._send_private_execution_answer("".join(blocks))
+
+    def _send_positions_performance_snapshot(self, title="Position Performance"):
+        self._refresh_private_execution_state()
+        active = self._active_execution_signals()
+        if not active:
+            self._send_private_execution_answer("You do not have any active exchange positions right now.")
+            return
+
+        total_pnl = 0.0
+        roi_values = []
+        blocks = [title]
+        for sig in active[:10]:
+            signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (((sig.get("execution") or {}).get("signal_id"))) or "N/A"
+            metrics = self._position_live_metrics(sig)
+            if metrics:
+                total_pnl += float(metrics.get("pnl_usd") or 0.0)
+                if metrics.get("roi_pct") is not None:
+                    roi_values.append(float(metrics.get("roi_pct")))
+                detail_lines = [
+                    f"Type: {sig.get('type', 'SCALP')} {sig.get('side', 'N/A')} [{sig.get('tf', 'N/A')}]",
+                    f"Entry: {float(sig.get('entry', 0) or 0):.2f}",
+                    f"Current: {float(metrics.get('current_price') or 0):.2f}",
+                    f"PnL: {float(metrics.get('pnl_usd') or 0):+.4f} USDT",
+                    f"ROI: {float(metrics.get('roi_pct') or 0):+.2f}%",
+                ]
+            else:
+                detail_lines = [
+                    f"Type: {sig.get('type', 'SCALP')} {sig.get('side', 'N/A')} [{sig.get('tf', 'N/A')}]",
+                    "Live price is unavailable right now.",
+                ]
+            blocks.append(
+                f"\n\nPosition ID:\n<pre>{signal_id}</pre>\n"
+                f"<pre>{chr(10).join(detail_lines)}</pre>"
+            )
+
+        summary_lines = [f"Open positions: {len(active)}", f"Total PnL: {total_pnl:+.4f} USDT"]
+        if roi_values:
+            summary_lines.append(f"Average ROI: {sum(roi_values) / len(roi_values):+.2f}%")
+        blocks.insert(1, f"\n<pre>{chr(10).join(summary_lines)}</pre>")
+        self._send_private_execution_answer("".join(blocks))
 
     def _send_open_positions_snapshot(self, title="Open Positions"):
         self._refresh_private_execution_state()
@@ -2023,6 +2283,7 @@ class PonchBot:
                 "last_daily_report_date": self.last_daily_report_date,
                 "last_exec_snapshot_date": self.last_exec_snapshot_date,
                 "pending_exec_action": self.pending_exec_action,
+                "last_exec_suggested_action": self.last_exec_suggested_action,
                 "last_scalp_open_alert": self.last_scalp_open_alert,
                 "scalp_countertrend_hits": self.scalp_countertrend_hits,
                 "scalp_loss_streak": self.scalp_loss_streak,
