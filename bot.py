@@ -402,7 +402,11 @@ class PonchBot:
     def _apply_private_exec_action(self, action):
         action_type = str(action.get("action") or "").lower()
         if action_type == "status":
-            self._send_execution_status_snapshot(datetime.now(timezone.utc), title="Bitunix Live Status")
+            sig = self._resolve_signal_for_action(action, allow_unexecuted=False)
+            if sig:
+                self._send_single_position_snapshot(sig, title="Position Info")
+            else:
+                self._send_execution_status_snapshot(datetime.now(timezone.utc), title="Bitunix Live Status")
             return True
 
         if action_type == "open_signal":
@@ -555,6 +559,10 @@ class PonchBot:
             self._send_private_execution_notice("Exec Control", [str(parsed.get("reason") or "Request is unclear or unsupported.")], icon="⚠️")
             return True
 
+        if action_type == "status":
+            self._apply_private_exec_action(parsed)
+            return True
+
         preview_lines = [
             f"You wrote: {text}",
             f"I understood: {self._preview_exec_action(parsed)}",
@@ -651,25 +659,41 @@ class PonchBot:
         if not active:
             self._send_private_execution_notice(title, ["No active exchange positions found."], icon="📂")
             return
-        self._send_private_execution_notice(title, [f"Open positions: {len(active)}"], icon="📂")
+        blocks = [f"📂 <b>{title}</b>\nOpen positions: {len(active)}"]
         for sig in active[:10]:
             execution = sig.get("execution") or {}
             signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (execution.get("signal_id"))
-            self._send_private_execution_notice(
-                "Position ID",
-                [f"{signal_id or 'N/A'}"],
-                icon="🆔",
+            block = (
+                f"\n\n🆔 <b>Position ID</b>\n"
+                f"<pre>{signal_id or 'N/A'}</pre>\n"
+                f"📂 <b>Position Details</b>\n"
+                f"{sig.get('type', 'SCALP')} {sig.get('side', 'N/A')} [{sig.get('tf', 'N/A')}]\n"
+                f"Entry: {float(sig.get('entry', 0) or 0):.2f}    SL: {float(sig.get('sl', 0) or 0):.2f}\n"
+                f"{self._format_active_tp_line(sig)}\n"
+                f"Qty: {float(execution.get('qty', 0) or 0):.6f}"
             )
-            self._send_private_execution_notice(
-                "Position Details",
-                [
-                    f"{sig.get('type', 'SCALP')} {sig.get('side', 'N/A')} [{sig.get('tf', 'N/A')}]",
-                    f"Entry: {float(sig.get('entry', 0) or 0):.2f}    SL: {float(sig.get('sl', 0) or 0):.2f}",
-                    self._format_active_tp_line(sig),
-                    f"Qty: {float(execution.get('qty', 0) or 0):.6f}",
-                ],
-                icon="📂",
-            )
+            blocks.append(block)
+        tg.send("".join(blocks), parse_mode="HTML", chat_id=self._execution_chat_id())
+
+    def _send_single_position_snapshot(self, sig, title="Position Info"):
+        sig = sig or {}
+        execution = sig.get("execution") or {}
+        signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or execution.get("signal_id")
+        side = str(sig.get("side") or "N/A")
+        sig_type = str(sig.get("type") or "Signal")
+        tf = str(sig.get("tf") or "N/A")
+        status = str(sig.get("status") or "OPEN").upper()
+        lines = [
+            f"📂 <b>{title}</b>",
+            "🆔 <b>Position ID</b>",
+            f"<pre>{signal_id or 'N/A'}</pre>",
+            f"This is your {sig_type} {side} on {tf}.",
+            f"Status: {status}",
+            f"Entry: {float(sig.get('entry', 0) or 0):.2f}    SL: {float(sig.get('sl', 0) or 0):.2f}",
+            self._format_active_tp_line(sig),
+            f"Qty: {float(execution.get('qty', 0) or 0):.6f}",
+        ]
+        tg.send("\n".join(lines), parse_mode="HTML", chat_id=self._execution_chat_id())
 
     def _format_active_tp_line(self, sig):
         execution = (sig or {}).get("execution") or {}
