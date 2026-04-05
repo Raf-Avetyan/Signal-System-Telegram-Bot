@@ -74,7 +74,8 @@ from charting import generate_daily_levels_chart
 from data import (
     fetch_klines, fetch_all_timeframes, fetch_daily, fetch_weekly, fetch_monthly, 
     fetch_funding_rate, fetch_open_interest, fetch_liquidations, fetch_global_indicators, fetch_order_book,
-    fetch_trading_economics_calendar, parse_gemini_trade_instruction, ask_gemini_trade_question
+    fetch_trading_economics_calendar, parse_gemini_trade_instruction, ask_gemini_trade_question,
+    fetch_last_price
 )
 from tracker import SignalTracker
 from bitunix import verify_bitunix_user
@@ -300,6 +301,53 @@ class PonchBot:
             f"side={sig.get('side', 'N/A')} entry={float(sig.get('entry', 0) or 0):.2f}"
         )
 
+    def _current_market_price(self, tf_hint=None):
+        preferred = []
+        tf_name = str(tf_hint or "").strip()
+        if tf_name:
+            preferred.append(tf_name)
+        preferred.extend([tf for tf in ["5m", "15m", "1h", "4h"] if tf not in preferred])
+        for tf in preferred:
+            df = self.latest_data.get(tf)
+            try:
+                if df is not None and not df.empty and "Close" in df.columns:
+                    return float(df.iloc[-1]["Close"])
+            except Exception:
+                continue
+        try:
+            okx_price = fetch_last_price(SYMBOL)
+            if okx_price and okx_price > 0:
+                return float(okx_price)
+        except Exception:
+            pass
+        return None
+
+    def _position_live_metrics(self, sig, current_price_override=None):
+        sig = sig or {}
+        execution = sig.get("execution") or {}
+        entry = float(sig.get("entry") or 0)
+        qty = float(execution.get("qty", 0) or 0)
+        side = str(sig.get("side") or "").upper()
+        leverage = float(execution.get("leverage") or execution.get("target_leverage") or 0)
+        try:
+            current_price = float(current_price_override) if current_price_override is not None else self._current_market_price(sig.get("tf"))
+        except Exception:
+            current_price = self._current_market_price(sig.get("tf"))
+        if entry <= 0 or qty <= 0 or current_price is None or side not in {"LONG", "SHORT"}:
+            return None
+        pnl_usd = (current_price - entry) * qty if side == "LONG" else (entry - current_price) * qty
+        notional = entry * qty
+        est_margin = (notional / leverage) if leverage > 0 else None
+        roi_pct = (pnl_usd / est_margin * 100.0) if est_margin and est_margin > 0 else None
+        move_pct = (((current_price - entry) / entry) * 100.0) if side == "LONG" else (((entry - current_price) / entry) * 100.0)
+        return {
+            "current_price": float(current_price),
+            "pnl_usd": float(pnl_usd),
+            "move_pct": float(move_pct),
+            "est_margin": float(est_margin) if est_margin else None,
+            "roi_pct": float(roi_pct) if roi_pct is not None else None,
+        }
+
     def _build_gemini_trade_context(self):
         self._refresh_private_execution_state()
         lines = ["Active exchange positions:"]
@@ -310,10 +358,19 @@ class PonchBot:
             execution = sig.get("execution") or {}
             active_tps = self._format_active_tp_line(sig)
             live_sl = self._format_live_sl_value(sig)
+            metrics = self._position_live_metrics(sig) or {}
+            metrics_txt = ""
+            if metrics:
+                metrics_txt = (
+                    f" current={float(metrics.get('current_price') or 0):.2f}"
+                    f" pnl={float(metrics.get('pnl_usd') or 0):+.4f}"
+                    f" roi={float(metrics.get('roi_pct') or 0):+.2f}%"
+                )
             lines.append(
                 f"- {self._control_signal_label(sig)} "
                 f"status={sig.get('status')} sl={live_sl} "
                 f"{active_tps} qty={float(execution.get('qty', 0) or 0):.6f}"
+                f"{metrics_txt}"
             )
         lines.append("Recent tracked signals not opened on exchange:")
         pending = self._recent_unexecuted_signals()
@@ -743,6 +800,39 @@ class PonchBot:
         if any(phrase in lower for phrase in position_phrases):
             self._send_open_positions_snapshot("Open Positions")
             return True
+
+        live_metric_words = ["roi", "pnl", "profit", "loss", "unrealized", "return"]
+        if any(word in lower for word in live_metric_words):
+            payload = {}
+            id_match = re.search(r"\b[a-f0-9]{8,}\b", lower)
+            if id_match:
+                payload["signal_id"] = id_match.group(0)
+            for tf_candidate in ["5m", "15m", "1h", "4h"]:
+                if tf_candidate in lower:
+                    payload["tf"] = tf_candidate
+                    break
+            if "long" in lower:
+                payload["side"] = "LONG"
+            elif "short" in lower:
+                payload["side"] = "SHORT"
+            sig = self._resolve_signal_for_action(payload, allow_unexecuted=False)
+            manual_price = self._extract_followup_price(text, reference=float((sig or {}).get("entry") or 0)) if sig else None
+            metrics = self._position_live_metrics(sig, current_price_override=manual_price) if sig else None
+            if sig and metrics:
+                answer_lines = [
+                    f"For your {str(sig.get('type') or 'position').lower()} {str(sig.get('side') or '').lower()} on {sig.get('tf') or 'N/A'}:",
+                    f"Current price: {float(metrics.get('current_price') or 0):.2f}",
+                    f"PnL: {float(metrics.get('pnl_usd') or 0):+.4f} USDT",
+                    f"Estimated ROI: {float(metrics.get('roi_pct') or 0):+.2f}%",
+                ]
+                self._send_private_execution_answer("\n".join(answer_lines))
+                return True
+            if sig:
+                self._send_private_execution_answer(
+                    "I can calculate that, but I do not have a live market price loaded right now. "
+                    "If you want, send me the current price and I’ll use it."
+                )
+                return True
 
 
         if self.pending_exec_action:

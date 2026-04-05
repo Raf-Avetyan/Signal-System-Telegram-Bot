@@ -430,3 +430,22 @@ def fetch_global_indicators():
         print(f"[ERROR] Global indicators: {e}")
         
     return indicators
+
+
+def fetch_last_price(symbol=SYMBOL):
+    """
+    Fetch the latest traded swap price from OKX.
+    Returns float or None on failure.
+    """
+    okx_symbol = symbol.replace("USDT", "-USDT-SWAP")
+    url = f"{OKX_BASE}/api/v5/market/ticker"
+    params = {"instId": okx_symbol}
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        payload = resp.json()
+        if payload.get("code") == "0" and payload.get("data"):
+            return float(payload["data"][0].get("last", 0) or 0)
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch last price: {e}")
+    return None
