@@ -782,17 +782,27 @@ class PonchBot:
             done = [item for item in results if item[1].accepted]
             failed = [item for item in results if not item[1].accepted]
             if action_type == "close_all_positions":
-                opener = f"I tried to close {len(results)} position{'s' if len(results) != 1 else ''}."
+                opener = (
+                    f"I closed {len(done)} position{'s' if len(done) != 1 else ''}."
+                    if done and not failed else
+                    f"I worked on {len(results)} position{'s' if len(results) != 1 else ''}."
+                )
             elif action_type == "move_all_sl_entry":
-                opener = f"I tried to move {len(results)} stop{'s' if len(results) != 1 else ''} to breakeven."
+                opener = (
+                    f"I moved {len(done)} stop{'s' if len(done) != 1 else ''} to breakeven."
+                    if done and not failed else
+                    f"I worked on {len(results)} stop{'s' if len(results) != 1 else ''}."
+                )
             else:
-                opener = f"I tried to cancel take profits on {len(results)} position{'s' if len(results) != 1 else ''}."
+                opener = (
+                    f"I removed take profits from {len(done)} position{'s' if len(done) != 1 else ''}."
+                    if done and not failed else
+                    f"I worked on take profits for {len(results)} position{'s' if len(results) != 1 else ''}."
+                )
 
             lines = [opener]
-            if done:
-                lines.append(f"Done: {len(done)}")
             if failed:
-                lines.append(f"Could not do: {len(failed)}")
+                lines.append(f"I could not finish {len(failed)} of them.")
                 for sig_obj, result in failed[:5]:
                     signal_id = sig_obj.get("signal_id") or ((sig_obj.get("meta") or {}).get("signal_id")) or (((sig_obj.get("execution") or {}).get("signal_id"))) or "N/A"
                     lines.append(f"- {signal_id}: {result.message}")
@@ -991,6 +1001,8 @@ class PonchBot:
             if suggested:
                 _ask_to_confirm(suggested, chat_id, source_text=text)
                 return True
+            self._send_private_execution_answer("I’m ready. Just tell me what you want me to do.")
+            return True
 
         live_metric_words = ["roi", "pnl", "profit", "loss", "unrealized", "return"]
         if any(word in lower for word in live_metric_words):
@@ -1081,11 +1093,29 @@ class PonchBot:
                         self._build_gemini_trade_context(),
                     )
                     if not parsed:
-                        self._send_private_execution_notice("Exec Control", ["I still could not understand the request clearly."], icon="??")
+                        answer = ask_gemini_trade_question(
+                            GEMINI_API_KEY,
+                            GEMINI_MODEL,
+                            combined_text,
+                            self._build_gemini_trade_context(),
+                        )
+                        if answer and "supported action" not in answer.lower():
+                            self._send_private_execution_answer(answer)
+                        else:
+                            self._send_private_execution_answer("I’m still not fully sure what you want me to do. Say it in a simpler way and I’ll help.")
                         return True
                     action_type = str(parsed.get("action") or "unsupported").lower()
                     if action_type == "unsupported":
-                        self._send_private_execution_notice("Exec Control", [str(parsed.get("reason") or "Request is unclear or unsupported.")], icon="??")
+                        answer = ask_gemini_trade_question(
+                            GEMINI_API_KEY,
+                            GEMINI_MODEL,
+                            combined_text,
+                            self._build_gemini_trade_context(),
+                        )
+                        if answer and "supported action" not in answer.lower():
+                            self._send_private_execution_answer(answer)
+                        else:
+                            self._send_private_execution_answer("I’m not fully sure what you mean yet. Say it a little more simply and I’ll help.")
                         return True
                     if action_type == "status":
                         self._apply_private_exec_action(parsed)
@@ -1153,7 +1183,7 @@ class PonchBot:
                 )
             except Exception:
                 answer = None
-            if answer:
+            if answer and "supported action" not in answer.lower():
                 self._send_private_execution_answer(answer)
             else:
                 self._send_private_execution_answer("I didn’t fully understand that yet, but I’m here with you. Try asking it in a simpler way and I’ll help.")
@@ -1174,14 +1204,10 @@ class PonchBot:
                 )
             except Exception:
                 answer = None
-            if answer:
+            if answer and "supported action" not in answer.lower():
                 self._send_private_execution_answer(answer)
             else:
-                reason = str(parsed.get("reason") or "").strip()
-                if reason:
-                    self._send_private_execution_answer(reason)
-                else:
-                    self._send_private_execution_answer("I’m here 🙂 Ask me in your own words and I’ll do my best to help.")
+                self._send_private_execution_answer("I’m here 🙂 Ask me in your own words and I’ll do my best to help.")
             return True
 
         if action_type == "status":
