@@ -253,7 +253,7 @@ class PonchBot:
         if not body_lines:
             body_lines = [title_text] if title_text else []
         if body_lines:
-            tg.send("\n".join(body_lines), chat_id=exec_chat)
+            tg.send("\n".join(body_lines), chat_id=exec_chat, parse_mode="HTML")
 
     def _send_private_execution_answer(self, text):
         exec_chat = self._execution_chat_id()
