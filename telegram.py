@@ -343,11 +343,11 @@ def send_scalp_prepare(timeframe, side, points=None, strength=None, emoji="⚠�
 # --- Formatting Helpers -------------------------------------
 def fmt_hit(is_hit):
     """Return a checkmark if level was hit."""
-    return " ?" if is_hit else ""
+    return " ✅" if is_hit else ""
 
 def get_signal_levels_code(entry, sl, tp1, tp2, tp3, status="OPEN", tp1_h=False, tp2_h=False, tp3_h=False, sl_h=False, initial_sl=None):
     """Format the levels block with hit markers."""
-    sl_mark = " ?" if sl_h else ""
+    sl_mark = " ✅" if sl_h else ""
     tp1_mark = fmt_hit(tp1_h)
     tp2_mark = fmt_hit(tp2_h)
     tp3_mark = fmt_hit(tp3_h)

@@ -1,4 +1,4 @@
-# Ponch Signal System - Main Bot
+﻿# Ponch Signal System - Main Bot
 
 """
 Main entry point. Monitors BTCUSDT across multiple timeframes,
@@ -106,7 +106,7 @@ class PonchBot:
         self.levels = {}
         self.last_levels_date = None
 
-        # ─── New Features ─────────────────────────────────
+        # в”Ђв”Ђв”Ђ New Features в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         self.tracker = SignalTracker()
         self.trade_executor = TradeExecutor()
         self.latest_data = {}
@@ -743,7 +743,7 @@ class PonchBot:
         if action_type == "open_signal":
             sig = self._resolve_signal_for_action(action, allow_unexecuted=True)
             if not sig:
-                self._send_private_execution_notice("Exec Control", ["No tracked pending signal matched your request."], icon="⚠️")
+                self._send_private_execution_notice("Exec Control", ["No tracked pending signal matched your request."], icon="вљ пёЏ")
                 return False
             self._execute_exchange_trade(sig)
             return True
@@ -811,7 +811,7 @@ class PonchBot:
 
         sig = self._resolve_signal_for_action(action, allow_unexecuted=False)
         if not sig:
-            self._send_private_execution_notice("Exec Control", ["No active exchange position matched your request."], icon="⚠️")
+            self._send_private_execution_notice("Exec Control", ["No active exchange position matched your request."], icon="вљ пёЏ")
             return False
 
         if action_type == "move_sl_entry":
@@ -824,7 +824,7 @@ class PonchBot:
                         "I understood a stop-loss change, but no valid stop price was found.",
                         "Please say the exact stop price, for example: move stop to 67120",
                     ],
-                    icon="⚠️",
+                    icon="вљ пёЏ",
                 )
                 return False
             result = self.trade_executor.manual_move_stop(sig, float(action.get("price")))
@@ -837,7 +837,7 @@ class PonchBot:
                         "I understood a take-profit change, but no valid price was found.",
                         "Please say the exact take-profit price, for example: set tp to 67120",
                     ],
-                    icon="??",
+                    icon="⚠️",
                 )
                 return False
             execution = (sig or {}).get("execution") or {}
@@ -852,7 +852,7 @@ class PonchBot:
                     self._send_private_execution_notice(
                         "Exec Control",
                         ["I need TP1, TP2, or TP3 to change a target."],
-                        icon="??",
+                        icon="⚠️",
                     )
                     return False
             else:
@@ -871,7 +871,7 @@ class PonchBot:
         elif action_type == "close_partial":
             result = self.trade_executor.manual_close_position(sig, float(action.get("fraction") or 0))
         else:
-            self._send_private_execution_notice("Exec Control", [f"Unsupported action: {action_type}"], icon="⚠️")
+            self._send_private_execution_notice("Exec Control", [f"Unsupported action: {action_type}"], icon="вљ пёЏ")
             return False
 
         if result.payload:
@@ -885,7 +885,7 @@ class PonchBot:
                     f"I did it. {result.message}" if result.accepted else f"I could not do that. {result.message}",
                 ],
             ),
-            icon="?" if result.accepted else "??",
+            icon="✅" if result.accepted else "⚠️",
         )
         return result.accepted
 
@@ -912,7 +912,7 @@ class PonchBot:
             if source_text is not None:
                 self.pending_exec_action["source_text"] = source_text
             self._save_state()
-            self._send_private_execution_notice("Confirm Exec Action", preview_lines, icon="??")
+            self._send_private_execution_notice("Confirm Exec Action", preview_lines, icon="🤖")
 
         lower = text.lower()
         chat_id = str((message.get("chat") or {}).get("id") or "")
@@ -1001,7 +1001,7 @@ class PonchBot:
             if suggested:
                 _ask_to_confirm(suggested, chat_id, source_text=text)
                 return True
-            self._send_private_execution_answer("I’m ready. Just tell me what you want me to do.")
+            self._send_private_execution_answer("IвЂ™m ready. Just tell me what you want me to do.")
             return True
 
         live_metric_words = ["roi", "pnl", "profit", "loss", "unrealized", "return"]
@@ -1033,7 +1033,7 @@ class PonchBot:
             if sig:
                 self._send_private_execution_answer(
                     "I can calculate that, but I do not have a live market price loaded right now. "
-                    "If you want, send me the current price and I’ll use it."
+                    "If you want, send me the current price and IвЂ™ll use it."
                 )
                 return True
 
@@ -1044,7 +1044,7 @@ class PonchBot:
             if expired:
                 self.pending_exec_action = None
                 self._save_state()
-                self._send_private_execution_notice("Exec Control", ["Pending action expired. Send the request again."], icon="??")
+                self._send_private_execution_notice("Exec Control", ["Pending action expired. Send the request again."], icon="⚠️")
                 return True
             if pending_chat == chat_id:
                 pending_mode = str((self.pending_exec_action or {}).get("mode") or "confirm").lower()
@@ -1057,7 +1057,7 @@ class PonchBot:
                     if lower in {"no", "n", "cancel", "stop"}:
                         self.pending_exec_action = None
                         self._save_state()
-                        self._send_private_execution_notice("Exec Control", ["Pending request cancelled."], icon="?")
+                        self._send_private_execution_notice("Exec Control", ["Pending request cancelled."], icon="❌")
                         return True
                     if local_changed:
                         need_more = self._needs_exec_clarification(locally_updated)
@@ -1070,7 +1070,7 @@ class PonchBot:
                                 "source_text": pending_source or text,
                             }
                             self._save_state()
-                            self._send_private_execution_notice("Exec Control", [need_more], icon="??")
+                            self._send_private_execution_notice("Exec Control", [need_more], icon="⚠️")
                             return True
                         if str(locally_updated.get("action") or "").lower() == "status":
                             self.pending_exec_action = None
@@ -1084,7 +1084,7 @@ class PonchBot:
                     self.pending_exec_action = None
                     self._save_state()
                     if not GEMINI_API_KEY:
-                        self._send_private_execution_notice("Exec Control", ["GEMINI_API_KEY is missing in .env."], icon="??")
+                        self._send_private_execution_notice("Exec Control", ["GEMINI_API_KEY is missing in .env."], icon="⚠️")
                         return True
                     parsed = parse_gemini_trade_instruction(
                         GEMINI_API_KEY,
@@ -1102,7 +1102,7 @@ class PonchBot:
                         if answer and "supported action" not in answer.lower():
                             self._send_private_execution_answer(answer)
                         else:
-                            self._send_private_execution_answer("I’m still not fully sure what you want me to do. Say it in a simpler way and I’ll help.")
+                            self._send_private_execution_answer("IвЂ™m still not fully sure what you want me to do. Say it in a simpler way and IвЂ™ll help.")
                         return True
                     action_type = str(parsed.get("action") or "unsupported").lower()
                     if action_type == "unsupported":
@@ -1115,7 +1115,7 @@ class PonchBot:
                         if answer and "supported action" not in answer.lower():
                             self._send_private_execution_answer(answer)
                         else:
-                            self._send_private_execution_answer("I’m not fully sure what you mean yet. Say it a little more simply and I’ll help.")
+                            self._send_private_execution_answer("IвЂ™m not fully sure what you mean yet. Say it a little more simply and IвЂ™ll help.")
                         return True
                     if action_type == "status":
                         self._apply_private_exec_action(parsed)
@@ -1130,7 +1130,7 @@ class PonchBot:
                             "source_text": combined_text,
                         }
                         self._save_state()
-                        self._send_private_execution_notice("Exec Control", [need_more], icon="??")
+                        self._send_private_execution_notice("Exec Control", [need_more], icon="⚠️")
                         return True
                     _ask_to_confirm(parsed, chat_id, source_text=combined_text)
                     return True
@@ -1144,7 +1144,7 @@ class PonchBot:
                 if lower in {"no", "n", "cancel", "stop"}:
                     self.pending_exec_action = None
                     self._save_state()
-                    self._send_private_execution_notice("Exec Control", ["Pending action cancelled."], icon="?")
+                    self._send_private_execution_notice("Exec Control", ["Pending action cancelled."], icon="❌")
                     return True
                 if pending_mode == "confirm" and local_changed:
                     need_more = self._needs_exec_clarification(locally_updated)
@@ -1157,13 +1157,13 @@ class PonchBot:
                             "source_text": pending_source or text,
                         }
                         self._save_state()
-                        self._send_private_execution_notice("Exec Control", [need_more], icon="??")
+                        self._send_private_execution_notice("Exec Control", [need_more], icon="⚠️")
                         return True
                     _ask_to_confirm(locally_updated, chat_id, source_text=pending_source or text)
                     return True
 
         if not GEMINI_API_KEY:
-            self._send_private_execution_notice("Exec Control", ["GEMINI_API_KEY is missing in .env."], icon="??")
+            self._send_private_execution_notice("Exec Control", ["GEMINI_API_KEY is missing in .env."], icon="⚠️")
             return True
 
         parsed = parse_gemini_trade_instruction(
@@ -1186,7 +1186,7 @@ class PonchBot:
             if answer and "supported action" not in answer.lower():
                 self._send_private_execution_answer(answer)
             else:
-                self._send_private_execution_answer("I didn’t fully understand that yet, but I’m here with you. Try asking it in a simpler way and I’ll help.")
+                self._send_private_execution_answer("I didnвЂ™t fully understand that yet, but IвЂ™m here with you. Try asking it in a simpler way and IвЂ™ll help.")
             return True
 
         action_type = str(parsed.get("action") or "unsupported").lower()
@@ -1207,7 +1207,7 @@ class PonchBot:
             if answer and "supported action" not in answer.lower():
                 self._send_private_execution_answer(answer)
             else:
-                self._send_private_execution_answer("I’m here 🙂 Ask me in your own words and I’ll do my best to help.")
+                self._send_private_execution_answer("IвЂ™m here рџ™‚ Ask me in your own words and IвЂ™ll do my best to help.")
             return True
 
         if action_type == "status":
@@ -1227,7 +1227,7 @@ class PonchBot:
                 "source_text": text,
             }
             self._save_state()
-            self._send_private_execution_notice("Exec Control", [need_more], icon="??")
+            self._send_private_execution_notice("Exec Control", [need_more], icon="⚠️")
             return True
 
         self._remember_exec_suggestion(parsed)
@@ -2694,7 +2694,7 @@ class PonchBot:
                     self.confluence_side_lock_until[opposite_side] = current_time + CONFLUENCE_OPPOSITE_LOCK_SEC
                     self._save_state()
 
-        # ─── Update Performance Tracker & Success Teasers ────
+        # в”Ђв”Ђв”Ђ Update Performance Tracker & Success Teasers в”Ђв”Ђв”Ђв”Ђ
         if latest_price is not None:
             # 1. Success Teasers (Public Marketing FOMO)
             # Use the base 5m candle wick range when available to avoid
@@ -2967,7 +2967,7 @@ class PonchBot:
                             
                             print(f"[SESSION] {s_name} closed. {'Skipped sending recap' if self.is_booting else 'Recap sent'}.")
 
-        # ─── Flush Batched Alerts ────────────────────────────
+        # в”Ђв”Ђв”Ђ Flush Batched Alerts в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         if self.pending_alerts and self.batch_timer_start:
             # Check if batch window has passed
             if current_time - self.batch_timer_start >= ALERT_BATCH_WINDOW:
@@ -2998,7 +2998,7 @@ class PonchBot:
                 self.pending_alerts = []
                 self.batch_timer_start = None
 
-        # ─── Periodic Chart Updates ──────────────────────────
+        # в”Ђв”Ђв”Ђ Periodic Chart Updates в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         # 1. Session Updates (30s)
         if current_time - self.last_session_update > 30:
             self.last_session_update = current_time
@@ -3030,7 +3030,7 @@ class PonchBot:
                     except: pass
 
         # 2. Daily Levels Update (600s)
-        # ─── End of Tick ─────────────────────────────────────
+        # в”Ђв”Ђв”Ђ End of Tick в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         tick_duration = time.time() - current_time
         if tick_duration > 2.0:
             print(f"[PERF] Tick took {tick_duration:.1f}s (Threshold: 2.0s)")
@@ -3476,7 +3476,7 @@ class PonchBot:
         self._send_private_execution_notice(
             f"Exchange {status.title()}: {sig_obj.get('type')} {sig_obj.get('side')}",
             notice_lines,
-            icon="?" if result.accepted else "??",
+            icon="✅" if result.accepted else "⚠️",
         )
         if result.accepted and result.payload:
             sig_obj["execution"] = result.payload
@@ -3527,7 +3527,7 @@ class PonchBot:
     def _process_timeframe(self, tf, df, now, entry_protection_ts=None):
         """Process one timeframe: channels, momentum, signals."""
 
-        # ─── Calculate indicators ────────────────────────
+        # в”Ђв”Ђв”Ђ Calculate indicators в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         df = calculate_channels(df)
         df = calculate_momentum(df)
 
@@ -3547,7 +3547,7 @@ class PonchBot:
         # Local trend anchor by hierarchy (5m/15m -> 15m, then 1h->4h->1d->1w).
         local_trend, local_trend_src = self._get_anchor_trend(tf)
 
-        # ─── REAL-TIME MONITOR (Debug) ───────────────────
+        # в”Ђв”Ђв”Ђ REAL-TIME MONITOR (Debug) в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
 
         prev_high = float(prev["High"])
         prev_low  = float(prev["Low"])
@@ -3580,7 +3580,7 @@ class PonchBot:
                     if session_id in self.session_data:
                         self.session_data[session_id]["levels_tested"].add(lvl)
 
-        # ─── Volume Spike Detection ──────────────────────
+        # в”Ђв”Ђв”Ђ Volume Spike Detection в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         if tf in VOLUME_SPIKE_TIMEFRAMES and len(df) > VOLUME_AVG_PERIOD:
             vol_col = df["Volume"]
             avg_vol = vol_col.iloc[-VOLUME_AVG_PERIOD-1:-1].mean()
@@ -3659,7 +3659,7 @@ class PonchBot:
                         print(f"  [SIG] Approaching Level Triggered: {lvl_name} ({closest_dist*100:.2f}%)")
 
 
-        # ─── Liquidity Sweeps ────────────────────────────
+        # в”Ђв”Ђв”Ђ Liquidity Sweeps в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         if self.levels:
             sweeps = check_liquidity_sweep(
                 price_high, price_low, self.levels,
@@ -3690,7 +3690,7 @@ class PonchBot:
                         "tf":        tf
                     })
 
-        # ─── Volatility Zone Touches ─────────────────────
+        # в”Ђв”Ђв”Ђ Volatility Zone Touches в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         if self.levels:
             touches = check_volatility_touch(
                 price_high, price_low, self.levels,
@@ -3771,7 +3771,7 @@ class PonchBot:
                     sig["tf"] = tf
                     self.confirmations.add_signal(sig)
 
-        # ─── Scalp Momentum System ───────────────────────
+        # в”Ђв”Ђв”Ђ Scalp Momentum System в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         tracker = self.scalp_trackers[tf]
         events = []
         if SMART_MONEY_ENABLED and tf in SMART_MONEY_EXECUTION_TFS:
@@ -4142,7 +4142,7 @@ class PonchBot:
                 print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Scalp Closed [{tf}] {evt['side']}")
 
 
-        # ─── Store prev candle data ──────────────────────
+        # в”Ђв”Ђв”Ђ Store prev candle data в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         self.prev_candles[tf] = {
             "High": price_high,
             "Low":  price_low,
@@ -4151,9 +4151,9 @@ class PonchBot:
         return atr_val, candle_ts, rsi_raw
 
 
-# ═══════════════════════════════════════════════════════════════
+# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
 # ENTRY POINT
-# ═══════════════════════════════════════════════════════════════
+# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
 
 if __name__ == "__main__":
     import sys
@@ -4209,5 +4209,6 @@ if __name__ == "__main__":
     finally:
         if os.path.exists(lock_file):
             os.remove(lock_file)
+
 
 
