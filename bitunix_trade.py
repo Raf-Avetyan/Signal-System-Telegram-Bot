@@ -477,10 +477,12 @@ class TradeExecutor:
 
             tp_orders = []
             missing_tp_indices = []
+            active_tp_indices = [i + 1 for i, q in enumerate(plan["tp_qtys"]) if float(q or 0) > 0]
+            single_tp_index = active_tp_indices[0] if len(active_tp_indices) == 1 else None
             for idx, (qty_part, tp_price) in enumerate(zip(plan["tp_qtys"], [signal["tp1"], signal["tp2"], signal["tp3"]]), start=1):
                 if qty_part <= 0:
                     continue
-                tp_record = self._place_take_profit_order(
+                tp_record, tp_warning = self._place_take_profit_order(
                     symbol=symbol,
                     position_id=position_id,
                     exit_side=exit_side,
@@ -489,7 +491,10 @@ class TradeExecutor:
                     signal_id=signal_id,
                     tp_index=idx,
                     plan=plan,
+                    use_position_tp=(single_tp_index == idx),
                 )
+                if tp_warning:
+                    protection_warnings.append(tp_warning)
                 if tp_record is None:
                     missing_tp_indices.append(idx)
                     protection_warnings.append(f"TP{idx} could not be pre-placed; runtime fallback close will be used.")
@@ -858,8 +863,25 @@ class TradeExecutor:
         signal_id: str,
         tp_index: int,
         plan: Dict[str, Any],
-    ) -> Optional[Dict[str, Any]]:
+        use_position_tp: bool = False,
+    ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+        if use_position_tp:
+            try:
+                tp_res = self.client.modify_position_tpsl(symbol, str(position_id), float(tp_price), None)
+            except BitunixTradeError:
+                tp_res = self.client.place_position_tpsl(symbol, str(position_id), float(tp_price), None)
+            data = tp_res.get("data", {}) or {}
+            return ({
+                "index": tp_index,
+                "kind": "POSITION_TP",
+                "qty": float(qty_part),
+                "price": float(tp_price),
+                "orderId": data.get("orderId") or data.get("id"),
+                "raw": data,
+            }, "Compressed to one TP leg; using Bitunix position TP so it appears in position settings.")
+
         # Preferred: true Bitunix TP/SL trigger order so it shows up as TP on the exchange.
+        partial_error: Optional[BitunixTradeError] = None
         try:
             tp_res = self.client.place_tpsl_order(
                 symbol=symbol,
@@ -876,9 +898,9 @@ class TradeExecutor:
                 "price": float(tp_price),
                 "orderId": data.get("orderId") or data.get("id"),
                 "raw": data,
-            }
-        except BitunixTradeError:
-            pass
+            }, None
+        except BitunixTradeError as e:
+            partial_error = e
 
         # Fallback: reduce-only limit take-profit order.
         try:
@@ -902,9 +924,19 @@ class TradeExecutor:
                 "orderId": data.get("orderId") or data.get("id"),
                 "clientId": data.get("clientId") or f"{signal_id}-tp{tp_index}",
                 "raw": data,
-            }
-        except BitunixTradeError:
-            return None
+            }, (
+                f"TP{tp_index} partial TPSL was rejected by Bitunix; using fallback limit close order instead. "
+                f"Reason: {partial_error or 'unknown partial TP error'}"
+            )
+        except BitunixTradeError as limit_error:
+            warning = None
+            if partial_error is not None:
+                warning = (
+                    f"TP{tp_index} partial TPSL failed ({partial_error}) and fallback limit TP also failed ({limit_error})."
+                )
+            else:
+                warning = f"TP{tp_index} fallback limit TP failed ({limit_error})."
+            return None, warning
 
     def _ensure_tp_leg_closed(self, signal: Dict[str, Any], execution: Dict[str, Any], tp_index: int) -> None:
         executed = set(execution.get("executed_tp_indices") or [])
