@@ -155,6 +155,8 @@ class PonchBot:
         self.live_news_events = []
         self.last_live_news_refresh = 0.0
         self.last_live_news_error = None
+        self.live_exchange_context_cache = None
+        self.live_exchange_context_cache_ts = 0.0
         self.last_session_update = time.time()
         self.last_daily_update   = time.time()
         self.last_update_id      = state.get("last_update_id", 0)
@@ -519,11 +521,162 @@ class PonchBot:
             }
         return None
 
+    @staticmethod
+    def _safe_float_text(value, decimals=2, default="n/a"):
+        try:
+            val = float(value)
+        except Exception:
+            return default
+        if abs(val) < 1e-12:
+            return f"{0:.{decimals}f}"
+        return f"{val:.{decimals}f}"
+
+    def _build_live_exchange_context(self, now=None, force=False):
+        now = now or datetime.now(timezone.utc)
+        cache_age = time.time() - float(self.live_exchange_context_cache_ts or 0)
+        if not force and self.live_exchange_context_cache and cache_age < 8:
+            return self.live_exchange_context_cache
+
+        lines = ["Live Bitunix exchange snapshot:"]
+        trade_check, reconcile, _ = self._build_trade_check_bundle(now)
+        lines.append(
+            f"- mode={trade_check.get('mode')} auth_ok={bool(trade_check.get('auth_ok'))} "
+            f"configured={bool(trade_check.get('configured'))}"
+        )
+        lines.append(
+            f"- balance_total={self._safe_float_text(trade_check.get('balance_total'), 2)} "
+            f"balance_free={self._safe_float_text(trade_check.get('balance_available'), 2)} "
+            f"balance_used={self._safe_float_text(trade_check.get('balance_used'), 2)} "
+            f"margin_mode={trade_check.get('margin_mode') or 'n/a'} "
+            f"leverage={int(trade_check.get('leverage', 0) or 0)}x"
+        )
+        lines.append(
+            f"- exchange_open_positions={int(trade_check.get('open_positions', 0) or 0)} "
+            f"tracker_matched={int(reconcile.get('matched', 0) or 0)} "
+            f"orphans={len(reconcile.get('orphan_positions', []) or [])} "
+            f"missing_protection={len(reconcile.get('missing_protection', []) or [])}"
+        )
+
+        if self.trade_executor.mode != "live" or not self.trade_executor.client.is_configured():
+            text = "\n".join(lines)
+            self.live_exchange_context_cache = text
+            self.live_exchange_context_cache_ts = time.time()
+            return text
+
+        active_by_position = {}
+        for sig in self._active_execution_signals():
+            execution = sig.get("execution") or {}
+            position_id = str(execution.get("position_id") or "").strip()
+            if position_id:
+                active_by_position[position_id] = sig
+
+        position_rows = []
+        try:
+            position_rows = self.trade_executor._pending_positions_list(None)
+        except Exception as e:
+            lines.append(f"- positions_error={e}")
+
+        live_positions = []
+        for pos in position_rows or []:
+            try:
+                qty = float(pos.get("qty") or pos.get("positionQty") or 0)
+            except Exception:
+                qty = 0.0
+            if qty > 0:
+                live_positions.append(pos)
+
+        if live_positions:
+            lines.append("Exchange positions:")
+            unique_symbols = set()
+            for pos in live_positions[:10]:
+                position_id = str(pos.get("positionId") or "").strip() or "n/a"
+                symbol = str(pos.get("symbol") or pos.get("instId") or SYMBOL).upper()
+                unique_symbols.add(symbol)
+                side = str(pos.get("side") or pos.get("positionSide") or "").upper() or "n/a"
+                qty = self._safe_float_text(pos.get("qty") or pos.get("positionQty"), 6)
+                entry = self._safe_float_text(
+                    pos.get("avgPrice") or pos.get("averageOpenPrice") or pos.get("openPrice"),
+                    2,
+                )
+                mark = self._safe_float_text(pos.get("markPrice") or pos.get("lastPrice"), 2)
+                margin = self._safe_float_text(
+                    pos.get("positionMargin") or pos.get("margin") or pos.get("initialMargin"),
+                    4,
+                )
+                pnl = self._safe_float_text(
+                    pos.get("unrealizedPnl") or pos.get("unrealizedProfit") or pos.get("floatingProfit"),
+                    4,
+                )
+                liq = self._safe_float_text(pos.get("liquidationPrice") or pos.get("liqPrice"), 2)
+                tracked = active_by_position.get(position_id)
+                tracked_label = "untracked"
+                if tracked:
+                    tracked_label = f"{tracked.get('type', 'SCALP')} {tracked.get('side', '')} [{tracked.get('tf', 'n/a')}]"
+                lines.append(
+                    f"- position_id={position_id} symbol={symbol} side={side} qty={qty} "
+                    f"entry={entry} mark={mark} pnl={pnl} margin={margin} liq={liq} tracked={tracked_label}"
+                )
+
+            pending_order_total = 0
+            try:
+                pending_orders = self.trade_executor.client.get_pending_orders().get("data", []) or []
+                if isinstance(pending_orders, dict):
+                    pending_orders = pending_orders.get("orderList") or pending_orders.get("data") or []
+                pending_order_total = len(list(pending_orders or []))
+            except Exception as e:
+                lines.append(f"- open_orders_error={e}")
+                pending_orders = []
+
+            if pending_order_total or pending_orders == []:
+                lines.append(f"- open_reduce_or_limit_orders={pending_order_total}")
+
+            tpsl_summary_parts = []
+            for symbol in sorted(unique_symbols):
+                try:
+                    symbol_tpsl = self.trade_executor.client.get_pending_tpsl(symbol).get("data", []) or []
+                    if isinstance(symbol_tpsl, dict):
+                        symbol_tpsl = symbol_tpsl.get("orderList") or symbol_tpsl.get("data") or []
+                    rows = list(symbol_tpsl or [])
+                    tp_count = 0
+                    sl_count = 0
+                    for row in rows:
+                        try:
+                            if float(row.get("tpPrice") or 0) > 0:
+                                tp_count += 1
+                        except Exception:
+                            pass
+                        try:
+                            if float(row.get("slPrice") or 0) > 0:
+                                sl_count += 1
+                        except Exception:
+                            pass
+                    tpsl_summary_parts.append(f"{symbol}: tp_rows={tp_count} sl_rows={sl_count}")
+                except Exception as e:
+                    tpsl_summary_parts.append(f"{symbol}: error={e}")
+            if tpsl_summary_parts:
+                lines.append("- pending_tpsl=" + " | ".join(tpsl_summary_parts))
+        else:
+            lines.append("Exchange positions:")
+            lines.append("- none")
+
+        errors = []
+        errors.extend([str(err) for err in (trade_check.get("errors") or [])[:2]])
+        errors.extend([str(err) for err in (reconcile.get("errors") or [])[:2]])
+        if errors:
+            lines.append("Exchange issues:")
+            for err in errors[:4]:
+                lines.append(f"- {err}")
+
+        text = "\n".join(lines)
+        self.live_exchange_context_cache = text
+        self.live_exchange_context_cache_ts = time.time()
+        return text
+
     def _build_gemini_trade_context(self):
         self._refresh_private_execution_state()
         now = datetime.now(timezone.utc)
         self._refresh_live_news_events(now)
-        lines = ["Active exchange positions:"]
+        lines = ["Tracked execution view:"]
         active = self._active_execution_signals()
         if not active:
             lines.append("none")
@@ -563,6 +716,8 @@ class PonchBot:
             )
         else:
             lines.append("- No upcoming high-impact live events are currently loaded.")
+        lines.append("")
+        lines.append(self._build_live_exchange_context(now=now))
         return "\n".join(lines)
 
     def _answer_news_question(self, text: str) -> bool:
@@ -1032,11 +1187,31 @@ class PonchBot:
         action_type = str(action.get("action") or "").lower()
         if action_type == "status":
             reason_text = str(action.get("reason") or "").lower()
+            wants_balance_only = any(
+                phrase in reason_text for phrase in [
+                    "what is my balance", "balance", "wallet balance", "equity", "wallet"
+                ]
+            ) and not any(
+                phrase in reason_text for phrase in [
+                    "account status", "live status", "startup check", "account information", "wallet information"
+                ]
+            )
+            wants_open_positions_only = any(
+                phrase in reason_text for phrase in [
+                    "open positions", "open position", "do i have any open"
+                ]
+            )
             wants_account_status = any(
                 phrase in reason_text for phrase in [
                     "account status", "balance", "live status", "startup check", "wallet", "equity"
                 ]
             )
+            if wants_balance_only:
+                self._send_simple_balance_answer()
+                return True
+            if wants_open_positions_only:
+                self._send_simple_open_positions_answer()
+                return True
             sig = None if wants_account_status else self._resolve_signal_for_action(action, allow_unexecuted=False)
             if sig:
                 self._remember_private_focus(sig=sig)
@@ -1261,6 +1436,26 @@ class PonchBot:
         ]
         if any(phrase in lower for phrase in performance_phrases):
             self._send_positions_performance_snapshot("Position Performance")
+            return True
+
+        today_trade_phrases = [
+            "how many trades did i open today", "how many trades opened today",
+            "how many signals did i open today", "how many trades today",
+            "how many positions did i open today", "trades i opened today",
+            "opened today", "today trades", "today trade count"
+        ]
+        if any(phrase in lower for phrase in today_trade_phrases):
+            self._send_today_trade_count_answer()
+            return True
+
+        balance_phrases = [
+            "what is my balance", "what's my balance", "my balance", "show my balance",
+            "show balance", "wallet balance", "my wallet balance", "how much balance",
+            "how much money do i have", "what is my wallet", "what's in my wallet",
+            "equity"
+        ]
+        if any(phrase in lower for phrase in balance_phrases):
+            self._send_simple_balance_answer()
             return True
 
         status_phrases = [
@@ -1625,14 +1820,53 @@ class PonchBot:
             lines.extend(errors[:2])
         return lines
 
-    def _send_execution_status_snapshot(self, now=None, title="Bitunix Noon Check"):
-        if not self._execution_chat_id():
-            return
+    def _build_trade_check_bundle(self, now=None):
         now = now or datetime.now(timezone.utc)
         trade_check = self.trade_executor.startup_self_check()
         reconcile = self.trade_executor.reconcile_execution_state(self.tracker.signals)
         if reconcile.get("inactive_marked") or reconcile.get("state_updated"):
             self.tracker.persist()
+        return trade_check, reconcile, now
+
+    def _send_simple_balance_answer(self):
+        trade_check, _, _ = self._build_trade_check_bundle()
+        balance_line = self._format_balance_line(trade_check)
+        self._send_private_execution_answer(balance_line)
+
+    def _send_simple_open_positions_answer(self):
+        trade_check, _, _ = self._build_trade_check_bundle()
+        open_positions = int(trade_check.get("open_positions", 0) or 0)
+        if open_positions <= 0:
+            self._send_private_execution_answer("You do not have any open positions right now.")
+            return
+        self._send_private_execution_answer(
+            f"You currently have {open_positions} open position{'s' if open_positions != 1 else ''}."
+        )
+
+    def _send_today_trade_count_answer(self):
+        now_utc = datetime.now(timezone.utc)
+        opened_today = int(self.tracker.count_signals_for_day(now_utc=now_utc) or 0)
+        still_open_today = 0
+        closed_today = 0
+        day_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        for sig in self.tracker.signals:
+            logged_at = self.tracker._parse_iso_utc(sig.get("logged_at"))
+            if not logged_at or logged_at < day_start or logged_at > now_utc:
+                continue
+            if str(sig.get("status") or "").upper() == "OPEN":
+                still_open_today += 1
+            else:
+                closed_today += 1
+        self._send_private_execution_answer(
+            f"Today in UTC, you opened {opened_today} trade{'s' if opened_today != 1 else ''}. "
+            f"{still_open_today} {'are' if still_open_today != 1 else 'is'} still open, "
+            f"and {closed_today} {'have' if closed_today != 1 else 'has'} already closed."
+        )
+
+    def _send_execution_status_snapshot(self, now=None, title="Bitunix Noon Check"):
+        if not self._execution_chat_id():
+            return
+        trade_check, reconcile, now = self._build_trade_check_bundle(now)
         lines = self._build_execution_status_lines(trade_check=trade_check, reconcile=reconcile, now=now)
         self._send_private_execution_notice(title, lines)
 

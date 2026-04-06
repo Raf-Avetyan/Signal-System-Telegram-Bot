@@ -250,12 +250,16 @@ def ask_gemini_trade_question(api_key, model, user_text, context_text):
         "Answer briefly, clearly, and in simple human language. "
         "Sound like a helpful assistant, not a system alert. "
         "You may use an occasional fitting emoji to keep the conversation alive, but keep it light. "
-        "If the answer depends on the current tracked positions, use the provided context. "
+        "If the answer depends on the current tracked positions, live Bitunix account state, live exchange positions, open orders, or pending TP/SL state, use the provided context. "
+        "If the user asks something that is not a built-in bot function, still do your best to answer from the context and explain the closest truthful answer. "
+        "If the context already contains live exchange data, do not say you lack access to the wallet, positions, or exchange state. "
+        "Prefer the live exchange snapshot over stale tracked assumptions when the two differ. "
+        "If the user asks about what the bot can do next, answer helpfully even if there is no hardcoded command for it yet. "
         "If the user is just greeting you or talking casually, answer naturally and warmly like a normal assistant. "
         "Do not invent trades or exchange state that is not in the context. "
         "Do not output markdown tables or JSON. "
         "Prefer short paragraphs or short bullet points only when helpful.\n\n"
-        f"Active signal context:\n{context_text}\n\n"
+        f"Context from the bot and live exchange:\n{context_text}\n\n"
         f"User question:\n{user_text}"
     )
     payload = {
