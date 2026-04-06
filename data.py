@@ -1,6 +1,7 @@
 # ─── PONCH DATA FETCHER (OKX V5 REST API) ────────────────────
 
 import json
+import base64
 import pandas as pd
 import requests
 import time
@@ -164,8 +165,10 @@ def parse_gemini_trade_instruction(api_key, model, user_text, context_text):
         "{"
         "\"action\": string,"
         "\"signal_id\": string|null,"
+        "\"symbol\": string|null,"
         "\"side\": \"LONG\"|\"SHORT\"|null,"
         "\"tf\": \"5m\"|\"15m\"|\"1h\"|\"4h\"|null,"
+        "\"preset\": \"safe\"|\"aggressive\"|\"runner\"|null,"
         "\"tp_index\": 1|2|3|null,"
         "\"price\": number|null,"
         "\"margin_usd\": number|null,"
@@ -189,6 +192,8 @@ def parse_gemini_trade_instruction(api_key, model, user_text, context_text):
         "- For set tp1/tp2/tp3, fill tp_index and price.\n"
         "- For cancel all take profits, use action cancel_tp with tp_index null.\n"
         "- For cancel all take profits on every open position, use cancel_all_positions_tps.\n"
+        "- If the user names a symbol like BTCUSDT, ETHUSDT, SOLUSDT, keep it in symbol.\n"
+        "- If the user asks for a safe, aggressive, or runner style, keep it in preset.\n"
         "- If user asks for something dangerous or unclear, use unsupported.\n"
         "- Prefer signal_id if the user mentions one.\n"
         "- If no signal_id is given, preserve side/tf hints when present.\n\n"
@@ -273,6 +278,59 @@ def ask_gemini_trade_question(api_key, model, user_text, context_text):
         return text or None
     except Exception as e:
         print(f"[GEMINI ERROR] Trade question answer failed: {e}")
+    return None
+
+
+def ask_gemini_trade_question_with_image(api_key, model, user_text, context_text, image_bytes, mime_type="image/jpeg"):
+    """
+    Use Gemini to answer a plain-language question with an attached screenshot/image.
+    Returns a short plain-text answer or None on failure.
+    """
+    if not api_key or not model or not user_text or not image_bytes:
+        return None
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    prompt = (
+        "You are an assistant inside a live crypto trading bot's private execution chat. "
+        "The user has attached a trading screenshot or chart image. "
+        "Explain clearly what you can see in the image, what matters most, and what you would do next. "
+        "Be honest about uncertainty and do not pretend the screenshot alone is enough to execute a trade. "
+        "If the user asks for action, you can suggest the next text command they should send. "
+        "Answer in simple, natural language. "
+        "Do not output markdown tables or JSON.\n\n"
+        f"Active signal context:\n{context_text}\n\n"
+        f"User request about the image:\n{user_text}"
+    )
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {
+                    "inlineData": {
+                        "mimeType": mime_type or "image/jpeg",
+                        "data": base64.b64encode(image_bytes).decode("ascii"),
+                    }
+                },
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.2,
+        },
+    }
+    try:
+        resp = requests.post(url, params={"key": api_key}, json=payload, timeout=40)
+        resp.raise_for_status()
+        data = resp.json()
+        text = (
+            data.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("text", "")
+        )
+        text = str(text or "").strip()
+        return text or None
+    except Exception as e:
+        print(f"[GEMINI ERROR] Trade image question failed: {e}")
     return None
 
 

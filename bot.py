@@ -11,8 +11,10 @@ from datetime import datetime, timezone, timedelta
 import json
 import re
 import html
+import requests
 
 from config import (
+    BOT_TOKEN,
     SYMBOL, SIGNAL_TIMEFRAMES, POLL_INTERVAL,
     TIMEFRAME_PROFILES, FUNDING_THRESHOLD, FUNDING_CHECK_INTERVAL,
     FUNDING_COOLDOWN, VOLUME_SPIKE_MULT, VOLUME_SPIKE_TIMEFRAMES,
@@ -58,7 +60,7 @@ from config import (
     SMART_MONEY_ENABLED, SMART_MONEY_EXECUTION_TFS, SMART_MONEY_RISK_PCT,
     MIN_SIGNAL_SIZE_PCT, PRIVATE_EXEC_CHAT_ID, EXECUTION_UPDATES_PRIVATE_ONLY,
     PRIVATE_EXEC_AI_CONTROL_ENABLED, PRIVATE_EXEC_CONFIRM_TIMEOUT_SEC,
-    GEMINI_API_KEY, GEMINI_MODEL, TIMEFRAME_RISK_MULTIPLIERS,
+    GEMINI_API_KEY, GEMINI_MODEL, TIMEFRAME_RISK_MULTIPLIERS, BITUNIX_DEFAULT_LEVERAGE,
     NEWS_FILTER_ENABLED, get_active_news_blackout, is_ny_market_holiday,
     TRADING_ECONOMICS_NEWS_ENABLED, TRADING_ECONOMICS_API_KEY,
     TRADING_ECONOMICS_COUNTRIES, TRADING_ECONOMICS_MIN_IMPORTANCE,
@@ -76,6 +78,7 @@ from data import (
     fetch_klines, fetch_all_timeframes, fetch_daily, fetch_weekly, fetch_monthly, 
     fetch_funding_rate, fetch_open_interest, fetch_liquidations, fetch_global_indicators, fetch_order_book,
     fetch_trading_economics_calendar, parse_gemini_trade_instruction, ask_gemini_trade_question,
+    ask_gemini_trade_question_with_image,
     fetch_last_price
 )
 from tracker import SignalTracker
@@ -135,6 +138,7 @@ class PonchBot:
         self.last_exec_snapshot_date = state.get("last_exec_snapshot_date")
         self.pending_exec_action = state.get("pending_exec_action")
         self.last_exec_suggested_action = state.get("last_exec_suggested_action")
+        self.private_exec_focus = state.get("private_exec_focus", {})
         self.last_scalp_open_alert = state.get("last_scalp_open_alert", {})
         self.scalp_countertrend_hits = state.get("scalp_countertrend_hits", {"LONG": [], "SHORT": []})
         self.scalp_loss_streak = state.get("scalp_loss_streak", {"LONG": 0, "SHORT": 0})
@@ -341,17 +345,20 @@ class PonchBot:
 
     def _control_signal_label(self, sig):
         signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (((sig.get("execution") or {}).get("signal_id")))
+        symbol = str((sig.get("symbol") or (sig.get("meta") or {}).get("symbol") or (sig.get("execution") or {}).get("symbol") or SYMBOL)).upper()
         return (
-            f"id={signal_id or 'N/A'} type={sig.get('type', 'SCALP')} tf={sig.get('tf', 'N/A')} "
+            f"id={signal_id or 'N/A'} symbol={symbol} type={sig.get('type', 'SCALP')} tf={sig.get('tf', 'N/A')} "
             f"side={sig.get('side', 'N/A')} entry={float(sig.get('entry', 0) or 0):.2f}"
         )
 
-    def _current_market_price(self, tf_hint=None):
+    def _current_market_price(self, tf_hint=None, symbol=None):
+        symbol_name = str(symbol or SYMBOL).upper()
         preferred = []
         tf_name = str(tf_hint or "").strip()
-        if tf_name:
+        if tf_name and symbol_name == str(SYMBOL).upper():
             preferred.append(tf_name)
-        preferred.extend([tf for tf in ["5m", "15m", "1h", "4h"] if tf not in preferred])
+        if symbol_name == str(SYMBOL).upper():
+            preferred.extend([tf for tf in ["5m", "15m", "1h", "4h"] if tf not in preferred])
         for tf in preferred:
             df = self.latest_data.get(tf)
             try:
@@ -360,7 +367,7 @@ class PonchBot:
             except Exception:
                 continue
         try:
-            okx_price = fetch_last_price(SYMBOL)
+            okx_price = fetch_last_price(symbol_name)
             if okx_price and okx_price > 0:
                 return float(okx_price)
         except Exception:
@@ -373,11 +380,12 @@ class PonchBot:
         entry = float(sig.get("entry") or 0)
         qty = float(execution.get("qty", 0) or 0)
         side = str(sig.get("side") or "").upper()
+        symbol = str((sig.get("symbol") or (sig.get("meta") or {}).get("symbol") or execution.get("symbol") or SYMBOL)).upper()
         leverage = float(execution.get("leverage") or execution.get("target_leverage") or 0)
         try:
-            current_price = float(current_price_override) if current_price_override is not None else self._current_market_price(sig.get("tf"))
+            current_price = float(current_price_override) if current_price_override is not None else self._current_market_price(sig.get("tf"), symbol=symbol)
         except Exception:
-            current_price = self._current_market_price(sig.get("tf"))
+            current_price = self._current_market_price(sig.get("tf"), symbol=symbol)
         if entry <= 0 or qty <= 0 or current_price is None or side not in {"LONG", "SHORT"}:
             return None
         pnl_usd = (current_price - entry) * qty if side == "LONG" else (entry - current_price) * qty
@@ -413,6 +421,84 @@ class PonchBot:
             return None
         action = payload.get("action") or {}
         return dict(action)
+
+    def _remember_private_focus(self, sig=None, payload=None):
+        payload = dict(payload or {})
+        focus = {
+            "updated_at": time.time(),
+            "signal_id": None,
+            "side": None,
+            "tf": None,
+            "symbol": None,
+        }
+        if sig:
+            execution = (sig or {}).get("execution") or {}
+            focus.update({
+                "signal_id": sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or execution.get("signal_id"),
+                "side": sig.get("side"),
+                "tf": sig.get("tf"),
+                "symbol": sig.get("symbol") or (sig.get("meta") or {}).get("symbol") or execution.get("symbol") or SYMBOL,
+            })
+        for key in ["signal_id", "side", "tf", "symbol"]:
+            if payload.get(key):
+                focus[key] = payload.get(key)
+        self.private_exec_focus = focus
+        self._save_state()
+
+    def _recent_private_focus(self):
+        focus = dict(self.private_exec_focus or {})
+        updated_at = float(focus.get("updated_at") or 0)
+        if not updated_at or (time.time() - updated_at) > max(300, PRIVATE_EXEC_CONFIRM_TIMEOUT_SEC * 4):
+            self.private_exec_focus = {}
+            self._save_state()
+            return {}
+        return focus
+
+    def _extract_symbol_from_text(self, text):
+        raw = str(text or "").upper()
+        match = re.search(r"\b([A-Z]{2,10}USDT)\b", raw)
+        if match:
+            return match.group(1)
+        aliases = {
+            "BTC": "BTCUSDT",
+            "ETH": "ETHUSDT",
+            "SOL": "SOLUSDT",
+            "XRP": "XRPUSDT",
+            "DOGE": "DOGEUSDT",
+            "BNB": "BNBUSDT",
+            "ADA": "ADAUSDT",
+            "AVAX": "AVAXUSDT",
+            "LINK": "LINKUSDT",
+        }
+        for key, value in aliases.items():
+            if re.search(rf"\b{key}\b", raw):
+                return value
+        return None
+
+    def _extract_manual_preset(self, text):
+        lower = str(text or "").lower()
+        if "runner" in lower:
+            return "runner"
+        if "aggressive" in lower or "aggro" in lower:
+            return "aggressive"
+        if "safe" in lower or "conservative" in lower:
+            return "safe"
+        return None
+
+    def _apply_context_to_action(self, action, text=""):
+        action = dict(action or {})
+        symbol = self._extract_symbol_from_text(text)
+        preset = self._extract_manual_preset(text)
+        if symbol and not action.get("symbol"):
+            action["symbol"] = symbol
+        if preset and not action.get("preset"):
+            action["preset"] = preset
+        focus = self._recent_private_focus()
+        if focus:
+            for key in ["signal_id", "side", "tf", "symbol"]:
+                if not action.get(key) and focus.get(key):
+                    action[key] = focus.get(key)
+        return action
 
     def _infer_exec_suggestion_from_text(self, text):
         lower = str(text or "").strip().lower()
@@ -497,10 +583,72 @@ class PonchBot:
         self._send_private_execution_answer(" ".join(answer_lines))
         return True
 
+    def _telegram_download_file(self, file_id):
+        file_id = str(file_id or "").strip()
+        if not file_id or not BOT_TOKEN:
+            return None, None
+        try:
+            meta = requests.get(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+                params={"file_id": file_id},
+                timeout=20,
+            ).json()
+            file_path = (((meta or {}).get("result") or {}).get("file_path") or "").strip()
+            if not file_path:
+                return None, None
+            content = requests.get(
+                f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}",
+                timeout=30,
+            )
+            content.raise_for_status()
+            return content.content, file_path
+        except Exception:
+            return None, None
+
+    def _handle_private_exec_image_message(self, message):
+        if not PRIVATE_EXEC_AI_CONTROL_ENABLED or not self._is_private_exec_chat((message.get("chat") or {}).get("id")):
+            return False
+        file_id = None
+        mime_type = "image/jpeg"
+        photos = message.get("photo") or []
+        document = message.get("document") or {}
+        if photos:
+            file_id = (photos[-1] or {}).get("file_id")
+            mime_type = "image/jpeg"
+        elif document and str(document.get("mime_type") or "").lower().startswith("image/"):
+            file_id = document.get("file_id")
+            mime_type = str(document.get("mime_type") or "image/jpeg")
+        if not file_id:
+            return False
+        if not GEMINI_API_KEY:
+            self._send_private_execution_answer("I can analyze screenshots here, but the Gemini key is missing in your .env.")
+            return True
+        image_bytes, _ = self._telegram_download_file(file_id)
+        if not image_bytes:
+            self._send_private_execution_answer("I tried to load that screenshot, but Telegram did not give it back cleanly. Send it again and I’ll try once more.")
+            return True
+        prompt = str(message.get("caption") or "").strip() or (
+            "Please analyze this trading screenshot, explain what you see, tell me what matters, and suggest what I should do next."
+        )
+        answer = ask_gemini_trade_question_with_image(
+            GEMINI_API_KEY,
+            GEMINI_MODEL,
+            prompt,
+            self._build_gemini_trade_context(),
+            image_bytes,
+            mime_type=mime_type,
+        )
+        if answer:
+            self._send_private_execution_answer(answer)
+        else:
+            self._send_private_execution_answer("I looked at the screenshot but I could not get a clean answer back this time. Send it again with a short caption and I’ll retry.")
+        return True
+
     def _resolve_signal_for_action(self, payload, *, allow_unexecuted=False):
         signal_id = str(payload.get("signal_id") or "").strip()
         side = str(payload.get("side") or "").strip().upper()
         tf = str(payload.get("tf") or "").strip()
+        symbol = str(payload.get("symbol") or "").strip().upper()
         pool = self._recent_unexecuted_signals() if allow_unexecuted else self._active_execution_signals()
 
         if signal_id:
@@ -516,6 +664,14 @@ class PonchBot:
 
         matches = []
         for sig in pool:
+            candidate_symbol = str(
+                sig.get("symbol")
+                or ((sig.get("meta") or {}).get("symbol"))
+                or (((sig.get("execution") or {}).get("symbol")))
+                or SYMBOL
+            ).strip().upper()
+            if symbol and candidate_symbol != symbol:
+                continue
             if side and str(sig.get("side", "")).upper() != side:
                 continue
             if tf and str(sig.get("tf", "")) != tf:
@@ -526,8 +682,17 @@ class PonchBot:
     def _resolve_signals_for_bulk_action(self, payload):
         side = str(payload.get("side") or "").strip().upper()
         tf = str(payload.get("tf") or "").strip()
+        symbol = str(payload.get("symbol") or "").strip().upper()
         matches = []
         for sig in self._active_execution_signals():
+            candidate_symbol = str(
+                sig.get("symbol")
+                or ((sig.get("meta") or {}).get("symbol"))
+                or (((sig.get("execution") or {}).get("symbol")))
+                or SYMBOL
+            ).strip().upper()
+            if symbol and candidate_symbol != symbol:
+                continue
             if side and str(sig.get("side", "")).upper() != side:
                 continue
             if tf and str(sig.get("tf", "")) != tf:
@@ -572,6 +737,8 @@ class PonchBot:
         if kind == "open_manual":
             side = str(action.get("side") or "").upper()
             tf = str(action.get("tf") or "").strip()
+            symbol = str(action.get("symbol") or "").strip().upper()
+            preset = str(action.get("preset") or "").strip().lower()
             margin = action.get("margin_usd")
             leverage = action.get("leverage")
             parts = ["Open manual market position"]
@@ -579,6 +746,10 @@ class PonchBot:
                 parts = [f"Open manual {side} position"]
             if tf:
                 parts.append(f"on {tf}")
+            if symbol:
+                parts.append(f"for {symbol}")
+            if preset:
+                parts.append(f"using the {preset} preset")
             if margin not in (None, "", 0, 0.0):
                 parts.append(f"with ${float(margin):.2f} margin")
             if leverage not in (None, "", 0, 0.0):
@@ -651,6 +822,28 @@ class PonchBot:
                     action["side"] = "LONG"
                 elif "short" in lower:
                     action["side"] = "SHORT"
+            symbol = self._extract_symbol_from_text(text)
+            if symbol:
+                action["symbol"] = symbol
+            preset = self._extract_manual_preset(text)
+            if preset:
+                action["preset"] = preset
+            for tf_candidate in ["5m", "15m", "1h", "4h"]:
+                if tf_candidate in lower:
+                    action["tf"] = tf_candidate
+                    break
+            margin_match = re.search(r'(\d+(?:[.,]\d+)?)\s*(?:\$|usd|usdt|dollar|dollars|margin)', lower)
+            if margin_match:
+                try:
+                    action["margin_usd"] = float(margin_match.group(1).replace(",", "."))
+                except Exception:
+                    pass
+            lev_match = re.search(r'(\d+(?:[.,]\d+)?)\s*x\b', lower)
+            if lev_match:
+                try:
+                    action["leverage"] = int(float(lev_match.group(1).replace(",", ".")))
+                except Exception:
+                    pass
 
         if action.get("action") == "set_tp":
             if action.get("tp_index") in (None, "", 0, 0.0, "0"):
@@ -754,9 +947,12 @@ class PonchBot:
         if side not in {"LONG", "SHORT"}:
             raise ValueError("Manual open needs LONG or SHORT side.")
         tf = str(action.get("tf") or "5m")
-        df = self.latest_data.get(tf)
+        symbol = str(action.get("symbol") or SYMBOL).upper()
+        df = self.latest_data.get(tf) if symbol == str(SYMBOL).upper() else None
         if df is None or df.empty:
-            raise ValueError(f"No live market data available for {tf}.")
+            df = fetch_klines(symbol=symbol, interval=tf, limit=160)
+        if df is None or df.empty:
+            raise ValueError(f"No live market data available for {symbol} on {tf}.")
         df = calculate_channels(df.copy())
         curr = df.iloc[-1]
         entry = float(curr["Close"])
@@ -766,6 +962,22 @@ class PonchBot:
         tp1_mult = float(risk_cfg.get("tp1", 1.0))
         tp2_mult = float(risk_cfg.get("tp2", 1.8))
         tp3_mult = float(risk_cfg.get("tp3", 2.5))
+        preset = str(action.get("preset") or "").strip().lower()
+        if preset == "safe":
+            sl_mult *= 1.15
+            tp1_mult *= 0.90
+            tp2_mult *= 1.20
+            tp3_mult *= 1.50
+        elif preset == "aggressive":
+            sl_mult *= 0.90
+            tp1_mult *= 1.05
+            tp2_mult *= 1.10
+            tp3_mult *= 1.15
+        elif preset == "runner":
+            sl_mult *= 1.05
+            tp1_mult *= 1.20
+            tp2_mult *= 1.40
+            tp3_mult *= 1.70
 
         sl = action.get("sl")
         tp1 = action.get("tp1")
@@ -783,17 +995,27 @@ class PonchBot:
         meta = {
             "strategy": "MANUAL_PRIVATE",
             "size": max(MIN_SIGNAL_SIZE_PCT, float(action.get("size_pct") or MIN_SIGNAL_SIZE_PCT)),
+            "symbol": symbol,
         }
+        if preset:
+            meta["manual_preset"] = preset
         if action.get("margin_usd") is not None:
             meta["manual_margin_usd"] = float(action.get("margin_usd"))
         if action.get("leverage") is not None:
             meta["manual_leverage"] = int(float(action.get("leverage")))
+        elif preset == "safe":
+            meta["manual_leverage"] = min(int(BITUNIX_DEFAULT_LEVERAGE or 1), 10)
+        elif preset == "aggressive":
+            meta["manual_leverage"] = max(int(BITUNIX_DEFAULT_LEVERAGE or 1), 20)
+        elif preset == "runner":
+            meta["manual_leverage"] = min(max(int(BITUNIX_DEFAULT_LEVERAGE or 1), 8), 15)
 
         signal_id = new_signal_id()
         ts = curr.name.isoformat() if hasattr(curr, "name") else datetime.now(timezone.utc).isoformat()
         return {
             "signal_id": signal_id,
             "type": "MANUAL",
+            "symbol": symbol,
             "side": side,
             "entry": float(entry),
             "sl": float(sl),
@@ -817,6 +1039,7 @@ class PonchBot:
             )
             sig = None if wants_account_status else self._resolve_signal_for_action(action, allow_unexecuted=False)
             if sig:
+                self._remember_private_focus(sig=sig)
                 self._send_single_position_snapshot(sig, title="Position Info")
             else:
                 self._send_execution_status_snapshot(datetime.now(timezone.utc), title="Bitunix Live Status")
@@ -827,6 +1050,7 @@ class PonchBot:
             if not sig:
                 self._send_private_execution_notice("Exec Control", ["No tracked pending signal matched your request."], icon="вљ пёЏ")
                 return False
+            self._remember_private_focus(sig=sig)
             self._execute_exchange_trade(sig)
             return True
 
@@ -838,6 +1062,8 @@ class PonchBot:
                 signal_type="MANUAL", meta=sig.get("meta") or {}
             )
             self.tracker.signals[-1]["signal_id"] = sig["signal_id"]
+            self.tracker.signals[-1]["symbol"] = sig.get("symbol", SYMBOL)
+            self._remember_private_focus(sig=self.tracker.signals[-1])
             self._execute_exchange_trade(self.tracker.signals[-1])
             return True
 
@@ -895,6 +1121,7 @@ class PonchBot:
         if not sig:
             self._send_private_execution_notice("Exec Control", ["No active exchange position matched your request."], icon="вљ пёЏ")
             return False
+        self._remember_private_focus(sig=sig)
 
         if action_type == "move_sl_entry":
             result = self.trade_executor.manual_move_stop(sig, float(sig.get("entry") or 0))
@@ -974,7 +1201,12 @@ class PonchBot:
     def _handle_private_exec_message(self, message):
         if not PRIVATE_EXEC_AI_CONTROL_ENABLED or not self._is_private_exec_chat((message.get("chat") or {}).get("id")):
             return False
-        text = str(message.get("text") or "").strip()
+        text = str(message.get("text") or message.get("caption") or "").strip()
+        if (message.get("photo") or (message.get("document") or {}).get("mime_type")) and not text:
+            return self._handle_private_exec_image_message(message)
+        if message.get("photo") or str((message.get("document") or {}).get("mime_type") or "").lower().startswith("image/"):
+            if self._handle_private_exec_image_message(message):
+                return True
         if not text:
             return False
 
@@ -1050,7 +1282,7 @@ class PonchBot:
                 self._send_private_execution_answer("I do not see any pending tracked signal right now.")
                 return True
             signal_id = pending[0].get("signal_id") or ((pending[0].get("meta") or {}).get("signal_id"))
-            action = {"action": "open_signal", "signal_id": signal_id}
+            action = self._apply_context_to_action({"action": "open_signal", "signal_id": signal_id}, text)
             self._remember_exec_suggestion(action)
             _ask_to_confirm(action, chat_id, source_text=text)
             return True
@@ -1061,6 +1293,7 @@ class PonchBot:
                 action["side"] = "LONG"
             elif "short" in lower:
                 action["side"] = "SHORT"
+            action = self._apply_context_to_action(action, text)
             self._remember_exec_suggestion(action)
             _ask_to_confirm(action, chat_id, source_text=text)
             return True
@@ -1071,6 +1304,7 @@ class PonchBot:
                 action["side"] = "LONG"
             elif "short" in lower:
                 action["side"] = "SHORT"
+            action = self._apply_context_to_action(action, text)
             self._remember_exec_suggestion(action)
             _ask_to_confirm(action, chat_id, source_text=text)
             return True
@@ -1081,6 +1315,7 @@ class PonchBot:
                 action["side"] = "LONG"
             elif "short" in lower:
                 action["side"] = "SHORT"
+            action = self._apply_context_to_action(action, text)
             self._remember_exec_suggestion(action)
             _ask_to_confirm(action, chat_id, source_text=text)
             return True
@@ -1096,7 +1331,7 @@ class PonchBot:
 
         live_metric_words = ["roi", "pnl", "profit", "loss", "unrealized", "return"]
         if any(word in lower for word in live_metric_words):
-            payload = {}
+            payload = self._apply_context_to_action({}, text)
             id_match = re.search(r"\b[a-f0-9]{8,}\b", lower)
             if id_match:
                 payload["signal_id"] = id_match.group(0)
@@ -1182,6 +1417,7 @@ class PonchBot:
                         combined_text,
                         self._build_gemini_trade_context(),
                     )
+                    parsed = self._apply_context_to_action(parsed or {}, combined_text) if parsed else parsed
                     if not parsed:
                         answer = ask_gemini_trade_question(
                             GEMINI_API_KEY,
@@ -1262,6 +1498,7 @@ class PonchBot:
             text,
             self._build_gemini_trade_context(),
         )
+        parsed = self._apply_context_to_action(parsed or {}, text) if parsed else parsed
         if not parsed:
             answer = None
             try:
@@ -1404,8 +1641,9 @@ class PonchBot:
         blocks = [f"I found {len(pending)} pending signal{'s' if len(pending) != 1 else ''}."]
         for sig in pending[:10]:
             signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or "N/A"
+            symbol = str(sig.get("symbol") or (sig.get("meta") or {}).get("symbol") or SYMBOL).upper()
             detail_lines = [
-                f"Type: {sig.get('type', 'SCALP')} {sig.get('side', 'N/A')} [{sig.get('tf', 'N/A')}]",
+                f"Type: {sig.get('type', 'SCALP')} {sig.get('side', 'N/A')} [{sig.get('tf', 'N/A')}] {symbol}",
                 f"Entry: {float(sig.get('entry', 0) or 0):.2f}",
                 f"SL: {float(sig.get('sl', 0) or 0):.2f}",
                 f"TPs: {float(sig.get('tp1', 0) or 0):.2f} / {float(sig.get('tp2', 0) or 0):.2f} / {float(sig.get('tp3', 0) or 0):.2f}",
@@ -1429,13 +1667,14 @@ class PonchBot:
         blocks = ["Here is how your open positions are doing right now."]
         for sig in active[:10]:
             signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (((sig.get("execution") or {}).get("signal_id"))) or "N/A"
+            symbol = str(sig.get("symbol") or (sig.get("meta") or {}).get("symbol") or ((sig.get("execution") or {}).get("symbol")) or SYMBOL).upper()
             metrics = self._position_live_metrics(sig)
             if metrics:
                 total_pnl += float(metrics.get("pnl_usd") or 0.0)
                 if metrics.get("roi_pct") is not None:
                     roi_values.append(float(metrics.get("roi_pct")))
                 detail_lines = [
-                    f"Type: {sig.get('type', 'SCALP')} {sig.get('side', 'N/A')} [{sig.get('tf', 'N/A')}]",
+                    f"Type: {sig.get('type', 'SCALP')} {sig.get('side', 'N/A')} [{sig.get('tf', 'N/A')}] {symbol}",
                     f"Entry: {float(sig.get('entry', 0) or 0):.2f}",
                     f"Current: {float(metrics.get('current_price') or 0):.2f}",
                     f"PnL: {float(metrics.get('pnl_usd') or 0):+.4f} USDT",
@@ -1443,7 +1682,7 @@ class PonchBot:
                 ]
             else:
                 detail_lines = [
-                    f"Type: {sig.get('type', 'SCALP')} {sig.get('side', 'N/A')} [{sig.get('tf', 'N/A')}]",
+                    f"Type: {sig.get('type', 'SCALP')} {sig.get('side', 'N/A')} [{sig.get('tf', 'N/A')}] {symbol}",
                     "Live price is unavailable right now.",
                 ]
             blocks.append(
@@ -1469,7 +1708,8 @@ class PonchBot:
             execution = sig.get("execution") or {}
             signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (execution.get("signal_id"))
             sl_text = self._format_live_sl_value(sig)
-            header_block = f"{sig.get('type', 'SCALP')} {sig.get('side', 'N/A')} [{sig.get('tf', 'N/A')}]"
+            symbol = str(sig.get("symbol") or (sig.get("meta") or {}).get("symbol") or execution.get("symbol") or SYMBOL).upper()
+            header_block = f"{sig.get('type', 'SCALP')} {sig.get('side', 'N/A')} [{sig.get('tf', 'N/A')}] {symbol}"
             detail_lines = [
                 f"Entry: {float(sig.get('entry', 0) or 0):.2f}",
                 f"SL: {sl_text}",
@@ -1493,9 +1733,11 @@ class PonchBot:
         side = str(sig.get("side") or "N/A")
         sig_type = str(sig.get("type") or "Signal")
         tf = str(sig.get("tf") or "N/A")
+        symbol = str(sig.get("symbol") or (sig.get("meta") or {}).get("symbol") or execution.get("symbol") or SYMBOL).upper()
         status = str(sig.get("status") or "OPEN").upper()
         sl_text = self._format_live_sl_value(sig)
         details_block = "\n".join([
+            f"Symbol: {symbol}",
             f"Status: {status}",
             f"Entry: {float(sig.get('entry', 0) or 0):.2f}",
             f"SL: {sl_text}",
@@ -1504,7 +1746,7 @@ class PonchBot:
         ])
         answer = (
             f"I found the position you asked about.\n"
-            f"It is your {sig_type} {side} on {tf}.\n"
+            f"It is your {sig_type} {side} on {tf} for {symbol}.\n"
             f"Here is the position ID:\n<pre>{signal_id or 'N/A'}</pre>\n"
             f"<pre>{details_block}</pre>"
         )
@@ -1561,12 +1803,13 @@ class PonchBot:
         sig_type = sig.get("type")
         side = sig.get("side")
         signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (((sig.get("execution") or {}).get("signal_id")))
+        symbol = str(sig.get("symbol") or (sig.get("meta") or {}).get("symbol") or (sig.get("execution") or {}).get("symbol") or SYMBOL).upper()
         if signal_id:
             lines.append("Here is the position ID:")
             lines.append(f"<pre>{signal_id}</pre>")
         detail_lines = []
         if tf or sig_type or side:
-            detail_lines.append(f"{sig_type or 'Signal'} {side or 'N/A'} [{tf or 'N/A'}]")
+            detail_lines.append(f"{sig_type or 'Signal'} {side or 'N/A'} [{tf or 'N/A'}] {symbol}")
         if sig.get("entry") is not None:
             detail_lines.append(f"Entry: {float(sig.get('entry') or 0):.2f}")
             detail_lines.append(f"SL: {self._format_live_sl_value(sig)}")
@@ -2409,6 +2652,7 @@ class PonchBot:
                 "last_exec_snapshot_date": self.last_exec_snapshot_date,
                 "pending_exec_action": self.pending_exec_action,
                 "last_exec_suggested_action": self.last_exec_suggested_action,
+                "private_exec_focus": self.private_exec_focus,
                 "last_scalp_open_alert": self.last_scalp_open_alert,
                 "scalp_countertrend_hits": self.scalp_countertrend_hits,
                 "scalp_loss_streak": self.scalp_loss_streak,
@@ -2716,7 +2960,7 @@ class PonchBot:
                         tp3_c = latest_price - ref_atr * tp3_m
 
                     if ce["type"] == "STRONG":
-                        strong_size = round(max(MIN_SIGNAL_SIZE_PCT, min(ce["points"] * 0.3, 5.0)), 1)
+                        strong_size = round(max(MIN_SIGNAL_SIZE_PCT, min(ce["points"] * 1.5, 10.0)), 1)
                         tp_liq = self._estimate_tp_liquidity(side, latest_price, tp1_c, tp2_c, tp3_c)
                         signal_id = new_signal_id()
                         resp = tg.send_strong(
@@ -2752,7 +2996,7 @@ class PonchBot:
                         print(f"  [CONFLUENCE] STRONG {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
 
                     elif ce["type"] == "EXTREME":
-                        extreme_size = round(max(MIN_SIGNAL_SIZE_PCT, min(ce["points"] * 0.3, 5.0)), 1)
+                        extreme_size = round(max(MIN_SIGNAL_SIZE_PCT + 2.5, min(ce["points"] * 2.0, 15.0)), 1)
                         tp_liq = self._estimate_tp_liquidity(side, latest_price, tp1_c, tp2_c, tp3_c)
                         signal_id = new_signal_id()
                         resp = tg.send_extreme(
@@ -2807,10 +3051,19 @@ class PonchBot:
                 current_candle_ts_set=current_candle_ts_set
             )
             today_str = now.strftime("%Y-%m-%d")
+            inactive_event_signals = set()
 
             for event in trade_events:
                 sig = event["sig"]
                 evt_type = event["type"] # "TP1", "TP2", "TP3", "SL"
+                signal_id = str(
+                    sig.get("signal_id")
+                    or ((sig.get("meta") or {}).get("signal_id"))
+                    or (((sig.get("execution") or {}).get("signal_id")))
+                    or ""
+                ).strip()
+                if signal_id and signal_id in inactive_event_signals:
+                    continue
                 side = sig.get("side")
                 risk_state_changed = False
 
@@ -2835,11 +3088,12 @@ class PonchBot:
                         risk_state_changed = True
                 
                 # --- LIVE MESSAGE UPDATE ---
-                # Update the original signal message with hit markers
-                if sig.get("msg_id") and sig.get("chat_id") and self._should_update_public_signal(sig):
+                # Always keep the original signal card in sync if it exists.
+                if sig.get("msg_id") and sig.get("chat_id"):
                     tg.update_signal_message(sig["chat_id"], sig["msg_id"], sig)
 
-                    # Reply on target progression and closure events.
+                # Public reply alerts keep the original public behavior.
+                if sig.get("msg_id") and sig.get("chat_id"):
                     if evt_type == "TP1":
                         tg.send_tp1_hit_congrats(
                             sig["chat_id"],
@@ -2872,16 +3126,11 @@ class PonchBot:
                         tg.send_breakeven_alert(sig["chat_id"], sig["msg_id"], sig.get("tf", "Unknown"))
                     elif evt_type == "PROFIT_SL":
                         tg.send_profit_sl_alert(sig["chat_id"], sig["msg_id"], sig.get("tf", "Unknown"))
-                elif self._execution_updates_private_only():
+
+                if self._execution_chat_id():
                     self._send_private_execution_notice(
                         f"{evt_type} {sig.get('side', 'N/A')} [{sig.get('tf', 'N/A')}]",
-                        self._format_execution_lines(
-                            sig,
-                            extra=[
-                                f"status={sig.get('status')}",
-                                f"lock={float(sig.get('sl') or 0):.2f}",
-                            ],
-                        ),
+                        self._format_execution_lines(sig),
                     )
 
                 if risk_state_changed:
@@ -2889,6 +3138,9 @@ class PonchBot:
 
                 if evt_type in ("TP1", "TP2", "TP3", "ENTRY_CLOSE", "PROFIT_SL", "SL"):
                     self._sync_exchange_trade_event(sig, evt_type)
+                    execution = (sig.get("execution") or {})
+                    if signal_id and execution and not execution.get("active", True):
+                        inactive_event_signals.add(signal_id)
 
             # 2. Liquidation Squeezes
             if self.last_liqs >= LIQ_SQUEEZE_THRESHOLD:
@@ -3554,7 +3806,7 @@ class PonchBot:
             for warning in exec_info.get("protection_warnings", []) or []:
                 print(f"  [TRADE] Protection warning: {warning}")
         summary_lines = [
-            f"{sig_obj.get('type', 'Signal')} {sig_obj.get('side', 'N/A')} [{sig_obj.get('tf', 'N/A')}]",
+            f"{sig_obj.get('type', 'Signal')} {sig_obj.get('side', 'N/A')} [{sig_obj.get('tf', 'N/A')}] {str(sig_obj.get('symbol') or (sig_obj.get('meta') or {}).get('symbol') or SYMBOL).upper()}",
             f"Entry: {float(sig_obj.get('entry', 0) or 0):.2f}",
             f"SL: {self._format_live_sl_value(sig_obj)}",
             self._format_active_tp_line(sig_obj),

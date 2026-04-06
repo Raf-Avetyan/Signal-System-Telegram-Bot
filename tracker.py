@@ -158,6 +158,15 @@ class SignalTracker:
             if sig["status"] in terminal_statuses:
                 continue
 
+            execution = sig.get("execution") or {}
+            raw_tp_qtys = list(execution.get("tp_qtys") or [])
+            while len(raw_tp_qtys) < 3:
+                raw_tp_qtys.append(0.0)
+            active_tp_indices = [i + 1 for i, q in enumerate(raw_tp_qtys[:3]) if float(q or 0) > 0]
+            if not active_tp_indices:
+                active_tp_indices = [1, 2, 3]
+            single_active_tp = active_tp_indices[0] if len(active_tp_indices) == 1 else None
+
             # Skip signal if we're still on the candle it was born on
             entry_ts = sig.get("entry_candle_ts")
             is_entry_candle = False
@@ -192,20 +201,26 @@ class SignalTracker:
 
             if not is_entry_candle:
                 if is_long:
-                    if not sig["tp1_hit"] and tp_price >= sig["tp1"]:
+                    if 1 in active_tp_indices and not sig["tp1_hit"] and tp_price >= sig["tp1"]:
                         sig["tp1_hit"] = True
                         sig["tp1_at"] = sig.get("tp1_at") or datetime.now(timezone.utc).isoformat()
                         sig["sl"] = float(sig["entry"])
                         sig["status"] = "TP1"
                         changed = True
                         events.append({"type": "TP1", "sig": sig})
-                    if not sig["tp2_hit"] and tp_price >= sig["tp2"]:
+                        if single_active_tp == 1:
+                            sig["closed_at"] = datetime.now(timezone.utc).isoformat()
+                            continue
+                    if 2 in active_tp_indices and not sig["tp2_hit"] and tp_price >= sig["tp2"]:
                         sig["tp2_hit"] = True
                         sig["tp2_at"] = sig.get("tp2_at") or datetime.now(timezone.utc).isoformat()
                         sig["status"] = "TP2"
                         changed = True
                         events.append({"type": "TP2", "sig": sig})
-                    if not sig["tp3_hit"] and tp_price >= sig["tp3"]:
+                        if single_active_tp == 2:
+                            sig["closed_at"] = datetime.now(timezone.utc).isoformat()
+                            continue
+                    if 3 in active_tp_indices and not sig["tp3_hit"] and tp_price >= sig["tp3"]:
                         sig["tp3_hit"] = True
                         sig["tp3_at"] = sig.get("tp3_at") or datetime.now(timezone.utc).isoformat()
                         sig["status"] = "TP3"
@@ -214,20 +229,26 @@ class SignalTracker:
                         events.append({"type": "TP3", "sig": sig})
                         continue
                 else:
-                    if not sig["tp1_hit"] and tp_price <= sig["tp1"]:
+                    if 1 in active_tp_indices and not sig["tp1_hit"] and tp_price <= sig["tp1"]:
                         sig["tp1_hit"] = True
                         sig["tp1_at"] = sig.get("tp1_at") or datetime.now(timezone.utc).isoformat()
                         sig["sl"] = float(sig["entry"])
                         sig["status"] = "TP1"
                         changed = True
                         events.append({"type": "TP1", "sig": sig})
-                    if not sig["tp2_hit"] and tp_price <= sig["tp2"]:
+                        if single_active_tp == 1:
+                            sig["closed_at"] = datetime.now(timezone.utc).isoformat()
+                            continue
+                    if 2 in active_tp_indices and not sig["tp2_hit"] and tp_price <= sig["tp2"]:
                         sig["tp2_hit"] = True
                         sig["tp2_at"] = sig.get("tp2_at") or datetime.now(timezone.utc).isoformat()
                         sig["status"] = "TP2"
                         changed = True
                         events.append({"type": "TP2", "sig": sig})
-                    if not sig["tp3_hit"] and tp_price <= sig["tp3"]:
+                        if single_active_tp == 2:
+                            sig["closed_at"] = datetime.now(timezone.utc).isoformat()
+                            continue
+                    if 3 in active_tp_indices and not sig["tp3_hit"] and tp_price <= sig["tp3"]:
                         sig["tp3_hit"] = True
                         sig["tp3_at"] = sig.get("tp3_at") or datetime.now(timezone.utc).isoformat()
                         sig["status"] = "TP3"

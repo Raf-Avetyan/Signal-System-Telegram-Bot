@@ -148,12 +148,12 @@ SMART_MONEY_MAX_EXECUTION_CANDLE_RISK_RATIO_BY_TF = {
 
 # Strength & Sizing per timeframe
 TIMEFRAME_PROFILES = {
-    "5m":  {"strength": "Weak",   "emoji": "⚡️", "size": 1.0},
-    "15m": {"strength": "Medium", "emoji": "⚡️", "size": 1.5},
-    "1h":  {"strength": "Strong", "emoji": "🚀", "size": 2.0},
-    "4h":  {"strength": "Ultra",  "emoji": "💎", "size": 3.0},
+    "5m":  {"strength": "Weak",   "emoji": "⚡️", "size": 5.0},
+    "15m": {"strength": "Medium", "emoji": "⚡️", "size": 6.0},
+    "1h":  {"strength": "Strong", "emoji": "🚀", "size": 7.5},
+    "4h":  {"strength": "Ultra",  "emoji": "💎", "size": 9.0},
 }
-MIN_SIGNAL_SIZE_PCT = float(os.getenv("MIN_SIGNAL_SIZE_PCT", "3.0"))
+MIN_SIGNAL_SIZE_PCT = float(os.getenv("MIN_SIGNAL_SIZE_PCT", "5.0"))
 
 # Scalp confirmation buffer (RSI points beyond zone edge):
 # LONG confirm when RSI > MOMENTUM_OS + buffer

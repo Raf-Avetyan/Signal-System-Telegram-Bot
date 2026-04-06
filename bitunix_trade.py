@@ -701,7 +701,7 @@ class TradeExecutor:
         if position_mode not in {"ONE_WAY", "HEDGE"}:
             position_mode = str(BITUNIX_POSITION_MODE or "ONE_WAY").strip().upper()
         tf_name = str(signal.get("tf") or signal.get("execution_tf") or "5m")
-        symbol = SYMBOL
+        symbol = str(signal.get("symbol") or (signal.get("meta") or {}).get("symbol") or SYMBOL).upper()
         symbol_rules = self._get_symbol_rules(symbol)
         min_base_qty = float(symbol_rules.get("min_base_qty") or BITUNIX_MIN_BASE_QTY)
         qty_step = float(symbol_rules.get("qty_step") or BITUNIX_QTY_STEP)
