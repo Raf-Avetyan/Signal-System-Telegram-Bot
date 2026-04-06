@@ -1271,6 +1271,7 @@ class TradeExecutor:
             return ExecutionResult(self.mode, False, "Position quantity is invalid.", execution)
 
         tp_orders = list(execution.get("tp_orders") or [])
+        single_tp_index = self._preferred_single_tp_index(signal, execution)
         if self.mode == "live":
             for order in tp_orders:
                 try:
@@ -1284,7 +1285,7 @@ class TradeExecutor:
                 tp_res = self.client.place_position_tpsl(symbol, str(position_id), float(new_price), current_sl_price)
             data = tp_res.get("data", {}) or {}
             execution["tp_orders"] = [{
-                "index": 1,
+                "index": single_tp_index,
                 "kind": "POSITION_TP",
                 "qty": float(total_qty),
                 "price": float(new_price),
@@ -1293,18 +1294,22 @@ class TradeExecutor:
             }]
         else:
             execution["tp_orders"] = [{
-                "index": 1,
+                "index": single_tp_index,
                 "kind": "POSITION_TP",
                 "qty": float(total_qty),
                 "price": float(new_price),
             }]
 
-        execution["tp_qtys"] = [float(total_qty), 0.0, 0.0]
-        execution["tp_targets"] = [float(new_price), None, None]
-        execution["missing_tp_indices"] = [2, 3]
+        qtys = [0.0, 0.0, 0.0]
+        qtys[single_tp_index - 1] = float(total_qty)
+        execution["tp_qtys"] = qtys
+        targets = [None, None, None]
+        targets[single_tp_index - 1] = float(new_price)
+        execution["tp_targets"] = targets
+        execution["missing_tp_indices"] = [i for i in (1, 2, 3) if i != single_tp_index]
         execution["tp_mode"] = "POSITION_TP"
         execution["protection_ready"] = bool(execution.get("sl_order"))
-        signal["tp1"] = float(new_price)
+        signal[f"tp{single_tp_index}"] = float(new_price)
         return ExecutionResult(self.mode, True, f"Set take profit to {float(new_price):.2f}.", execution)
 
     def manual_cancel_tp(self, signal: Dict[str, Any], tp_index: int) -> ExecutionResult:
@@ -1561,9 +1566,29 @@ class TradeExecutor:
                     f"Compressed TP legs to TP1+TP3 because 3-way split falls below Bitunix min qty {min_leg:.8f}."
                 )
 
-        return [total, 0.0, 0.0], (
-            f"Compressed TP legs to TP1-only because partial TP legs fall below Bitunix min qty {min_leg:.8f}."
+        return [0.0, total, 0.0], (
+            f"Compressed TP legs to TP2-only because partial TP legs fall below Bitunix min qty {min_leg:.8f}."
         )
+
+    @staticmethod
+    def _preferred_single_tp_index(signal: Dict[str, Any], execution: Optional[Dict[str, Any]] = None) -> int:
+        execution = execution or {}
+        qtys = list(execution.get("tp_qtys") or [0.0, 0.0, 0.0])
+        while len(qtys) < 3:
+            qtys.append(0.0)
+        active_indices = [i + 1 for i, q in enumerate(qtys[:3]) if float(q or 0) > 0]
+        if len(active_indices) == 1:
+            return active_indices[0]
+
+        targets = list(execution.get("tp_targets") or [signal.get("tp1"), signal.get("tp2"), signal.get("tp3")])
+        while len(targets) < 3:
+            targets.append(None)
+        active_target_indices = [i + 1 for i, price in enumerate(targets[:3]) if float(price or 0) > 0]
+        if len(active_target_indices) == 1:
+            return active_target_indices[0]
+        if 2 in active_target_indices:
+            return 2
+        return 2
 
     def _get_symbol_rules(self, symbol: str) -> Dict[str, Any]:
         symbol_key = str(symbol or SYMBOL).upper()
@@ -1748,8 +1773,9 @@ class TradeExecutor:
                     tp_qty = float(row.get("tpQty") or execution.get("qty") or 0)
                 except Exception:
                     tp_qty = float(execution.get("qty") or 0)
+                single_tp_index = self._preferred_single_tp_index(sig, execution)
                 execution["tp_orders"] = [{
-                    "index": 1,
+                    "index": single_tp_index,
                     "kind": "POSITION_TP",
                     "qty": tp_qty,
                     "price": float(row.get("tpPrice") or 0),
@@ -1757,8 +1783,12 @@ class TradeExecutor:
                     "id": row.get("id") or row.get("orderId"),
                     "raw": row,
                 }]
-                execution["tp_qtys"] = [tp_qty, 0.0, 0.0]
-                execution["tp_targets"] = [float(row.get("tpPrice") or 0), None, None]
+                qtys = [0.0, 0.0, 0.0]
+                qtys[single_tp_index - 1] = tp_qty
+                execution["tp_qtys"] = qtys
+                targets = [None, None, None]
+                targets[single_tp_index - 1] = float(row.get("tpPrice") or 0)
+                execution["tp_targets"] = targets
                 execution["tp_mode"] = "POSITION_TP"
                 execution["protection_ready"] = bool(execution.get("sl_order"))
                 report["state_updated"] += 1

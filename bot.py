@@ -733,7 +733,13 @@ class PonchBot:
     def _apply_private_exec_action(self, action):
         action_type = str(action.get("action") or "").lower()
         if action_type == "status":
-            sig = self._resolve_signal_for_action(action, allow_unexecuted=False)
+            reason_text = str(action.get("reason") or "").lower()
+            wants_account_status = any(
+                phrase in reason_text for phrase in [
+                    "account status", "balance", "live status", "startup check", "wallet", "equity"
+                ]
+            )
+            sig = None if wants_account_status else self._resolve_signal_for_action(action, allow_unexecuted=False)
             if sig:
                 self._send_single_position_snapshot(sig, title="Position Info")
             else:
@@ -882,7 +888,7 @@ class PonchBot:
             self._format_execution_lines(
                 sig,
                 extra=[
-                    f"I did it. {result.message}" if result.accepted else f"I could not do that. {result.message}",
+                    f"I finished that for you. {result.message}" if result.accepted else f"I could not finish that. {result.message}",
                 ],
             ),
             icon="✅" if result.accepted else "⚠️",
@@ -897,12 +903,13 @@ class PonchBot:
             return False
 
         def _ask_to_confirm(action_obj, chat_id, source_text=None):
+            action_text = self._preview_exec_action(action_obj).strip().rstrip(".")
             preview_lines = [
-                f"I will {self._preview_exec_action(action_obj).lower()}.",
-                "Reply YES to continue or NO to cancel.",
+                f"I can do that. {action_text}.",
+                "If you want me to go ahead, reply YES. If you changed your mind, reply NO.",
             ]
             if action_obj.get("signal_id"):
-                preview_lines.insert(1, f"Position ID:\n<pre>{action_obj.get('signal_id')}</pre>")
+                preview_lines.insert(1, f"Here is the position ID:\n<pre>{action_obj.get('signal_id')}</pre>")
             self.pending_exec_action = {
                 "created_at": time.time(),
                 "chat_id": str(chat_id or ""),
@@ -1242,48 +1249,50 @@ class PonchBot:
             total = free
         if used <= 0 and total > 0:
             used = max(0.0, total - free)
-        return f"Balance: {total:.2f} total, {free:.2f} free, {used:.2f} in positions"
+        return f"Your balance is {total:.2f} total, with {free:.2f} free and {used:.2f} tied up in positions."
 
     def _format_news_status_line(self, now):
         if not NEWS_FILTER_ENABLED:
-            return "News: filter off"
+            return "The news filter is turned off right now."
         news_blackout = self._get_active_news_block(now)
         if news_blackout:
             label = str(news_blackout.get("label") or "High Impact News")
             source = str(news_blackout.get("source") or "manual")
             end = news_blackout.get("end")
             end_txt = end.astimezone(timezone.utc).strftime("%H:%M UTC") if isinstance(end, datetime) else "active"
-            return f"News: BLOCK {label} via {source} until {end_txt}"
+            return f"There is an active news block for {label} from {source} until {end_txt}."
         if TRADING_ECONOMICS_NEWS_ENABLED:
             self._refresh_live_news_events(now)
             upcoming = [event for event in self.live_news_events if event.get("datetime") and event["datetime"] >= now]
             if upcoming:
                 next_event = upcoming[0]
                 event_dt = next_event["datetime"].astimezone(timezone.utc).strftime("%d %b %H:%M UTC")
-                return f"News: next {next_event['event']} at {event_dt}"
+                return f"The next high-impact US event is {next_event['event']} at {event_dt}."
             if self.last_live_news_error:
-                return f"News: feed issue ({self.last_live_news_error})"
-            return "News: no upcoming high-impact US events"
+                return f"The live news feed is having an issue right now: {self.last_live_news_error}."
+            return "There are no upcoming high-impact US events right now."
         manual = get_active_news_blackout(now)
         if manual:
-            return f"News: manual block {manual.get('label', 'active')}"
-        return "News: manual blackout only"
+            return f"A manual news block is active for {manual.get('label', 'active')}."
+        return "Only the manual news blackout list is active right now."
 
     def _build_execution_status_lines(self, trade_check=None, reconcile=None, now=None):
         now = now or datetime.now(timezone.utc)
         trade_check = trade_check or self.trade_executor.startup_self_check()
         reconcile = reconcile or self.trade_executor.reconcile_execution_state(self.tracker.signals)
         lines = [
-            f"Bot is {trade_check.get('mode')} on {SYMBOL}. Auth: {'OK' if trade_check.get('auth_ok') else 'FAIL'}",
+            f"The bot is running in {trade_check.get('mode')} mode on {SYMBOL}, and Bitunix auth is {'OK' if trade_check.get('auth_ok') else 'failing'}.",
             self._format_balance_line(trade_check),
-            f"Account mode: {trade_check.get('margin_mode') or 'N/A'} at {int(trade_check.get('leverage', 0) or 0)}x",
-            f"Open positions: {int(trade_check.get('open_positions', 0) or 0)}",
+            f"Your account is in {trade_check.get('margin_mode') or 'N/A'} mode at {int(trade_check.get('leverage', 0) or 0)}x.",
+            f"You currently have {int(trade_check.get('open_positions', 0) or 0)} open position(s).",
         ]
         matched = int(reconcile.get("matched", 0) or 0)
         orphan_count = len(reconcile.get("orphan_positions", []) or [])
         missing_protection = len(reconcile.get("missing_protection", []) or [])
         if matched or orphan_count or missing_protection:
-            lines.append(f"Tracker: {matched} matched, {orphan_count} orphan, {missing_protection} missing protection")
+            lines.append(
+                f"The tracker sees {matched} matched position(s), {orphan_count} orphan position(s), and {missing_protection} position(s) missing protection."
+            )
         lines.append(self._format_news_status_line(now))
 
         errors = []
@@ -1309,7 +1318,7 @@ class PonchBot:
         if not pending:
             self._send_private_execution_answer("You do not have any pending tracked signals right now.")
             return
-        blocks = [f"{title}\nI found {len(pending)} pending signal{'s' if len(pending) != 1 else ''}."]
+        blocks = [f"I found {len(pending)} pending signal{'s' if len(pending) != 1 else ''}."]
         for sig in pending[:10]:
             signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or "N/A"
             detail_lines = [
@@ -1319,7 +1328,8 @@ class PonchBot:
                 f"TPs: {float(sig.get('tp1', 0) or 0):.2f} / {float(sig.get('tp2', 0) or 0):.2f} / {float(sig.get('tp3', 0) or 0):.2f}",
             ]
             blocks.append(
-                f"\n\nSignal ID:\n<pre>{signal_id}</pre>\n"
+                f"\n\nThis signal is waiting right now.\n"
+                f"Here is the signal ID:\n<pre>{signal_id}</pre>\n"
                 f"<pre>{chr(10).join(detail_lines)}</pre>"
             )
         self._send_private_execution_answer("".join(blocks))
@@ -1333,7 +1343,7 @@ class PonchBot:
 
         total_pnl = 0.0
         roi_values = []
-        blocks = [title]
+        blocks = ["Here is how your open positions are doing right now."]
         for sig in active[:10]:
             signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (((sig.get("execution") or {}).get("signal_id"))) or "N/A"
             metrics = self._position_live_metrics(sig)
@@ -1354,7 +1364,8 @@ class PonchBot:
                     "Live price is unavailable right now.",
                 ]
             blocks.append(
-                f"\n\nPosition ID:\n<pre>{signal_id}</pre>\n"
+                f"\n\nThis is one of your open positions.\n"
+                f"Here is the position ID:\n<pre>{signal_id}</pre>\n"
                 f"<pre>{chr(10).join(detail_lines)}</pre>"
             )
 
@@ -1370,7 +1381,7 @@ class PonchBot:
         if not active:
             self._send_private_execution_answer("You do not have any active exchange positions right now.")
             return
-        blocks = [f"{title}\nYou currently have {len(active)} open position{'s' if len(active) != 1 else ''}."]
+        blocks = [f"You currently have {len(active)} open position{'s' if len(active) != 1 else ''}."]
         for sig in active[:10]:
             execution = sig.get("execution") or {}
             signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (execution.get("signal_id"))
@@ -1383,8 +1394,9 @@ class PonchBot:
                 f"Qty: {float(execution.get('qty', 0) or 0):.6f}",
             ]
             block = (
-                f"\n\n{header_block}\n"
-                f"Position ID:\n<pre>{signal_id or 'N/A'}</pre>\n"
+                f"\n\nThis position is currently open.\n"
+                f"<pre>{header_block}</pre>\n"
+                f"Here is the position ID:\n<pre>{signal_id or 'N/A'}</pre>\n"
                 f"<pre>{chr(10).join(detail_lines)}</pre>"
             )
             blocks.append(block)
@@ -1408,9 +1420,9 @@ class PonchBot:
             f"Qty: {float(execution.get('qty', 0) or 0):.6f}",
         ])
         answer = (
-            f"{title}\n"
-            f"This is your {sig_type} {side} on {tf}.\n"
-            f"Position ID:\n<pre>{signal_id or 'N/A'}</pre>\n"
+            f"I found the position you asked about.\n"
+            f"It is your {sig_type} {side} on {tf}.\n"
+            f"Here is the position ID:\n<pre>{signal_id or 'N/A'}</pre>\n"
             f"<pre>{details_block}</pre>"
         )
         self._send_private_execution_answer(answer)
@@ -1467,14 +1479,18 @@ class PonchBot:
         side = sig.get("side")
         signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (((sig.get("execution") or {}).get("signal_id")))
         if signal_id:
-            lines.append("Position ID:")
+            lines.append("Here is the position ID:")
             lines.append(f"<pre>{signal_id}</pre>")
+        detail_lines = []
         if tf or sig_type or side:
-            lines.append(f"{sig_type or 'Signal'} {side or 'N/A'} [{tf or 'N/A'}]")
+            detail_lines.append(f"{sig_type or 'Signal'} {side or 'N/A'} [{tf or 'N/A'}]")
         if sig.get("entry") is not None:
-            lines.append(f"Entry: {float(sig.get('entry') or 0):.2f}")
-            lines.append(f"SL: {self._format_live_sl_value(sig)}")
-            lines.append(self._format_active_tp_line(sig))
+            detail_lines.append(f"Entry: {float(sig.get('entry') or 0):.2f}")
+            detail_lines.append(f"SL: {self._format_live_sl_value(sig)}")
+            detail_lines.append(self._format_active_tp_line(sig))
+        if detail_lines:
+            lines.append("Here are the current trade details:")
+            lines.append("<pre>" + "\n".join(detail_lines) + "</pre>")
         if extra:
             lines.extend([str(line) for line in extra if str(line).strip()])
         return lines
@@ -3454,25 +3470,31 @@ class PonchBot:
                 print(f"  [TRADE] Protection ready: {bool(exec_info.get('protection_ready'))}")
             for warning in exec_info.get("protection_warnings", []) or []:
                 print(f"  [TRADE] Protection warning: {warning}")
-        notice_lines = self._format_execution_lines(
-            sig_obj,
-            extra=[
-                f"Exchange status: {'accepted' if result.accepted else 'blocked'}",
-                f"Result: {result.message}",
-                f"Free balance: {float(details.get('balance_available', 0) or 0):.2f}" if "balance_available" in details else None,
-                f"Risk budget: {float(details.get('risk_budget_usd', 0) or 0):.2f}" if "risk_budget_usd" in details else None,
-                f"Order size: {float(details.get('qty', 0) or 0):.6f} ({float(details.get('notional', 0) or 0):.4f} notional)" if details else None,
-                f"Bitunix position ID: {details.get('position_id')}" if details.get("position_id") else None,
-                f"TP mode: {', '.join(sorted({str(o.get('kind', 'N/A')) for o in (details.get('tp_orders') or [])}))}" if details.get("tp_orders") else None,
-            ] + list(details.get("protection_warnings", []) or [])
+        summary_lines = [
+            f"{sig_obj.get('type', 'Signal')} {sig_obj.get('side', 'N/A')} [{sig_obj.get('tf', 'N/A')}]",
+            f"Entry: {float(sig_obj.get('entry', 0) or 0):.2f}",
+            f"SL: {self._format_live_sl_value(sig_obj)}",
+            self._format_active_tp_line(sig_obj),
+        ]
+        notice_lines = []
+        signal_id = sig_obj.get("signal_id") or ((sig_obj.get("meta") or {}).get("signal_id")) or (((sig_obj.get("execution") or {}).get("signal_id")))
+        if signal_id:
+            notice_lines.append("Here is the signal ID:")
+            notice_lines.append(f"<pre>{signal_id}</pre>")
+        notice_lines.append("Here is the trade that was sent to Bitunix:")
+        notice_lines.append("<pre>" + "\n".join(summary_lines) + "</pre>")
+        notice_lines.append(
+            f"I opened it successfully. {result.message}"
+            if result.accepted
+            else f"I could not open it. {result.message}"
         )
-        notice_lines = self._format_execution_lines(
-            sig_obj,
-            extra=[
-                f"Done: {result.message}" if result.accepted else f"Could not do it: {result.message}",
-                f"Position ID: {details.get('position_id')}" if details.get("position_id") else None,
-            ] + list(details.get("protection_warnings", []) or [])
-        )
+        if details.get("position_id"):
+            notice_lines.append("Bitunix returned this position ID:")
+            notice_lines.append(f"<pre>{details.get('position_id')}</pre>")
+        warning_lines = [str(w) for w in (details.get("protection_warnings") or []) if str(w).strip()]
+        if warning_lines:
+            notice_lines.append("A few execution details came back with it:")
+            notice_lines.append("<pre>" + "\n".join(warning_lines) + "</pre>")
         self._send_private_execution_notice(
             f"Exchange {status.title()}: {sig_obj.get('type')} {sig_obj.get('side')}",
             notice_lines,
@@ -3513,8 +3535,8 @@ class PonchBot:
             self._format_execution_lines(
                 sig_obj,
                 extra=[
-                    f"Done: {result.message}",
-                    f"New stop: {float(result.payload.get('sl_moved_to') or 0):.2f}" if (result.payload or {}).get("sl_moved_to") is not None else None,
+                    f"I updated it. {result.message}",
+                    f"The new stop is {float(result.payload.get('sl_moved_to') or 0):.2f}." if (result.payload or {}).get("sl_moved_to") is not None else None,
                 ],
             ),
         )
