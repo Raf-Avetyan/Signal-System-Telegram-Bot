@@ -10,6 +10,7 @@ import traceback
 from datetime import datetime, timezone, timedelta
 import json
 import re
+import html
 
 from config import (
     SYMBOL, SIGNAL_TIMEFRAMES, POLL_INTERVAL,
@@ -256,11 +257,54 @@ class PonchBot:
         if body_lines:
             tg.send("\n".join(body_lines), chat_id=exec_chat, parse_mode="HTML")
 
+    def _format_private_answer_for_telegram(self, text):
+        answer = str(text or "").strip()
+        if not answer:
+            return ""
+        if "<pre>" in answer or "<code>" in answer or "<b>" in answer or "<i>" in answer:
+            return answer
+
+        lines = answer.splitlines()
+        rendered = []
+        markdown_block = []
+
+        def _clean_markdown_line(line):
+            cleaned = str(line or "").rstrip()
+            cleaned = re.sub(r"^\s*[*-]\s*", "", cleaned)
+            cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", cleaned)
+            cleaned = cleaned.replace("`", "")
+            return cleaned.strip()
+
+        def _flush_markdown_block():
+            nonlocal markdown_block
+            if not markdown_block:
+                return
+            block_text = "\n".join(_clean_markdown_line(line) for line in markdown_block if str(line).strip())
+            if block_text.strip():
+                rendered.append(f"<pre>{html.escape(block_text)}</pre>")
+            markdown_block = []
+
+        for raw_line in lines:
+            line = str(raw_line or "").rstrip()
+            stripped = line.strip()
+            is_markdownish = bool(re.match(r"^\s*[*-]\s+", line)) or ("**" in line)
+            if is_markdownish:
+                markdown_block.append(line)
+                continue
+            _flush_markdown_block()
+            if stripped:
+                rendered.append(html.escape(line))
+            else:
+                rendered.append("")
+
+        _flush_markdown_block()
+        return "\n".join(rendered).strip()
+
     def _send_private_execution_answer(self, text):
         exec_chat = self._execution_chat_id()
         if not exec_chat:
             return
-        answer = str(text or "").strip()
+        answer = self._format_private_answer_for_telegram(text)
         if not answer:
             return
         tg.send(answer, chat_id=exec_chat, parse_mode="HTML")
@@ -391,6 +435,8 @@ class PonchBot:
 
     def _build_gemini_trade_context(self):
         self._refresh_private_execution_state()
+        now = datetime.now(timezone.utc)
+        self._refresh_live_news_events(now)
         lines = ["Active exchange positions:"]
         active = self._active_execution_signals()
         if not active:
@@ -419,7 +465,37 @@ class PonchBot:
             lines.append("none")
         for sig in pending[:8]:
             lines.append(f"- {self._control_signal_label(sig)} status={sig.get('status')}")
+        lines.append("Live news status:")
+        lines.append(f"- {self._format_news_status_line(now)}")
+        upcoming = [event for event in self.live_news_events if event.get("datetime") and event["datetime"] >= now]
+        if upcoming:
+            next_event = upcoming[0]
+            dt_text = next_event["datetime"].astimezone(timezone.utc).strftime("%d %b %H:%M UTC")
+            lines.append(
+                f"- Next event: {next_event.get('event', 'High Impact News')} at {dt_text} "
+                f"(importance {next_event.get('importance', 'n/a')}, source Trading Economics)"
+            )
+        else:
+            lines.append("- No upcoming high-impact live events are currently loaded.")
         return "\n".join(lines)
+
+    def _answer_news_question(self, text: str) -> bool:
+        lower = str(text or "").lower()
+        if not any(term in lower for term in ["news", "fomc", "cpi", "nfp", "pce", "event", "economic", "holiday"]):
+            return False
+        now = datetime.now(timezone.utc)
+        self._refresh_live_news_events(now)
+        status_line = self._format_news_status_line(now)
+        answer_lines = [status_line]
+        upcoming = [event for event in self.live_news_events if event.get("datetime") and event["datetime"] >= now]
+        if upcoming:
+            next_event = upcoming[0]
+            dt_text = next_event["datetime"].astimezone(timezone.utc).strftime("%d %b %H:%M UTC")
+            answer_lines.append(
+                f"The next one I can see is {next_event.get('event', 'High Impact News')} at {dt_text}."
+            )
+        self._send_private_execution_answer(" ".join(answer_lines))
+        return True
 
     def _resolve_signal_for_action(self, payload, *, allow_unexecuted=False):
         signal_id = str(payload.get("signal_id") or "").strip()
@@ -932,6 +1008,9 @@ class PonchBot:
             self._send_open_positions_snapshot("Open Positions")
             return True
 
+        if self._answer_news_question(text):
+            return True
+
         pending_phrases = [
             "pending signals", "show pending signals", "what signals are pending",
             "show waiting signals", "waiting signals", "pending setups"
@@ -951,7 +1030,11 @@ class PonchBot:
 
         status_phrases = [
             "account status", "show account status", "show live status",
-            "balance summary", "show balance summary", "startup check"
+            "balance summary", "show balance summary", "startup check",
+            "wallet info", "my wallet", "wallet balance", "wallet information",
+            "account info", "account information", "my account", "my balance",
+            "show wallet", "show my wallet", "show balance", "show my balance",
+            "equity", "wallet", "balance"
         ]
         if any(phrase in lower for phrase in status_phrases):
             self._send_execution_status_snapshot(datetime.now(timezone.utc), title="Bitunix Live Status")
