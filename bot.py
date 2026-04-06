@@ -1232,9 +1232,12 @@ class PonchBot:
         lower = text.lower()
         chat_id = str((message.get("chat") or {}).get("id") or "")
         position_phrases = [
-            "all open positions", "open positions", "show positions", "show my positions",
-            "give me positions", "what positions", "what are open", "which positions are open",
-            "list positions", "show all trades", "give me all trades"
+            "all open positions", "all open position", "open positions", "open position",
+            "show positions", "show position", "show my positions", "show my position",
+            "give me positions", "give me position", "what positions", "what position",
+            "what are open", "which positions are open", "which position is open",
+            "do i have any open positions", "do i have any open position",
+            "list positions", "list position", "show all trades", "give me all trades"
         ]
         if any(phrase in lower for phrase in position_phrases):
             self._send_open_positions_snapshot("Open Positions")
