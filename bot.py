@@ -157,6 +157,7 @@ class PonchBot:
         self.last_live_news_error = None
         self.live_exchange_context_cache = None
         self.live_exchange_context_cache_ts = 0.0
+        self.live_exchange_history_cache = {}
         self.last_session_update = time.time()
         self.last_daily_update   = time.time()
         self.last_update_id      = state.get("last_update_id", 0)
@@ -672,6 +673,166 @@ class PonchBot:
         self.live_exchange_context_cache_ts = time.time()
         return text
 
+    def _get_live_history_snapshot(self, *, start_dt=None, end_dt=None, force=False):
+        end_dt = end_dt.astimezone(timezone.utc) if isinstance(end_dt, datetime) else datetime.now(timezone.utc)
+        start_dt = start_dt.astimezone(timezone.utc) if isinstance(start_dt, datetime) else (end_dt - timedelta(days=7))
+        key = (
+            int(start_dt.timestamp()),
+            int(end_dt.timestamp()),
+        )
+        cached = self.live_exchange_history_cache.get(key) or {}
+        cache_age = time.time() - float(cached.get("ts") or 0)
+        if not force and cached and cache_age < 15:
+            return cached.get("payload") or {}
+
+        payload = self.trade_executor.get_history_snapshot(
+            start_time=int(start_dt.timestamp() * 1000),
+            end_time=int(end_dt.timestamp() * 1000),
+        )
+        self.live_exchange_history_cache[key] = {
+            "ts": time.time(),
+            "payload": payload,
+        }
+        if len(self.live_exchange_history_cache) > 4:
+            oldest_key = min(self.live_exchange_history_cache.keys(), key=lambda item: self.live_exchange_history_cache[item].get("ts", 0))
+            if oldest_key != key:
+                self.live_exchange_history_cache.pop(oldest_key, None)
+        return payload
+
+    def _build_live_history_context(self, now=None, force=False):
+        now = now or datetime.now(timezone.utc)
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        history = self._get_live_history_snapshot(start_dt=day_start, end_dt=now, force=force)
+        summary = history.get("summary") or {}
+        lines = ["Bitunix history since UTC midnight:"]
+        if history.get("errors"):
+            lines.extend(f"- {err}" for err in (history.get("errors") or [])[:4])
+        if not any(int(summary.get(key, 0) or 0) for key in ("orders_total", "trades_total", "positions_total", "tpsl_total")):
+            lines.append("- no history rows returned yet")
+            return "\n".join(lines)
+
+        lines.append(
+            f"- history_orders={int(summary.get('orders_total', 0) or 0)} "
+            f"filled={int(summary.get('orders_filled', 0) or 0)} "
+            f"cancelled={int(summary.get('orders_cancelled', 0) or 0)}"
+        )
+        lines.append(
+            f"- history_trades={int(summary.get('trades_total', 0) or 0)} "
+            f"realized_pnl={float(summary.get('trades_realized_pnl', 0.0) or 0.0):+.4f} "
+            f"fees={float(summary.get('trades_fees', 0.0) or 0.0):+.4f}"
+        )
+        lines.append(
+            f"- history_positions={int(summary.get('positions_total', 0) or 0)} "
+            f"realized_pnl={float(summary.get('positions_realized_pnl', 0.0) or 0.0):+.4f} "
+            f"fees={float(summary.get('positions_fees', 0.0) or 0.0):+.4f} "
+            f"funding={float(summary.get('positions_funding', 0.0) or 0.0):+.4f}"
+        )
+        lines.append(
+            f"- history_tpsl={int(summary.get('tpsl_total', 0) or 0)} "
+            f"tp_rows={int(summary.get('tpsl_tp_rows', 0) or 0)} "
+            f"sl_rows={int(summary.get('tpsl_sl_rows', 0) or 0)}"
+        )
+        symbols = summary.get("symbols") or []
+        if symbols:
+            lines.append(f"- history_symbols={','.join(symbols[:10])}")
+
+        recent_positions = list(history.get("positions") or [])[:5]
+        if recent_positions:
+            lines.append("Recent closed positions:")
+            for row in recent_positions:
+                symbol = str(row.get("symbol") or "n/a").upper()
+                side = str(row.get("side") or row.get("positionSide") or "n/a").upper()
+                realized = self._safe_float_text(
+                    row.get("realizedPnl") or row.get("realizedPNL") or row.get("closeProfit") or row.get("profit") or row.get("pnl"),
+                    4,
+                )
+                fee = self._safe_float_text(
+                    row.get("fee") or row.get("closeFee") or row.get("tradingFee") or row.get("tradeFee"),
+                    4,
+                )
+                close_price = self._safe_float_text(
+                    row.get("closePrice") or row.get("avgClosePrice") or row.get("markPrice"),
+                    2,
+                )
+                lines.append(
+                    f"- symbol={symbol} side={side} realized={realized} fee={fee} close_price={close_price}"
+                )
+
+        recent_trades = list(history.get("trades") or [])[:5]
+        if recent_trades:
+            lines.append("Recent filled trades:")
+            for row in recent_trades:
+                symbol = str(row.get("symbol") or "n/a").upper()
+                side = str(row.get("side") or row.get("tradeSide") or "n/a").upper()
+                realized = self._safe_float_text(
+                    row.get("realizedPnl") or row.get("realizedPNL") or row.get("profit") or row.get("pnl"),
+                    4,
+                )
+                fee = self._safe_float_text(
+                    row.get("fee") or row.get("tradeFee") or row.get("makerFee") or row.get("takerFee"),
+                    4,
+                )
+                price = self._safe_float_text(
+                    row.get("price") or row.get("avgPrice") or row.get("tradePrice"),
+                    2,
+                )
+                lines.append(
+                    f"- symbol={symbol} side={side} price={price} realized={realized} fee={fee}"
+                )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _assistant_answer_is_weak(answer):
+        text = str(answer or "").strip().lower()
+        if not text:
+            return True
+        weak_markers = [
+            "i don't have access",
+            "i do not have access",
+            "i can only see",
+            "i only see",
+            "i don't have a",
+            "i do not have a",
+            "i can't access",
+            "i cannot access",
+            "not available in this view",
+            "i'd need to know",
+            "i would need to know",
+            "user message does not correspond",
+        ]
+        return any(marker in text for marker in weak_markers)
+
+    def _ask_private_chat_question(self, user_text, *, context_text=None):
+        context = context_text or self._build_gemini_trade_context()
+        answer = ask_gemini_trade_question(
+            GEMINI_API_KEY,
+            GEMINI_MODEL,
+            user_text,
+            context,
+        )
+        if not self._assistant_answer_is_weak(answer):
+            return answer
+
+        stronger_context = context
+        try:
+            stronger_context = self._build_gemini_trade_context() + "\n\n" + self._build_live_exchange_context(force=True)
+        except Exception:
+            stronger_context = context
+
+        retry_prompt = (
+            "Please answer from the live Bitunix and bot context if possible. "
+            "Do not say you lack access if the context already contains exchange state. "
+            "If exact history is not available, give the closest truthful answer or estimate and say what it is based on.\n\n"
+            f"User question: {user_text}"
+        )
+        retry = ask_gemini_trade_question(
+            GEMINI_API_KEY,
+            GEMINI_MODEL,
+            retry_prompt,
+            stronger_context,
+        )
+        return retry or answer
+
     def _build_gemini_trade_context(self):
         self._refresh_private_execution_state()
         now = datetime.now(timezone.utc)
@@ -704,6 +865,24 @@ class PonchBot:
             lines.append("none")
         for sig in pending[:8]:
             lines.append(f"- {self._control_signal_label(sig)} status={sig.get('status')}")
+        today_metrics = self._daily_trade_metrics(now)
+        lines.append("Today's tracker summary (UTC):")
+        lines.append(
+            f"- opened={int(today_metrics.get('opened_today', 0) or 0)} "
+            f"closed={int(today_metrics.get('closed_today', 0) or 0)} "
+            f"wins={int(today_metrics.get('wins', 0) or 0)} "
+            f"losses={int(today_metrics.get('losses', 0) or 0)} "
+            f"breakeven={int(today_metrics.get('breakeven', 0) or 0)} "
+            f"realized_r={float(today_metrics.get('realized_r', 0.0) or 0.0):+.2f}R"
+        )
+        if int(today_metrics.get("estimated_closed_count", 0) or 0) > 0:
+            lines.append(
+                f"- estimated_realized_usd={float(today_metrics.get('realized_est_usd', 0.0) or 0.0):+.4f} "
+                f"from {int(today_metrics.get('estimated_closed_count', 0) or 0)} closed trade(s)"
+            )
+        lines.append(
+            f"- current_open_unrealized_usd={float(today_metrics.get('open_unrealized_usd', 0.0) or 0.0):+.4f}"
+        )
         lines.append("Live news status:")
         lines.append(f"- {self._format_news_status_line(now)}")
         upcoming = [event for event in self.live_news_events if event.get("datetime") and event["datetime"] >= now]
@@ -718,6 +897,8 @@ class PonchBot:
             lines.append("- No upcoming high-impact live events are currently loaded.")
         lines.append("")
         lines.append(self._build_live_exchange_context(now=now))
+        lines.append("")
+        lines.append(self._build_live_history_context(now=now))
         return "\n".join(lines)
 
     def _answer_news_question(self, text: str) -> bool:
@@ -1187,31 +1368,16 @@ class PonchBot:
         action_type = str(action.get("action") or "").lower()
         if action_type == "status":
             reason_text = str(action.get("reason") or "").lower()
-            wants_balance_only = any(
-                phrase in reason_text for phrase in [
-                    "what is my balance", "balance", "wallet balance", "equity", "wallet"
-                ]
-            ) and not any(
-                phrase in reason_text for phrase in [
-                    "account status", "live status", "startup check", "account information", "wallet information"
-                ]
-            )
-            wants_open_positions_only = any(
-                phrase in reason_text for phrase in [
-                    "open positions", "open position", "do i have any open"
-                ]
-            )
-            wants_account_status = any(
-                phrase in reason_text for phrase in [
-                    "account status", "balance", "live status", "startup check", "wallet", "equity"
-                ]
-            )
-            if wants_balance_only:
+            if self._looks_like_balance_only_text(reason_text):
                 self._send_simple_balance_answer()
                 return True
-            if wants_open_positions_only:
+            if self._looks_like_open_positions_text(reason_text):
                 self._send_simple_open_positions_answer()
                 return True
+            if self._looks_like_account_mode_text(reason_text):
+                self._send_simple_account_mode_answer()
+                return True
+            wants_account_status = self._looks_like_account_status_text(reason_text)
             sig = None if wants_account_status else self._resolve_signal_for_action(action, allow_unexecuted=False)
             if sig:
                 self._remember_private_focus(sig=sig)
@@ -1406,15 +1572,7 @@ class PonchBot:
 
         lower = text.lower()
         chat_id = str((message.get("chat") or {}).get("id") or "")
-        position_phrases = [
-            "all open positions", "all open position", "open positions", "open position",
-            "show positions", "show position", "show my positions", "show my position",
-            "give me positions", "give me position", "what positions", "what position",
-            "what are open", "which positions are open", "which position is open",
-            "do i have any open positions", "do i have any open position",
-            "list positions", "list position", "show all trades", "give me all trades"
-        ]
-        if any(phrase in lower for phrase in position_phrases):
+        if self._looks_like_open_positions_text(lower):
             self._send_open_positions_snapshot("Open Positions")
             return True
 
@@ -1448,25 +1606,20 @@ class PonchBot:
             self._send_today_trade_count_answer()
             return True
 
-        balance_phrases = [
-            "what is my balance", "what's my balance", "my balance", "show my balance",
-            "show balance", "wallet balance", "my wallet balance", "how much balance",
-            "how much money do i have", "what is my wallet", "what's in my wallet",
-            "equity"
-        ]
-        if any(phrase in lower for phrase in balance_phrases):
+        today_pnl_words = ["gain", "gained", "lose", "lost", "loss", "profit", "pnl", "made", "earned", "result"]
+        if "today" in lower and any(word in lower for word in today_pnl_words):
+            self._send_today_pnl_answer()
+            return True
+
+        if self._looks_like_balance_only_text(lower):
             self._send_simple_balance_answer()
             return True
 
-        status_phrases = [
-            "account status", "show account status", "show live status",
-            "balance summary", "show balance summary", "startup check",
-            "wallet info", "my wallet", "wallet balance", "wallet information",
-            "account info", "account information", "my account", "my balance",
-            "show wallet", "show my wallet", "show balance", "show my balance",
-            "equity", "wallet", "balance"
-        ]
-        if any(phrase in lower for phrase in status_phrases):
+        if self._looks_like_account_mode_text(lower):
+            self._send_simple_account_mode_answer()
+            return True
+
+        if self._looks_like_account_status_text(lower):
             self._send_execution_status_snapshot(datetime.now(timezone.utc), title="Bitunix Live Status")
             return True
 
@@ -1617,12 +1770,7 @@ class PonchBot:
                     )
                     parsed = self._apply_context_to_action(parsed or {}, combined_text) if parsed else parsed
                     if not parsed:
-                        answer = ask_gemini_trade_question(
-                            GEMINI_API_KEY,
-                            GEMINI_MODEL,
-                            combined_text,
-                            self._build_gemini_trade_context(),
-                        )
+                        answer = self._ask_private_chat_question(combined_text)
                         if answer and "supported action" not in answer.lower():
                             self._send_private_execution_answer(answer)
                         else:
@@ -1630,12 +1778,7 @@ class PonchBot:
                         return True
                     action_type = str(parsed.get("action") or "unsupported").lower()
                     if action_type == "unsupported":
-                        answer = ask_gemini_trade_question(
-                            GEMINI_API_KEY,
-                            GEMINI_MODEL,
-                            combined_text,
-                            self._build_gemini_trade_context(),
-                        )
+                        answer = self._ask_private_chat_question(combined_text)
                         if answer and "supported action" not in answer.lower():
                             self._send_private_execution_answer(answer)
                         else:
@@ -1700,12 +1843,7 @@ class PonchBot:
         if not parsed:
             answer = None
             try:
-                answer = ask_gemini_trade_question(
-                    GEMINI_API_KEY,
-                    GEMINI_MODEL,
-                    text,
-                    self._build_gemini_trade_context(),
-                )
+                answer = self._ask_private_chat_question(text)
             except Exception:
                 answer = None
             if answer and "supported action" not in answer.lower():
@@ -1721,12 +1859,7 @@ class PonchBot:
                 self._remember_exec_suggestion(inferred)
             answer = None
             try:
-                answer = ask_gemini_trade_question(
-                    GEMINI_API_KEY,
-                    GEMINI_MODEL,
-                    text,
-                    self._build_gemini_trade_context(),
-                )
+                answer = self._ask_private_chat_question(text)
             except Exception:
                 answer = None
             if answer and "supported action" not in answer.lower():
@@ -1768,6 +1901,40 @@ class PonchBot:
         if used <= 0 and total > 0:
             used = max(0.0, total - free)
         return f"Your balance is {total:.2f} total, with {free:.2f} free and {used:.2f} tied up in positions."
+
+    def _looks_like_balance_only_text(self, text):
+        lower = str(text or "").lower()
+        has_balance_signal = any(term in lower for term in [
+            "balance", "wallet balance", "equity", "wallet", "how much money do i have"
+        ])
+        wants_full_status = any(term in lower for term in [
+            "account status", "live status", "startup check", "balance summary",
+            "wallet information", "account information", "account info", "full status", "summary"
+        ])
+        return has_balance_signal and not wants_full_status
+
+    def _looks_like_open_positions_text(self, text):
+        lower = str(text or "").lower()
+        return any(term in lower for term in [
+            "open positions", "open position", "do i have any open", "which position is open",
+            "which positions are open", "show my positions", "show my position", "list positions", "list position"
+        ])
+
+    def _looks_like_account_mode_text(self, text):
+        lower = str(text or "").lower()
+        return any(term in lower for term in [
+            "margin mode", "what mode", "what is my mode", "leverage", "what leverage",
+            "account mode", "cross mode", "isolated mode", "cross or isolated"
+        ]) and not any(term in lower for term in ["position mode"])
+
+    def _looks_like_account_status_text(self, text):
+        lower = str(text or "").lower()
+        return any(term in lower for term in [
+            "account status", "show account status", "show live status",
+            "balance summary", "show balance summary", "startup check",
+            "wallet information", "account information", "account info",
+            "full status", "full account", "full snapshot", "live snapshot"
+        ])
 
     def _format_news_status_line(self, now):
         if not NEWS_FILTER_ENABLED:
@@ -1843,6 +2010,14 @@ class PonchBot:
             f"You currently have {open_positions} open position{'s' if open_positions != 1 else ''}."
         )
 
+    def _send_simple_account_mode_answer(self):
+        trade_check, _, _ = self._build_trade_check_bundle()
+        margin_mode = str(trade_check.get("margin_mode") or "N/A")
+        leverage = int(trade_check.get("leverage", 0) or 0)
+        self._send_private_execution_answer(
+            f"Your account is in {margin_mode} mode at {leverage}x right now."
+        )
+
     def _send_today_trade_count_answer(self):
         now_utc = datetime.now(timezone.utc)
         opened_today = int(self.tracker.count_signals_for_day(now_utc=now_utc) or 0)
@@ -1862,6 +2037,124 @@ class PonchBot:
             f"{still_open_today} {'are' if still_open_today != 1 else 'is'} still open, "
             f"and {closed_today} {'have' if closed_today != 1 else 'has'} already closed."
         )
+
+    def _daily_trade_metrics(self, now_utc=None):
+        now_utc = now_utc.astimezone(timezone.utc) if now_utc else datetime.now(timezone.utc)
+        day_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        opened_today = int(self.tracker.count_signals_for_day(now_utc=now_utc) or 0)
+        closed_today = 0
+        wins = 0
+        losses = 0
+        breakeven = 0
+        realized_r = 0.0
+        realized_est_usd = 0.0
+        estimated_closed_count = 0
+        missing_risk_count = 0
+
+        for sig in self.tracker.signals:
+            closed_at = self.tracker._parse_iso_utc(sig.get("closed_at"))
+            if not closed_at or closed_at < day_start or closed_at > now_utc:
+                continue
+            closed_today += 1
+            outcome, r_mult = self.tracker._metric_outcome(sig)
+            realized_r += float(r_mult or 0.0)
+            if outcome == "wins":
+                wins += 1
+            elif outcome == "losses":
+                losses += 1
+            elif outcome == "breakeven":
+                breakeven += 1
+            execution = sig.get("execution") or {}
+            try:
+                risk_budget_usd = float(execution.get("risk_budget_usd") or 0)
+            except Exception:
+                risk_budget_usd = 0.0
+            if risk_budget_usd > 0:
+                realized_est_usd += float(r_mult or 0.0) * risk_budget_usd
+                estimated_closed_count += 1
+            else:
+                missing_risk_count += 1
+
+        open_unrealized_usd = 0.0
+        active_positions = 0
+        for sig in self._active_execution_signals():
+            metrics = self._position_live_metrics(sig)
+            if not metrics:
+                continue
+            open_unrealized_usd += float(metrics.get("pnl_usd") or 0.0)
+            active_positions += 1
+
+        return {
+            "opened_today": opened_today,
+            "closed_today": closed_today,
+            "wins": wins,
+            "losses": losses,
+            "breakeven": breakeven,
+            "realized_r": realized_r,
+            "realized_est_usd": realized_est_usd,
+            "estimated_closed_count": estimated_closed_count,
+            "missing_risk_count": missing_risk_count,
+            "open_unrealized_usd": open_unrealized_usd,
+            "active_positions": active_positions,
+        }
+
+    def _send_today_pnl_answer(self):
+        now_utc = datetime.now(timezone.utc)
+        day_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        exchange_history = self._get_live_history_snapshot(start_dt=day_start, end_dt=now_utc)
+        history_summary = exchange_history.get("summary") or {}
+        stats = self._daily_trade_metrics(now_utc)
+        opened_today = int(stats.get("opened_today", 0) or 0)
+        closed_today = int(stats.get("closed_today", 0) or 0)
+        active_positions = int(stats.get("active_positions", 0) or 0)
+        if opened_today <= 0 and closed_today <= 0 and active_positions <= 0:
+            self._send_private_execution_answer("So far today in UTC, I do not see any trades or open positions, so there is no gain or loss to report.")
+            return
+
+        parts = []
+        exchange_realized = float(history_summary.get("positions_realized_pnl", 0.0) or 0.0)
+        exchange_fees = float(history_summary.get("positions_fees", 0.0) or 0.0)
+        exchange_funding = float(history_summary.get("positions_funding", 0.0) or 0.0)
+        exchange_positions_total = int(history_summary.get("positions_total", 0) or 0)
+        if exchange_positions_total > 0:
+            net_exchange = exchange_realized - abs(exchange_fees) + exchange_funding
+            parts.append(
+                f"So far today in UTC, Bitunix history shows about {net_exchange:+.4f} USDT net on {exchange_positions_total} closed position{'s' if exchange_positions_total != 1 else ''}."
+            )
+            if abs(exchange_realized) > 0 or abs(exchange_fees) > 0 or abs(exchange_funding) > 0:
+                parts.append(
+                    f"That comes from realized PnL {exchange_realized:+.4f}, fees {exchange_fees:+.4f}, and funding {exchange_funding:+.4f}."
+                )
+        if closed_today > 0:
+            realized_r = float(stats.get("realized_r", 0.0) or 0.0)
+            est_closed = int(stats.get("estimated_closed_count", 0) or 0)
+            est_usd = float(stats.get("realized_est_usd", 0.0) or 0.0)
+            wins = int(stats.get("wins", 0) or 0)
+            losses = int(stats.get("losses", 0) or 0)
+            breakeven = int(stats.get("breakeven", 0) or 0)
+            if exchange_positions_total <= 0 and est_closed > 0:
+                parts.append(
+                    f"So far today in UTC, your closed trades are about {est_usd:+.4f} USDT, which is {realized_r:+.2f}R across {closed_today} closed trade{'s' if closed_today != 1 else ''}."
+                )
+            elif exchange_positions_total <= 0:
+                parts.append(
+                    f"So far today in UTC, your closed trades are {realized_r:+.2f}R across {closed_today} closed trade{'s' if closed_today != 1 else ''}."
+                )
+            parts.append(
+                f"That includes {wins} win{'s' if wins != 1 else ''}, {losses} loss{'es' if losses != 1 else ''}, and {breakeven} breakeven trade{'s' if breakeven != 1 else ''}."
+            )
+        else:
+            parts.append("You have not closed any trades yet today in UTC.")
+
+        if active_positions > 0:
+            parts.append(
+                f"Right now your open position{'s' if active_positions != 1 else ''} are showing {float(stats.get('open_unrealized_usd', 0.0) or 0.0):+.4f} USDT unrealized."
+            )
+
+        if int(stats.get("missing_risk_count", 0) or 0) > 0:
+            parts.append("For some older trades I can estimate today's result in R more reliably than in exact USD.")
+
+        self._send_private_execution_answer(" ".join(parts))
 
     def _send_execution_status_snapshot(self, now=None, title="Bitunix Noon Check"):
         if not self._execution_chat_id():

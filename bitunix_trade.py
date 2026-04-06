@@ -70,6 +70,25 @@ class BitunixFuturesClient:
     def is_configured(self) -> bool:
         return bool(self.api_key and self.api_secret)
 
+    def call_private(
+        self,
+        method: str,
+        path: str,
+        *,
+        payload: Optional[Dict[str, Any]] = None,
+        query: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        return self._request(method, path, payload=payload, query=query)
+
+    def call_public(
+        self,
+        method: str,
+        path: str,
+        *,
+        query: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        return self._public_request(method, path, query=query)
+
     def _sign(self, params: Dict[str, Any]) -> str:
         raise NotImplementedError("Use _build_signature() with separated query/body parts.")
 
@@ -162,6 +181,26 @@ class BitunixFuturesClient:
     def get_single_account(self, margin_coin: str = BITUNIX_MARGIN_COIN) -> Dict[str, Any]:
         return self._request("GET", "/api/v1/futures/account", query={"marginCoin": margin_coin})
 
+    def adjust_position_margin(
+        self,
+        symbol: str,
+        amount: float,
+        *,
+        margin_coin: str = BITUNIX_MARGIN_COIN,
+        side: Optional[str] = None,
+        position_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "symbol": symbol,
+            "marginCoin": margin_coin,
+            "amount": self._fmt_num(amount),
+        }
+        if side:
+            payload["side"] = str(side).upper()
+        if position_id:
+            payload["positionId"] = str(position_id)
+        return self._request("POST", "/api/v1/futures/account/adjust_position_margin", payload=payload)
+
     def change_leverage(self, symbol: str, leverage: int, margin_coin: str = BITUNIX_MARGIN_COIN) -> Dict[str, Any]:
         return self._request(
             "POST",
@@ -184,6 +223,13 @@ class BitunixFuturesClient:
             },
         )
 
+    def change_position_mode(self, position_mode: str) -> Dict[str, Any]:
+        return self._request(
+            "POST",
+            "/api/v1/futures/account/change_position_mode",
+            payload={"positionMode": str(position_mode).upper()},
+        )
+
     def get_leverage_margin_mode(self, symbol: str, margin_coin: str = BITUNIX_MARGIN_COIN) -> Dict[str, Any]:
         return self._request(
             "GET",
@@ -193,6 +239,62 @@ class BitunixFuturesClient:
 
     def get_position_tiers(self, symbol: str) -> Dict[str, Any]:
         return self._request("GET", "/api/v1/futures/position/get_position_tiers", query={"symbol": symbol})
+
+    def get_depth(self, symbol: str, limit: Optional[str] = None) -> Dict[str, Any]:
+        query: Dict[str, Any] = {"symbol": symbol}
+        if limit:
+            query["limit"] = str(limit)
+        return self._public_request("GET", "/api/v1/futures/market/depth", query=query)
+
+    def get_funding_rate(self, symbol: str) -> Dict[str, Any]:
+        return self._public_request("GET", "/api/v1/futures/market/funding_rate", query={"symbol": symbol})
+
+    def get_funding_rate_batch(self) -> Dict[str, Any]:
+        return self._public_request("GET", "/api/v1/futures/market/funding_rate/batch")
+
+    def get_funding_rate_history(
+        self,
+        symbol: str,
+        *,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        query: Dict[str, Any] = {"symbol": symbol}
+        if start_time is not None:
+            query["starTime"] = int(start_time)
+        if end_time is not None:
+            query["endTime"] = int(end_time)
+        if limit is not None:
+            query["limit"] = int(limit)
+        return self._public_request("GET", "/api/v1/futures/market/get_funding_rate_history", query=query)
+
+    def get_kline(
+        self,
+        symbol: str,
+        interval: str,
+        *,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: Optional[int] = None,
+        price_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        query: Dict[str, Any] = {"symbol": symbol, "interval": interval}
+        if start_time is not None:
+            query["startTime"] = int(start_time)
+        if end_time is not None:
+            query["endTime"] = int(end_time)
+        if limit is not None:
+            query["limit"] = int(limit)
+        if price_type:
+            query["type"] = str(price_type).upper()
+        return self._public_request("GET", "/api/v1/futures/market/kline", query=query)
+
+    def get_tickers(self, symbols: Optional[str] = None) -> Dict[str, Any]:
+        query: Dict[str, Any] = {}
+        if symbols:
+            query["symbols"] = symbols
+        return self._public_request("GET", "/api/v1/futures/market/tickers", query=query)
 
     def place_order(
         self,
@@ -228,6 +330,13 @@ class BitunixFuturesClient:
             if effect:
                 payload["effect"] = effect
         return self._request("POST", "/api/v1/futures/trade/place_order", payload=payload)
+
+    def batch_order(self, symbol: str, order_list: List[Dict[str, Any]]) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "symbol": symbol,
+            "orderList": order_list,
+        }
+        return self._request("POST", "/api/v1/futures/trade/batch_order", payload=payload)
 
     def get_pending_positions(self, symbol: Optional[str] = None) -> Dict[str, Any]:
         query: Dict[str, Any] = {}
@@ -310,6 +419,73 @@ class BitunixFuturesClient:
             query["symbol"] = symbol
         return self._request("GET", "/api/v1/futures/trade/get_pending_orders", query=query)
 
+    def get_history_orders(
+        self,
+        symbol: Optional[str] = None,
+        *,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        query: Dict[str, Any] = {}
+        if symbol:
+            query["symbol"] = symbol
+        if start_time is not None:
+            query["startTime"] = int(start_time)
+        if end_time is not None:
+            query["endTime"] = int(end_time)
+        return self._request("GET", "/api/v1/futures/trade/get_history_orders", query=query)
+
+    def get_history_trades(
+        self,
+        symbol: Optional[str] = None,
+        *,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        query: Dict[str, Any] = {}
+        if symbol:
+            query["symbol"] = symbol
+        if start_time is not None:
+            query["startTime"] = int(start_time)
+        if end_time is not None:
+            query["endTime"] = int(end_time)
+        return self._request("GET", "/api/v1/futures/trade/get_history_trades", query=query)
+
+    def get_history_positions(
+        self,
+        symbol: Optional[str] = None,
+        *,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        query: Dict[str, Any] = {}
+        if symbol:
+            query["symbol"] = symbol
+        if start_time is not None:
+            query["startTime"] = int(start_time)
+        if end_time is not None:
+            query["endTime"] = int(end_time)
+        return self._request("GET", "/api/v1/futures/position/get_history_positions", query=query)
+
+    def get_history_tpsl(
+        self,
+        symbol: Optional[str] = None,
+        *,
+        position_id: Optional[str] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        query: Dict[str, Any] = {}
+        if symbol:
+            query["symbol"] = symbol
+        if position_id:
+            query["positionId"] = str(position_id)
+        if start_time is not None:
+            query["startTime"] = int(start_time)
+        if end_time is not None:
+            query["endTime"] = int(end_time)
+        return self._request("GET", "/api/v1/futures/tpsl/get_history_orders", query=query)
+
     def get_trading_pairs(self, symbols: Optional[str] = None) -> Dict[str, Any]:
         query: Dict[str, Any] = {}
         if symbols:
@@ -329,6 +505,40 @@ class BitunixFuturesClient:
             payload["slStopType"] = BITUNIX_TPSL_TRIGGER_TYPE
         return self._request("POST", "/api/v1/futures/tpsl/position/modify_order", payload=payload)
 
+    def modify_tpsl_order(
+        self,
+        order_id: str,
+        *,
+        tp_price: Optional[float] = None,
+        sl_price: Optional[float] = None,
+        tp_qty: Optional[float] = None,
+        sl_qty: Optional[float] = None,
+        tp_order_type: Optional[str] = None,
+        sl_order_type: Optional[str] = None,
+        tp_order_price: Optional[float] = None,
+        sl_order_price: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"orderId": str(order_id)}
+        if tp_price is not None:
+            payload["tpPrice"] = self._fmt_num(tp_price)
+            payload["tpStopType"] = BITUNIX_TPSL_TRIGGER_TYPE
+        if sl_price is not None:
+            payload["slPrice"] = self._fmt_num(sl_price)
+            payload["slStopType"] = BITUNIX_TPSL_TRIGGER_TYPE
+        if tp_qty is not None:
+            payload["tpQty"] = self._fmt_num(tp_qty)
+        if sl_qty is not None:
+            payload["slQty"] = self._fmt_num(sl_qty)
+        if tp_order_type:
+            payload["tpOrderType"] = str(tp_order_type).upper()
+        if sl_order_type:
+            payload["slOrderType"] = str(sl_order_type).upper()
+        if tp_order_price is not None:
+            payload["tpOrderPrice"] = self._fmt_num(tp_order_price)
+        if sl_order_price is not None:
+            payload["slOrderPrice"] = self._fmt_num(sl_order_price)
+        return self._request("POST", "/api/v1/futures/tpsl/modify_order", payload=payload)
+
     def cancel_tpsl(self, symbol: str, order_id: str) -> Dict[str, Any]:
         return self._request("POST", "/api/v1/futures/tpsl/cancel_order", payload={"symbol": symbol, "orderId": str(order_id)})
 
@@ -338,8 +548,58 @@ class BitunixFuturesClient:
             return {"code": "0", "data": {"successList": [], "failureList": []}, "msg": "Nothing to cancel"}
         return self._request("POST", "/api/v1/futures/trade/cancel_orders", payload={"symbol": symbol, "orderList": order_list})
 
+    def cancel_all_orders(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        if symbol:
+            payload["symbol"] = symbol
+        return self._request("POST", "/api/v1/futures/trade/cancel_all_orders", payload=payload)
+
+    def close_all_position(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        if symbol:
+            payload["symbol"] = symbol
+        return self._request("POST", "/api/v1/futures/trade/close_all_position", payload=payload)
+
     def flash_close_position(self, position_id: str) -> Dict[str, Any]:
         return self._request("POST", "/api/v1/futures/trade/flash_close_position", payload={"positionId": str(position_id)})
+
+    def modify_order(
+        self,
+        *,
+        qty: float,
+        price: float,
+        order_id: Optional[str] = None,
+        client_id: Optional[str] = None,
+        tp_price: Optional[float] = None,
+        sl_price: Optional[float] = None,
+        tp_order_type: Optional[str] = None,
+        sl_order_type: Optional[str] = None,
+        tp_order_price: Optional[float] = None,
+        sl_order_price: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "qty": self._fmt_num(qty),
+            "price": self._fmt_num(price),
+        }
+        if order_id:
+            payload["orderId"] = str(order_id)
+        if client_id:
+            payload["clientId"] = str(client_id)
+        if tp_price is not None:
+            payload["tpPrice"] = self._fmt_num(tp_price)
+            payload["tpStopType"] = BITUNIX_TPSL_TRIGGER_TYPE
+        if sl_price is not None:
+            payload["slPrice"] = self._fmt_num(sl_price)
+            payload["slStopType"] = BITUNIX_TPSL_TRIGGER_TYPE
+        if tp_order_type:
+            payload["tpOrderType"] = str(tp_order_type).upper()
+        if sl_order_type:
+            payload["slOrderType"] = str(sl_order_type).upper()
+        if tp_order_price is not None:
+            payload["tpOrderPrice"] = self._fmt_num(tp_order_price)
+        if sl_order_price is not None:
+            payload["slOrderPrice"] = self._fmt_num(sl_order_price)
+        return self._request("POST", "/api/v1/futures/trade/modify_order", payload=payload)
 
     @staticmethod
     def _fmt_num(value: float) -> str:
@@ -401,6 +661,151 @@ class TradeExecutor:
     def status_line(self) -> str:
         self._refresh_state()
         return f"mode={self.mode} enabled={self.enabled} configured={self.client.is_configured()}"
+
+    @staticmethod
+    def _extract_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        data = (payload or {}).get("data", [])
+        if isinstance(data, list):
+            return list(data)
+        if isinstance(data, dict):
+            for key in ("orderList", "tradeList", "positionList", "list", "rows", "records", "data"):
+                rows = data.get(key)
+                if isinstance(rows, list):
+                    return list(rows)
+        return []
+
+    @staticmethod
+    def _history_num(row: Dict[str, Any], *keys: str) -> float:
+        for key in keys:
+            try:
+                value = row.get(key)
+            except Exception:
+                value = None
+            if value in (None, "", "None"):
+                continue
+            try:
+                return float(value)
+            except Exception:
+                continue
+        return 0.0
+
+    def get_history_snapshot(
+        self,
+        *,
+        symbol: Optional[str] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        self._refresh_state()
+        report: Dict[str, Any] = {
+            "mode": self.mode,
+            "configured": self.client.is_configured(),
+            "orders": [],
+            "trades": [],
+            "positions": [],
+            "tpsl": [],
+            "summary": {
+                "orders_total": 0,
+                "orders_filled": 0,
+                "orders_cancelled": 0,
+                "trades_total": 0,
+                "trades_realized_pnl": 0.0,
+                "trades_fees": 0.0,
+                "positions_total": 0,
+                "positions_realized_pnl": 0.0,
+                "positions_fees": 0.0,
+                "positions_funding": 0.0,
+                "tpsl_total": 0,
+                "tpsl_tp_rows": 0,
+                "tpsl_sl_rows": 0,
+                "symbols": [],
+            },
+            "errors": [],
+        }
+        if self.mode != "live" or not self.client.is_configured():
+            return report
+
+        try:
+            report["orders"] = self._extract_rows(
+                self.client.get_history_orders(symbol=symbol, start_time=start_time, end_time=end_time)
+            )
+        except Exception as e:
+            report["errors"].append(f"history_orders: {e}")
+
+        try:
+            report["trades"] = self._extract_rows(
+                self.client.get_history_trades(symbol=symbol, start_time=start_time, end_time=end_time)
+            )
+        except Exception as e:
+            report["errors"].append(f"history_trades: {e}")
+
+        try:
+            report["positions"] = self._extract_rows(
+                self.client.get_history_positions(symbol=symbol, start_time=start_time, end_time=end_time)
+            )
+        except Exception as e:
+            report["errors"].append(f"history_positions: {e}")
+
+        try:
+            report["tpsl"] = self._extract_rows(
+                self.client.get_history_tpsl(symbol=symbol, start_time=start_time, end_time=end_time)
+            )
+        except Exception as e:
+            report["errors"].append(f"history_tpsl: {e}")
+
+        summary = report["summary"]
+        symbol_set = set()
+
+        for row in report["orders"]:
+            summary["orders_total"] += 1
+            status = str(row.get("status") or row.get("orderStatus") or "").upper()
+            if "FILLED" in status:
+                summary["orders_filled"] += 1
+            if "CANCEL" in status:
+                summary["orders_cancelled"] += 1
+            symbol_text = str(row.get("symbol") or "").upper().strip()
+            if symbol_text:
+                symbol_set.add(symbol_text)
+
+        for row in report["trades"]:
+            summary["trades_total"] += 1
+            summary["trades_realized_pnl"] += self._history_num(
+                row, "realizedPnl", "realizedPNL", "profit", "pnl", "tradeProfit"
+            )
+            summary["trades_fees"] += self._history_num(
+                row, "fee", "tradeFee", "makerFee", "takerFee"
+            )
+            symbol_text = str(row.get("symbol") or "").upper().strip()
+            if symbol_text:
+                symbol_set.add(symbol_text)
+
+        for row in report["positions"]:
+            summary["positions_total"] += 1
+            summary["positions_realized_pnl"] += self._history_num(
+                row, "realizedPnl", "realizedPNL", "closeProfit", "profit", "pnl"
+            )
+            summary["positions_fees"] += self._history_num(
+                row, "fee", "closeFee", "tradingFee", "tradeFee"
+            )
+            summary["positions_funding"] += self._history_num(
+                row, "fundingFee", "fundFee"
+            )
+            symbol_text = str(row.get("symbol") or "").upper().strip()
+            if symbol_text:
+                symbol_set.add(symbol_text)
+
+        for row in report["tpsl"]:
+            summary["tpsl_total"] += 1
+            if self._history_num(row, "tpPrice") > 0:
+                summary["tpsl_tp_rows"] += 1
+            if self._history_num(row, "slPrice") > 0:
+                summary["tpsl_sl_rows"] += 1
+            symbol_text = str(row.get("symbol") or "").upper().strip()
+            if symbol_text:
+                symbol_set.add(symbol_text)
+
+        summary["symbols"] = sorted(symbol_set)
+        return report
 
     def startup_self_check(self) -> Dict[str, Any]:
         """
