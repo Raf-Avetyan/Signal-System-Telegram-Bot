@@ -6,8 +6,7 @@ load_dotenv()
 
 # --- TELEGRAM -------------------------------------------------------
 BOT_TOKEN      = os.getenv("BOT_TOKEN", "")
-PRIVATE_CHAT_ID = os.getenv("PRIVATE_CHAT_ID", "")
-CHAT_ID         = PRIVATE_CHAT_ID
+PRIVATE_CHAT_ID = os.getenv("PRIVATE_CHAT_ID", "").strip()
 PRIVATE_EXEC_CHAT_ID = os.getenv("PRIVATE_EXEC_CHAT_ID", "").strip()
 EXECUTION_UPDATES_PRIVATE_ONLY = os.getenv("EXECUTION_UPDATES_PRIVATE_ONLY", "true").strip().lower() == "true"
 PRIVATE_EXEC_AI_CONTROL_ENABLED = os.getenv("PRIVATE_EXEC_AI_CONTROL_ENABLED", "true").strip().lower() == "true"

@@ -248,6 +248,9 @@ class PonchBot:
     def _execution_chat_id(self):
         return PRIVATE_EXEC_CHAT_ID or PRIVATE_CHAT_ID
 
+    def _signal_chat_id(self):
+        return PRIVATE_CHAT_ID
+
     def _execution_updates_private_only(self):
         return bool(EXECUTION_UPDATES_PRIVATE_ONLY and self._execution_chat_id())
 
@@ -255,6 +258,20 @@ class PonchBot:
         if not self._execution_updates_private_only():
             return True
         return str(sig.get("chat_id") or "") == str(self._execution_chat_id())
+
+    def _has_real_exchange_execution(self, sig):
+        execution = (sig or {}).get("execution") or {}
+        if not execution:
+            return False
+        if execution.get("position_id"):
+            return True
+        if execution.get("active"):
+            return True
+        if execution.get("sl_order"):
+            return True
+        if execution.get("tp_orders"):
+            return True
+        return False
 
     def _send_private_execution_notice(self, title, lines=None, icon="🔐"):
         exec_chat = self._execution_chat_id()
@@ -3810,13 +3827,13 @@ class PonchBot:
                             tp_liq_prob=tp_liq["prob"] if tp_liq else None,
                             tp_liq_usd=tp_liq["size_usd"] if tp_liq else None,
                             tp_liq_target=tp_liq["target"] if tp_liq else None,
-                            chat_id=PRIVATE_CHAT_ID
+                            chat_id=self._signal_chat_id()
                         )
                         msg_id = resp.get("result", {}).get("message_id") if resp else None
                         self.tracker.log_signal(
                             side=ce["side"], entry=latest_price, sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
                             tf="Confluence", timestamp=base_candle_ts or conf_ts,
-                            msg_id=msg_id, chat_id=PRIVATE_CHAT_ID, signal_type="STRONG",
+                            msg_id=msg_id, chat_id=self._signal_chat_id(), signal_type="STRONG",
                             meta={
                                 "signal_id": signal_id,
                                 "indicators": ce["indicators"],
@@ -3850,13 +3867,13 @@ class PonchBot:
                             tp_liq_prob=tp_liq["prob"] if tp_liq else None,
                             tp_liq_usd=tp_liq["size_usd"] if tp_liq else None,
                             tp_liq_target=tp_liq["target"] if tp_liq else None,
-                            chat_id=PRIVATE_CHAT_ID
+                            chat_id=self._signal_chat_id()
                         )
                         msg_id = resp.get("result", {}).get("message_id") if resp else None
                         self.tracker.log_signal(
                             side=ce["side"], entry=latest_price, sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
                             tf="Confluence", timestamp=base_candle_ts or conf_ts,
-                            msg_id=msg_id, chat_id=PRIVATE_CHAT_ID, signal_type="EXTREME",
+                            msg_id=msg_id, chat_id=self._signal_chat_id(), signal_type="EXTREME",
                             meta={
                                 "signal_id": signal_id,
                                 "indicators": ce["indicators"],
@@ -3920,11 +3937,16 @@ class PonchBot:
                 
                 # --- LIVE MESSAGE UPDATE ---
                 # Always keep the original signal card in sync if it exists.
-                if sig.get("msg_id") and sig.get("chat_id"):
+                private_exec_paper_signal = (
+                    str(sig.get("chat_id") or "") == str(self._execution_chat_id() or "")
+                    and not self._has_real_exchange_execution(sig)
+                )
+
+                if sig.get("msg_id") and sig.get("chat_id") and not private_exec_paper_signal:
                     tg.update_signal_message(sig["chat_id"], sig["msg_id"], sig)
 
                 # Public reply alerts keep the original public behavior.
-                if sig.get("msg_id") and sig.get("chat_id"):
+                if sig.get("msg_id") and sig.get("chat_id") and not private_exec_paper_signal:
                     if evt_type == "TP1":
                         tg.send_tp1_hit_congrats(
                             sig["chat_id"],
@@ -5012,7 +5034,7 @@ class PonchBot:
                 can_send_open = (current_time - last_open_alert_ts) >= SCALP_OPEN_ALERT_COOLDOWN
 
                 if not self.is_booting and can_send_open:
-                    tg.send_scalp_open(tf, evt["side"], evt["price"], emoji=emoji, chat_id=PRIVATE_CHAT_ID)
+                    tg.send_scalp_open(tf, evt["side"], evt["price"], emoji=emoji, chat_id=self._signal_chat_id())
                     self.last_scalp_open_alert[open_key] = current_time
                 self._save_state()
                 if self.is_booting:
@@ -5028,7 +5050,7 @@ class PonchBot:
                     print(f"  [SCALP] Suppressed Prepare [{tf}] {evt['side']}: {block_reason}")
                     continue
                 if not self.is_booting:
-                    tg.send_scalp_prepare(tf, evt["side"], emoji=emoji, chat_id=PRIVATE_CHAT_ID)
+                    tg.send_scalp_prepare(tf, evt["side"], emoji=emoji, chat_id=self._signal_chat_id())
                 self._save_state()
                 print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Prepare [{tf}] {evt['side']}")
 
@@ -5313,7 +5335,7 @@ class PonchBot:
                         tp_liq_usd=tp_liq["size_usd"] if tp_liq else None,
                         tp_liq_target=tp_liq["target"] if tp_liq else None,
                         trigger_label=trigger_label,
-                        chat_id=PRIVATE_CHAT_ID
+                        chat_id=self._signal_chat_id()
                     )
                 msg_id = resp.get("result", {}).get("message_id") if resp else None
                 self._save_state()
@@ -5331,7 +5353,7 @@ class PonchBot:
                     tf=tf,
                     timestamp=entry_protection_ts or candle_ts,
                     msg_id=msg_id,
-                    chat_id=PRIVATE_CHAT_ID,
+                    chat_id=self._signal_chat_id(),
                     signal_type="SCALP",
                     meta={
                         "signal_id": signal_id,
@@ -5352,7 +5374,7 @@ class PonchBot:
 
             elif evt["type"] == "CLOSED":
                 if not self.is_booting:
-                    tg.send_scalp_closed(tf, evt["side"], evt["price"], emoji=emoji, chat_id=PRIVATE_CHAT_ID)
+                    tg.send_scalp_closed(tf, evt["side"], evt["price"], emoji=emoji, chat_id=self._signal_chat_id())
                 self._save_state()
                 print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Scalp Closed [{tf}] {evt['side']}")
 
