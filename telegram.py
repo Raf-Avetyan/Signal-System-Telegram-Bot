@@ -347,23 +347,26 @@ def fmt_hit(is_hit):
 
 def get_signal_levels_code(entry, sl, tp1, tp2, tp3, status="OPEN", tp1_h=False, tp2_h=False, tp3_h=False, sl_h=False, initial_sl=None):
     """Format the levels block with hit markers."""
-    sl_mark = " ✅" if sl_h else ""
     tp1_mark = fmt_hit(tp1_h)
     tp2_mark = fmt_hit(tp2_h)
     tp3_mark = fmt_hit(tp3_h)
     initial_sl = sl if initial_sl is None else initial_sl
     moved_sl = abs(float(sl) - float(initial_sl)) > 1e-9
+    initial_sl_mark = ""
+    lock_mark = " ✅" if (sl_h and moved_sl) else ""
+    if sl_h and not moved_sl:
+        initial_sl_mark = " ✅"
 
     lines = [
         f"Entry:  {fmt_price(entry)}",
-        f"SL:     {fmt_price(initial_sl)}{sl_mark}",
+        f"SL:     {fmt_price(initial_sl)}{initial_sl_mark}",
         f"",
         f"TP1:    {fmt_price(tp1)}{tp1_mark}",
         f"TP2:    {fmt_price(tp2)}{tp2_mark}",
         f"TP3:    {fmt_price(tp3)}{tp3_mark}"
     ]
     if moved_sl:
-        lines.insert(2, f"Lock:   {fmt_price(sl)}")
+        lines.insert(2, f"Lock:   {fmt_price(sl)}{lock_mark}")
         lines.insert(3, f"")
 
     return "\n".join(lines)
@@ -494,6 +497,30 @@ def update_signal_message(chat_id, msg_id, sig_data):
     """Edit the original signal message with updated hit markers."""
     # 'meta' contains original info like indicators or reasons
     meta = sig_data.get("meta", {})
+    execution = sig_data.get("execution") or {}
+    missing_tp_indices = {
+        int(i) for i in (execution.get("missing_tp_indices") or [])
+        if str(i).strip().isdigit()
+    }
+    tp1_h = bool(sig_data.get("tp1_hit"))
+    tp2_h = bool(sig_data.get("tp2_hit"))
+    tp3_h = bool(sig_data.get("tp3_hit"))
+    if tp2_h and 1 not in missing_tp_indices:
+        tp1_h = True
+    if tp3_h and 1 not in missing_tp_indices:
+        tp1_h = True
+    if tp3_h and 2 not in missing_tp_indices:
+        tp2_h = True
+
+    effective_status = str(sig_data.get("status", "OPEN") or "OPEN").upper()
+    entry = float(sig_data.get("entry", 0) or 0)
+    sl = float(sig_data.get("sl", 0) or 0)
+    initial_sl = float(sig_data.get("initial_sl", sl) or sl)
+    if effective_status == "SL" and tp1_h:
+        if abs(sl - entry) < 1e-9:
+            effective_status = "ENTRY_CLOSE"
+        elif abs(sl - initial_sl) > 1e-9:
+            effective_status = "PROFIT_SL"
     
     # Reconstruct timeframe summary for confluence signals
     tf_val = sig_data["tf"]
@@ -512,16 +539,16 @@ def update_signal_message(chat_id, msg_id, sig_data):
         tp1=sig_data["tp1"],
         tp2=sig_data["tp2"],
         tp3=sig_data["tp3"],
-        status=sig_data["status"],
-        tp1_h=sig_data["tp1_hit"],
-        tp2_h=sig_data["tp2_hit"],
-        tp3_h=sig_data["tp3_hit"],
-        sl_h=sig_data["sl_hit"],
+        status=effective_status,
+        tp1_h=tp1_h,
+        tp2_h=tp2_h,
+        tp3_h=tp3_h,
+        sl_h=(effective_status in {"SL", "PROFIT_SL", "ENTRY_CLOSE"} or bool(sig_data.get("sl_hit"))),
         score=meta.get("score"),
         trend=meta.get("trend"),
         indicators=indicators,
         reasons=meta.get("reasons"),
-        size=meta.get("size"),
+        size=sig_data.get("signal_size_pct", meta.get("size")),
         tp_liq_prob=meta.get("tp_liq_prob"),
         tp_liq_usd=meta.get("tp_liq_usd"),
         tp_liq_target=meta.get("tp_liq_target"),

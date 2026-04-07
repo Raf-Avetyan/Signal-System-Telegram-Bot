@@ -8,6 +8,7 @@ import requests
 from channels import calculate_channels
 from config import (
     BASE_MOMENTUM_ENABLED_TFS,
+    BITUNIX_TP_SPLITS,
     BREAKEVEN_WIN_MIN_TP,
     FALLING_KNIFE_FILTER_ENABLED,
     FALLING_KNIFE_LOOKBACK_5M,
@@ -48,6 +49,7 @@ from config import (
     SCALP_MAX_OPEN_PER_SIDE,
     SCALP_MAX_OPEN_PER_TF,
     SMART_MONEY_EXECUTION_TFS,
+    SMART_MONEY_TP_SPLITS,
     SESSION_SCALP_MODE,
     SIGNAL_TIMEFRAMES,
     SYMBOL,
@@ -125,6 +127,79 @@ def _breakeven_counts_as_win(tr: dict) -> bool:
     if threshold == 2:
         return bool(tr.get("tp2_hit"))
     return bool(tr.get("tp3_hit"))
+
+
+def _tp_fracs_from_trade(tr: dict):
+    qtys = list(tr.get("tp_qtys") or [])
+    if qtys:
+        qtys = [max(0.0, float(q or 0)) for q in qtys[:3]]
+        total = sum(qtys)
+        if total > 0:
+            while len(qtys) < 3:
+                qtys.append(0.0)
+            return [q / total for q in qtys[:3]]
+    base = [max(0.0, float(x or 0)) for x in BITUNIX_TP_SPLITS[:3]]
+    while len(base) < 3:
+        base.append(0.0)
+    total = sum(base) or 1.0
+    return [x / total for x in base[:3]]
+
+
+def _trade_stop_r(tr: dict) -> float:
+    risk = float(tr.get("risk") or 0.0)
+    if risk <= 0:
+        return 0.0
+    entry = float(tr.get("entry") or 0.0)
+    sl = float(tr.get("sl") or entry)
+    if tr.get("side") == "LONG":
+        return (sl - entry) / risk
+    return (entry - sl) / risk
+
+
+def _trade_realized_partial_r(tr: dict) -> float:
+    risk = float(tr.get("risk") or 0.0)
+    if risk <= 0:
+        return 0.0
+    entry = float(tr.get("entry") or 0.0)
+    fracs = _tp_fracs_from_trade(tr)
+    prices = [
+        float(tr.get("tp1") or entry),
+        float(tr.get("tp2") or entry),
+        float(tr.get("tp3") or entry),
+    ]
+    hits = [
+        bool(tr.get("tp1_hit")),
+        bool(tr.get("tp2_hit")),
+        bool(tr.get("tp3_hit")),
+    ]
+    realized = 0.0
+    for frac, price, hit in zip(fracs, prices, hits):
+        if hit:
+            realized += frac * (abs(price - entry) / risk)
+    return realized
+
+
+def _trade_remaining_frac(tr: dict) -> float:
+    fracs = _tp_fracs_from_trade(tr)
+    hits = [
+        bool(tr.get("tp1_hit")),
+        bool(tr.get("tp2_hit")),
+        bool(tr.get("tp3_hit")),
+    ]
+    consumed = sum(frac for frac, hit in zip(fracs, hits) if hit)
+    return max(0.0, 1.0 - consumed)
+
+
+def _trade_outcome_r(tr: dict, evt_type: str) -> float:
+    if evt_type == "TP3":
+        return _trade_realized_partial_r(tr)
+    if evt_type == "ENTRY_CLOSE":
+        return _trade_realized_partial_r(tr)
+    if evt_type == "PROFIT_SL":
+        return _trade_realized_partial_r(tr) + (_trade_remaining_frac(tr) * max(0.0, _trade_stop_r(tr)))
+    if evt_type == "SL":
+        return _trade_realized_partial_r(tr) + (_trade_remaining_frac(tr) * _trade_stop_r(tr))
+    return 0.0
 
 
 def _to_df(rows, bars_needed: int):
@@ -674,18 +749,18 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_
 
             side = tr["side"]
             if evt_type == "TP3":
-                results.append({"r": abs(tr["tp3"] - tr["entry"]) / tr["risk"], "metric": "wins"})
+                results.append({"r": _trade_outcome_r(tr, evt_type), "metric": "wins"})
                 loss_streak[side] = 0
             elif evt_type == "PROFIT_SL":
-                results.append({"r": max(0.2, abs(tr["tp1"] - tr["entry"]) / tr["risk"] * 0.6), "metric": "wins"})
+                results.append({"r": _trade_outcome_r(tr, evt_type), "metric": "wins"})
                 loss_streak[side] = 0
             elif evt_type == "SL":
-                results.append({"r": -1.0, "metric": "losses"})
+                results.append({"r": _trade_outcome_r(tr, evt_type), "metric": "losses"})
                 loss_streak[side] += 1
                 if loss_streak[side] >= SCALP_LOSS_STREAK_LIMIT:
                     side_cooldown_until[side] = now_ts + SCALP_LOSS_COOLDOWN_SEC
             elif evt_type == "ENTRY_CLOSE":
-                results.append({"r": 0.0, "metric": "wins" if _breakeven_counts_as_win(tr) else "breakeven"})
+                results.append({"r": _trade_outcome_r(tr, evt_type), "metric": "wins" if _breakeven_counts_as_win(tr) else "breakeven"})
                 if loss_streak[side] > 0:
                     loss_streak[side] -= 1
             else:
@@ -792,6 +867,7 @@ def simulate_smart_money_timeframe(tf: str, days: int):
                                 "tf": tf,
                                 "entry_candle_ts": candle_ts,
                                 "event_id": event_id,
+                                "tp_qtys": list(SMART_MONEY_TP_SPLITS),
                             }
                         )
                         seen_event_ids.add(event_id)
@@ -805,13 +881,13 @@ def simulate_smart_money_timeframe(tf: str, days: int):
                 continue
 
             if evt_type == "TP3":
-                results.append({"r": abs(tr["tp3"] - tr["entry"]) / tr["risk"], "metric": "wins"})
+                results.append({"r": _trade_outcome_r(tr, evt_type), "metric": "wins"})
             elif evt_type == "PROFIT_SL":
-                results.append({"r": max(0.2, abs(tr["tp1"] - tr["entry"]) / tr["risk"] * 0.6), "metric": "wins"})
+                results.append({"r": _trade_outcome_r(tr, evt_type), "metric": "wins"})
             elif evt_type == "SL":
-                results.append({"r": -1.0, "metric": "losses"})
+                results.append({"r": _trade_outcome_r(tr, evt_type), "metric": "losses"})
             elif evt_type == "ENTRY_CLOSE":
-                results.append({"r": 0.0, "metric": "wins" if _breakeven_counts_as_win(tr) else "breakeven"})
+                results.append({"r": _trade_outcome_r(tr, evt_type), "metric": "wins" if _breakeven_counts_as_win(tr) else "breakeven"})
             else:
                 survivors.append(tr)
 

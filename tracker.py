@@ -8,7 +8,7 @@ Persists data to signals_log.json for restart survival.
 import json
 import os
 from datetime import datetime, timezone, timedelta
-from config import BREAKEVEN_WIN_MIN_TP
+from config import BREAKEVEN_WIN_MIN_TP, BITUNIX_TP_SPLITS
 
 LOG_FILE = os.path.join(os.path.dirname(__file__), "signals_log.json")
 
@@ -54,23 +54,82 @@ class SignalTracker:
         """Return metric outcome label and R-multiple for summaries/analytics."""
         status = str(sig.get("status", "")).upper()
         entry = float(sig.get("entry", 0))
-        sl = float(sig.get("sl", 0))
-        tp1 = float(sig.get("tp1", entry))
-        tp3 = float(sig.get("tp3", entry))
-        risk = abs(entry - sl)
+        initial_sl = float(sig.get("initial_sl", sig.get("sl", 0)) or 0)
+        current_sl = float(sig.get("sl", initial_sl) or 0)
+        risk = abs(entry - initial_sl)
+
+        def _tp_fracs():
+            execution = sig.get("execution") or {}
+            qtys = list(execution.get("tp_qtys") or [])
+            if qtys:
+                qtys = [max(0.0, float(q or 0)) for q in qtys[:3]]
+                total = sum(qtys)
+                if total > 0:
+                    while len(qtys) < 3:
+                        qtys.append(0.0)
+                    return [q / total for q in qtys[:3]]
+            base = [max(0.0, float(x or 0)) for x in BITUNIX_TP_SPLITS[:3]]
+            while len(base) < 3:
+                base.append(0.0)
+            total = sum(base) or 1.0
+            return [x / total for x in base[:3]]
+
+        def _tp_prices():
+            execution = sig.get("execution") or {}
+            targets = list(execution.get("tp_targets") or [sig.get("tp1"), sig.get("tp2"), sig.get("tp3")])
+            while len(targets) < 3:
+                targets.append(entry)
+            return [float(targets[i] or entry) for i in range(3)]
+
+        def _stop_r():
+            if risk <= 0:
+                return 0.0
+            side = str(sig.get("side", "")).upper()
+            if side == "LONG":
+                return (current_sl - entry) / risk
+            if side == "SHORT":
+                return (entry - current_sl) / risk
+            return 0.0
+
+        def _realized_partial_r():
+            if risk <= 0:
+                return 0.0
+            fracs = _tp_fracs()
+            prices = _tp_prices()
+            hits = [
+                bool(sig.get("tp1_hit")),
+                bool(sig.get("tp2_hit")),
+                bool(sig.get("tp3_hit")),
+            ]
+            realized = 0.0
+            for frac, price, hit in zip(fracs, prices, hits):
+                if hit:
+                    realized += frac * (abs(price - entry) / risk)
+            return realized
+
+        def _remaining_frac():
+            fracs = _tp_fracs()
+            hits = [
+                bool(sig.get("tp1_hit")),
+                bool(sig.get("tp2_hit")),
+                bool(sig.get("tp3_hit")),
+            ]
+            consumed = sum(frac for frac, hit in zip(fracs, hits) if hit)
+            return max(0.0, 1.0 - consumed)
 
         if status == "SL":
-            return "losses", -1.0
+            r_mult = _realized_partial_r() + (_remaining_frac() * _stop_r())
+            return "losses", r_mult
         if status == "PROFIT_SL":
-            r_mult = max(0.2, abs(tp1 - entry) / risk * 0.6) if risk > 0 else 0.2
+            r_mult = _realized_partial_r() + (_remaining_frac() * max(0.0, _stop_r()))
             return "wins", r_mult
         if status == "TP3":
-            r_mult = (abs(tp3 - entry) / risk) if risk > 0 else 0.0
-            return "wins", r_mult
+            return "wins", _realized_partial_r()
         if status == "ENTRY_CLOSE":
+            r_mult = _realized_partial_r()
             if self._breakeven_counts_as_win(sig):
-                return "wins", 0.0
-            return "breakeven", 0.0
+                return "wins", r_mult
+            return "breakeven", r_mult
         return "open", 0.0
 
     def _parse_iso_utc(self, value):

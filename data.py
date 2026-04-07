@@ -2,6 +2,8 @@
 
 import json
 import base64
+import html
+import re
 import pandas as pd
 import requests
 import time
@@ -145,6 +147,62 @@ def fetch_trading_economics_calendar(api_key, countries="united states", importa
     except Exception as e:
         print(f"[NEWS ERROR] TradingEconomics fetch failed: {e}")
         return []
+
+
+def fetch_markettwits_posts(channel_url, limit=25):
+    """
+    Fetch recent public posts from a Telegram channel page like https://t.me/s/markettwits.
+    Returns newest-first post dicts with id, datetime, and text.
+    """
+    if not channel_url:
+        return []
+    try:
+        resp = requests.get(
+            channel_url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        page = resp.text
+    except Exception as e:
+        print(f"[NEWS ERROR] MarketTwits fetch failed: {e}")
+        return []
+
+    msg_pattern = re.compile(
+        r'<div class="tgme_widget_message[^"]*?js-widget_message[^"]*"[^>]*data-post="([^"]+)"[^>]*>(.*?)</div>\s*</div>\s*</div>',
+        re.S,
+    )
+    posts = []
+    for match in msg_pattern.finditer(page):
+        raw_post = str(match.group(1) or "").strip()
+        block_html = match.group(2) or ""
+        post_id = raw_post.split("/")[-1] if "/" in raw_post else raw_post
+
+        time_match = re.search(r'<time[^>]*datetime="([^"]+)"', block_html, re.S)
+        raw_dt = str(time_match.group(1) or "").strip() if time_match else ""
+
+        text_match = re.search(
+            r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>',
+            block_html,
+            re.S,
+        )
+        body_html = text_match.group(1) if text_match else ""
+        body_html = re.sub(r"<br\s*/?>", "\n", body_html, flags=re.I)
+        body_text = re.sub(r"<[^>]+>", " ", body_html)
+        body_text = html.unescape(body_text)
+        body_text = re.sub(r"[ \t\r\f\v]+", " ", body_text)
+        body_text = re.sub(r"\n\s+", "\n", body_text).strip()
+        if not body_text:
+            continue
+        posts.append({
+            "id": post_id,
+            "datetime": raw_dt,
+            "text": body_text,
+            "url": f"{channel_url.rstrip('/')}/{post_id}",
+        })
+    if not posts:
+        return []
+    return list(reversed(posts[-max(1, int(limit)):]))
 
 
 def parse_gemini_trade_instruction(api_key, model, user_text, context_text):

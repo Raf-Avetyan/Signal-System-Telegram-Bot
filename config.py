@@ -88,12 +88,6 @@ RSI_DIVERGENCE_SEGMENT = 20
 RSI_DIVERGENCE_MIN_PRICE_DELTA_PCT = 0.20
 RSI_DIVERGENCE_MIN_RSI_DELTA = 4.0
 RSI_DIVERGENCE_POINTS = 2
-RSI_DIVERGENCE_MAX_AGE_CANDLES_BY_TF = {
-    "5m": 8,
-    "15m": 6,
-    "1h": 4,
-    "4h": 3,
-}
 
 # Metric rule: count breakeven exits as wins once this TP threshold was reached.
 # 1 = TP1 hit then breakeven counts as win
@@ -132,14 +126,19 @@ SMART_MONEY_MAX_TRADES_PER_DAY = 3
 SMART_MONEY_ALLOWED_SESSIONS = ["LONDON", "NY"]
 SMART_MONEY_HTF_SWING_LOOKBACK = 40
 SMART_MONEY_SWING_PIVOT_BARS = 2
-SMART_MONEY_KEYLEVEL_TOLERANCE_PCT = 0.35
+SMART_MONEY_KEYLEVEL_TOLERANCE_PCT = 0.30
 SMART_MONEY_DEALING_RANGE_BUFFER_PCT = 0.10
 SMART_MONEY_LTF_SWEEP_LOOKBACK = 12
 SMART_MONEY_FVG_LOOKBACK = 30
 SMART_MONEY_OB_LOOKBACK = 24
 SMART_MONEY_DISPLACEMENT_BODY_ATR = 0.60
 SMART_MONEY_SL_BUFFER_ATR = 0.20
-SMART_MONEY_MIN_RR = 2.0
+SMART_MONEY_MIN_RR = float(os.getenv("SMART_MONEY_MIN_RR", "2.5"))
+SMART_MONEY_TP_SPLITS = (
+    float(os.getenv("SMART_MONEY_TP1_SPLIT", "0.15")),
+    float(os.getenv("SMART_MONEY_TP2_SPLIT", "0.25")),
+    float(os.getenv("SMART_MONEY_TP3_SPLIT", "0.60")),
+)
 SMART_MONEY_BOS_SWING_LOOKBACK = 4
 SMART_MONEY_POST_SWEEP_CONFIRM_BARS = 8
 SMART_MONEY_MAX_EXECUTION_CANDLE_RISK_RATIO_BY_TF = {
@@ -153,7 +152,8 @@ TIMEFRAME_PROFILES = {
     "1h":  {"strength": "Strong", "emoji": "🚀", "size": 7.5},
     "4h":  {"strength": "Ultra",  "emoji": "💎", "size": 9.0},
 }
-MIN_SIGNAL_SIZE_PCT = float(os.getenv("MIN_SIGNAL_SIZE_PCT", "5.0"))
+MIN_SIGNAL_SIZE_PCT = float(os.getenv("MIN_SIGNAL_SIZE_PCT", "3.0"))
+MAX_SIGNAL_SIZE_PCT = float(os.getenv("MAX_SIGNAL_SIZE_PCT", "8.0"))
 
 # Scalp confirmation buffer (RSI points beyond zone edge):
 # LONG confirm when RSI > MOMENTUM_OS + buffer
@@ -227,7 +227,7 @@ SCALP_RELAX_ALLOW_OFFSESSION = True
 # - "hard": block all counter-trend scalp confirms
 # - "soft": allow counter-trend only if score >= SCALP_COUNTERTREND_MIN_SCORE
 # - "off": no trend gating for scalp confirms
-SCALP_TREND_FILTER_MODE = "off"
+SCALP_TREND_FILTER_MODE = "soft"
 SCALP_COUNTERTREND_MIN_SCORE = 6
 SCALP_COUNTERTREND_MAX_PER_WINDOW = 3
 SCALP_COUNTERTREND_WINDOW_SEC = 21600  # 6h
@@ -259,9 +259,9 @@ SCALP_ALLOWED_SESSIONS_BY_TF = {
 # - size_mult: scales displayed position size
 SCALP_REGIME_SWITCHING = True
 SCALP_REGIME_PROFILES = {
-    "TREND":    {"score_delta": -1, "vol_min_mult": 0.9, "vol_max_mult": 1.15, "size_mult": 1.10},
-    "RANGE":    {"score_delta": 0,  "vol_min_mult": 1.0, "vol_max_mult": 1.0,  "size_mult": 1.00},
-    "HIGH_VOL": {"score_delta": 0,  "vol_min_mult": 1.0, "vol_max_mult": 0.95, "size_mult": 0.90},
+    "TREND":    {"score_delta": -1, "vol_min_mult": 0.9,  "vol_max_mult": 1.15, "size_mult": 1.10},
+    "RANGE":    {"score_delta": 0,  "vol_min_mult": 1.0,  "vol_max_mult": 1.0,  "size_mult": 1.00},
+    "HIGH_VOL": {"score_delta": 0,  "vol_min_mult": 1.0,  "vol_max_mult": 0.95, "size_mult": 0.90},
 }
 
 # Rolling self-tuning for scalp quality.
@@ -275,6 +275,7 @@ SCALP_SELF_TUNE_HIGH_AVGR = 0.10
 
 # Exposure control for overlapping scalp positions.
 SCALP_EXPOSURE_ENABLED = True
+BLOCK_OPPOSITE_SIDE_SIGNALS = os.getenv("BLOCK_OPPOSITE_SIDE_SIGNALS", "true").strip().lower() == "true"
 SCALP_MAX_OPEN_TOTAL = 8
 SCALP_MAX_OPEN_PER_SIDE = 5
 SCALP_MAX_OPEN_PER_TF = {
@@ -451,6 +452,16 @@ SESSIONS = {
 NEWS_FILTER_ENABLED = os.getenv("NEWS_FILTER_ENABLED", "true").strip().lower() == "true"
 NY_HOLIDAY_FILTER_ENABLED = os.getenv("NY_HOLIDAY_FILTER_ENABLED", "true").strip().lower() == "true"
 HIGH_IMPACT_NEWS_BLACKOUT_WINDOWS_UTC = os.getenv("HIGH_IMPACT_NEWS_BLACKOUT_WINDOWS_UTC", "").strip()
+FIVE_MIN_STRICT_NEWS_FILTER = os.getenv("FIVE_MIN_STRICT_NEWS_FILTER", "true").strip().lower() == "true"
+FIVE_MIN_NEWS_BLOCK_BEFORE_MIN = int(os.getenv("FIVE_MIN_NEWS_BLOCK_BEFORE_MIN", "120"))
+FIVE_MIN_NEWS_BLOCK_AFTER_MIN = int(os.getenv("FIVE_MIN_NEWS_BLOCK_AFTER_MIN", "45"))
+FIVE_MIN_REQUIRE_15M_PERMISSION = os.getenv("FIVE_MIN_REQUIRE_15M_PERMISSION", "true").strip().lower() == "true"
+MARKETTWITS_NEWS_ENABLED = os.getenv("MARKETTWITS_NEWS_ENABLED", "true").strip().lower() == "true"
+MARKETTWITS_CHANNEL_URL = os.getenv("MARKETTWITS_CHANNEL_URL", "https://t.me/s/markettwits").strip()
+MARKETTWITS_REFRESH_SEC = int(os.getenv("MARKETTWITS_REFRESH_SEC", "60"))
+MARKETTWITS_LOOKBACK_HOURS = int(os.getenv("MARKETTWITS_LOOKBACK_HOURS", "12"))
+MARKETTWITS_BLOCK_AFTER_MIN = int(os.getenv("MARKETTWITS_BLOCK_AFTER_MIN", "45"))
+MARKETTWITS_MIN_BLOCK_SCORE = int(os.getenv("MARKETTWITS_MIN_BLOCK_SCORE", "9"))
 TRADING_ECONOMICS_NEWS_ENABLED = os.getenv("TRADING_ECONOMICS_NEWS_ENABLED", "true").strip().lower() == "true"
 TRADING_ECONOMICS_API_KEY = os.getenv("TRADING_ECONOMICS_API_KEY", "guest:guest").strip()
 TRADING_ECONOMICS_COUNTRIES = os.getenv("TRADING_ECONOMICS_COUNTRIES", "united states").strip()

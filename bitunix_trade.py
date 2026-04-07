@@ -33,6 +33,7 @@ from config import (
     BITUNIX_TP_SPLITS,
     BITUNIX_TRADING_ENABLED,
     BITUNIX_TRADING_MODE,
+    SMART_MONEY_TP_SPLITS,
     SYMBOL,
 )
 
@@ -674,6 +675,21 @@ class TradeExecutor:
                     return list(rows)
         return []
 
+    @classmethod
+    def _data_dict(cls, payload: Dict[str, Any]) -> Dict[str, Any]:
+        data = (payload or {}).get("data", {})
+        if isinstance(data, dict):
+            return data
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    return item
+        rows = cls._extract_rows(payload or {})
+        for row in rows:
+            if isinstance(row, dict):
+                return row
+        return {}
+
     @staticmethod
     def _history_num(row: Dict[str, Any], *keys: str) -> float:
         for key in keys:
@@ -913,6 +929,15 @@ class TradeExecutor:
         entry_side = plan["entry_side"]
         exit_side = plan["exit_side"]
         signal_id = signal.get("signal_id") or new_signal_id()
+        if str(plan.get("position_mode") or "").upper() == "ONE_WAY":
+            existing_positions = [pos for pos in self._pending_positions_list(symbol) if self._position_qty(pos) > 0]
+            if existing_positions:
+                return ExecutionResult(
+                    self.mode,
+                    False,
+                    f"One-way mode already has an open {symbol} position on Bitunix. Close it before opening another live trade.",
+                    plan,
+                )
 
         try:
             self.client.change_leverage(symbol, int(plan["leverage"]))
@@ -925,7 +950,7 @@ class TradeExecutor:
                 client_id=f"{signal_id}-entry",
                 trade_side=plan.get("entry_trade_side"),
             )
-            entry_order_data = entry_order.get("data", {}) or {}
+            entry_order_data = self._data_dict(entry_order)
             entry_order_id = entry_order_data.get("orderId") or entry_order_data.get("id")
             entry_client_id = entry_order_data.get("clientId") or f"{signal_id}-entry"
             plan["entry_order_id"] = entry_order_id
@@ -1005,7 +1030,7 @@ class TradeExecutor:
                 "symbol": symbol,
                 "side": signal["side"],
                 "position_id": position_id,
-                "entry_order": entry_order.get("data", {}),
+                "entry_order": entry_order_data,
                 "tp_orders": tp_orders,
                 "sl_order": sl_order,
                 "missing_tp_indices": missing_tp_indices,
@@ -1076,6 +1101,20 @@ class TradeExecutor:
 
         if event_type == "TP2" and position_id:
             self._ensure_tp_leg_closed(signal, execution, 2)
+            qtys = list(execution.get("tp_qtys") or [0.0, 0.0, 0.0])
+            while len(qtys) < 3:
+                qtys.append(0.0)
+            remaining_qty = max(0.0, float(execution.get("qty", 0) or 0) - float(qtys[1] or 0))
+            if remaining_qty <= 1e-12:
+                self._cancel_remaining_protection(execution)
+                if sl_order_id:
+                    try:
+                        self.client.cancel_tpsl(symbol, str(sl_order_id))
+                    except Exception:
+                        pass
+                execution["active"] = False
+                execution["sl_moved_to"] = None
+                return ExecutionResult(self.mode, True, "TP2 closed the full position.", execution)
             return ExecutionResult(self.mode, True, "TP2 reached; SL remains at entry.", execution)
 
         if event_type in {"TP3", "SL", "ENTRY_CLOSE", "PROFIT_SL"}:
@@ -1165,7 +1204,18 @@ class TradeExecutor:
         if qty < min_base_qty:
             qty = min_base_qty if affordable_qty >= min_base_qty else 0.0
         qty = self._round_qty_down(qty, qty_step)
-        tp_qtys, tp_split_warning = self._split_qty(qty, min_base_qty=min_base_qty, step=qty_step)
+        strategy_name = str(
+            signal.get("strategy")
+            or (signal.get("meta") or {}).get("strategy")
+            or ""
+        ).upper()
+        tp_splits = SMART_MONEY_TP_SPLITS if strategy_name == "SMART_MONEY_LIQUIDITY" else BITUNIX_TP_SPLITS
+        tp_qtys, tp_split_warning = self._split_qty(
+            qty,
+            min_base_qty=min_base_qty,
+            step=qty_step,
+            splits=tp_splits,
+        )
         is_hedge = position_mode == "HEDGE"
         entry_side = "BUY" if signal["side"] == "LONG" else "SELL"
         exit_side = entry_side if is_hedge else ("SELL" if signal["side"] == "LONG" else "BUY")
@@ -1196,6 +1246,7 @@ class TradeExecutor:
             "qty": qty,
             "tp_qtys": tp_qtys,
             "tp_split_warning": tp_split_warning,
+            "tp_splits": list(tp_splits),
             "leverage": leverage,
             "current_exchange_leverage": int(raw_account.get("leverage") or 0),
             "target_leverage": target_leverage,
@@ -1378,7 +1429,7 @@ class TradeExecutor:
         for _ in range(4):
             try:
                 sl_res = self.client.place_position_tpsl(symbol, position_id, None, float(signal["sl"]))
-                sl_order = sl_res.get("data", {}) or {}
+                sl_order = self._data_dict(sl_res)
                 if sl_order.get("orderId") or sl_order.get("id"):
                     return sl_order
             except BitunixTradeError as e:
@@ -1423,7 +1474,7 @@ class TradeExecutor:
                 tp_res = self.client.modify_position_tpsl(symbol, str(position_id), float(tp_price), current_sl_price)
             except BitunixTradeError:
                 tp_res = self.client.place_position_tpsl(symbol, str(position_id), float(tp_price), current_sl_price)
-            data = tp_res.get("data", {}) or {}
+            data = self._data_dict(tp_res)
             return ({
                 "index": tp_index,
                 "kind": "POSITION_TP",
@@ -1443,7 +1494,7 @@ class TradeExecutor:
                 tp_qty=float(qty_part),
                 tp_order_type="MARKET",
             )
-            data = tp_res.get("data", {}) or {}
+            data = self._data_dict(tp_res)
             return {
                 "index": tp_index,
                 "kind": "TPSL",
@@ -1468,7 +1519,7 @@ class TradeExecutor:
                 trade_side=plan.get("exit_trade_side"),
                 position_id=position_id if plan.get("exit_trade_side") else None,
             )
-            data = tp_res.get("data", {}) or {}
+            data = self._data_dict(tp_res)
             return {
                 "index": tp_index,
                 "kind": "LIMIT",
@@ -1688,7 +1739,7 @@ class TradeExecutor:
                 tp_res = self.client.modify_position_tpsl(symbol, str(position_id), float(new_price), current_sl_price)
             except BitunixTradeError:
                 tp_res = self.client.place_position_tpsl(symbol, str(position_id), float(new_price), current_sl_price)
-            data = tp_res.get("data", {}) or {}
+            data = self._data_dict(tp_res)
             execution["tp_orders"] = [{
                 "index": single_tp_index,
                 "kind": "POSITION_TP",
@@ -1941,7 +1992,14 @@ class TradeExecutor:
         return max(0.0, int(float(qty) / step) * step)
 
     @classmethod
-    def _split_qty(cls, qty: float, *, min_base_qty: Optional[float] = None, step: Optional[float] = None) -> tuple[List[float], Optional[str]]:
+    def _split_qty(
+        cls,
+        qty: float,
+        *,
+        min_base_qty: Optional[float] = None,
+        step: Optional[float] = None,
+        splits: Optional[tuple[float, float, float]] = None,
+    ) -> tuple[List[float], Optional[str]]:
         step = max(float(step or BITUNIX_QTY_STEP or 0), 0.00000001)
         min_leg = max(float(min_base_qty or BITUNIX_MIN_BASE_QTY or 0), step)
         total = cls._round_qty_down(float(qty), step)
@@ -1953,7 +2011,7 @@ class TradeExecutor:
                 f"TP legs skipped: total qty {total:.8f} is below Bitunix min leg {min_leg:.8f}."
             )
 
-        a, b, c = BITUNIX_TP_SPLITS
+        a, b, c = splits or BITUNIX_TP_SPLITS
         q1 = cls._round_qty_down(total * a, step)
         q2 = cls._round_qty_down(total * b, step)
         q3 = cls._round_qty_down(max(0.0, total - q1 - q2), step)
@@ -1962,17 +2020,8 @@ class TradeExecutor:
         if len(nonzero) == 3 and min(nonzero) >= min_leg and abs((q1 + q2 + q3) - total) < (step + 1e-12):
             return [q1, q2, q3], None
 
-        if total >= (2 * min_leg):
-            q1 = min_leg
-            q2 = 0.0
-            q3 = cls._round_qty_down(total - q1, step)
-            if q3 >= min_leg:
-                return [q1, q2, q3], (
-                    f"Compressed TP legs to TP1+TP3 because 3-way split falls below Bitunix min qty {min_leg:.8f}."
-                )
-
-        return [0.0, total, 0.0], (
-            f"Compressed TP legs to TP2-only because partial TP legs fall below Bitunix min qty {min_leg:.8f}."
+        return [total, 0.0, 0.0], (
+            f"Compressed TP legs to a single full TP1 because partial TP legs fall below Bitunix min qty {min_leg:.8f}."
         )
 
     @staticmethod

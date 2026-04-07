@@ -20,7 +20,6 @@ from config import (
     RSI_DIVERGENCE_MIN_PRICE_DELTA_PCT,
     RSI_DIVERGENCE_MIN_RSI_DELTA,
     RSI_DIVERGENCE_POINTS,
-    RSI_DIVERGENCE_MAX_AGE_CANDLES_BY_TF,
 )
 
 
@@ -170,7 +169,7 @@ def check_rsi_divergence(df, timeframe=None):
     seg = int(max(6, RSI_DIVERGENCE_SEGMENT))
     min_rsi_delta = float(RSI_DIVERGENCE_MIN_RSI_DELTA)
     min_price_delta_pct = float(RSI_DIVERGENCE_MIN_PRICE_DELTA_PCT)
-    max_age = int(RSI_DIVERGENCE_MAX_AGE_CANDLES_BY_TF.get(timeframe, seg // 2 if timeframe else seg // 2))
+    max_age = int(seg // 2)
 
     sub = df.iloc[-lookback:].copy()
     if len(sub) < seg * 2:

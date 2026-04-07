@@ -40,7 +40,7 @@ from config import (
     SCALP_SELF_TUNE_LOOKBACK, SCALP_SELF_TUNE_MIN_CLOSED,
     SCALP_SELF_TUNE_LOW_WR, SCALP_SELF_TUNE_HIGH_WR,
     SCALP_SELF_TUNE_LOW_AVGR, SCALP_SELF_TUNE_HIGH_AVGR,
-    SCALP_EXPOSURE_ENABLED, SCALP_MAX_OPEN_TOTAL,
+    SCALP_EXPOSURE_ENABLED, BLOCK_OPPOSITE_SIDE_SIGNALS, SCALP_MAX_OPEN_TOTAL,
     SCALP_MAX_OPEN_PER_SIDE, SCALP_MAX_OPEN_PER_TF,
     MOMENTUM_OS, MOMENTUM_OB,
     BASE_MOMENTUM_ENABLED_TFS,
@@ -58,14 +58,19 @@ from config import (
     LIQ_POOL_NO_MOVE_RANGE_PCT_1H, LIQ_POOL_EXPANSION_PRICE_MOVE_PCT_1H,
     LIQ_POOL_EXPANSION_VOLUME_MULT, LIQ_POOL_EXPANSION_BOOK_MULT, LIQ_POOL_EXPANSION_COOLDOWN,
     SMART_MONEY_ENABLED, SMART_MONEY_EXECUTION_TFS, SMART_MONEY_RISK_PCT,
-    MIN_SIGNAL_SIZE_PCT, PRIVATE_EXEC_CHAT_ID, EXECUTION_UPDATES_PRIVATE_ONLY,
+    MIN_SIGNAL_SIZE_PCT, MAX_SIGNAL_SIZE_PCT, PRIVATE_EXEC_CHAT_ID, EXECUTION_UPDATES_PRIVATE_ONLY,
     PRIVATE_EXEC_AI_CONTROL_ENABLED, PRIVATE_EXEC_CONFIRM_TIMEOUT_SEC,
     GEMINI_API_KEY, GEMINI_MODEL, TIMEFRAME_RISK_MULTIPLIERS, BITUNIX_DEFAULT_LEVERAGE,
     NEWS_FILTER_ENABLED, get_active_news_blackout, is_ny_market_holiday,
     TRADING_ECONOMICS_NEWS_ENABLED, TRADING_ECONOMICS_API_KEY,
     TRADING_ECONOMICS_COUNTRIES, TRADING_ECONOMICS_MIN_IMPORTANCE,
     TRADING_ECONOMICS_REFRESH_SEC, TRADING_ECONOMICS_BLOCK_BEFORE_MIN,
-    TRADING_ECONOMICS_BLOCK_AFTER_MIN
+    TRADING_ECONOMICS_BLOCK_AFTER_MIN, FIVE_MIN_STRICT_NEWS_FILTER,
+    FIVE_MIN_NEWS_BLOCK_BEFORE_MIN, FIVE_MIN_NEWS_BLOCK_AFTER_MIN,
+    FIVE_MIN_REQUIRE_15M_PERMISSION, MARKETTWITS_NEWS_ENABLED,
+    MARKETTWITS_CHANNEL_URL, MARKETTWITS_REFRESH_SEC,
+    MARKETTWITS_LOOKBACK_HOURS, MARKETTWITS_BLOCK_AFTER_MIN,
+    MARKETTWITS_MIN_BLOCK_SCORE
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
@@ -79,7 +84,7 @@ from data import (
     fetch_funding_rate, fetch_open_interest, fetch_liquidations, fetch_global_indicators, fetch_order_book,
     fetch_trading_economics_calendar, parse_gemini_trade_instruction, ask_gemini_trade_question,
     ask_gemini_trade_question_with_image,
-    fetch_last_price
+    fetch_last_price, fetch_markettwits_posts
 )
 from tracker import SignalTracker
 from bitunix import verify_bitunix_user
@@ -155,6 +160,9 @@ class PonchBot:
         self.live_news_events = []
         self.last_live_news_refresh = 0.0
         self.last_live_news_error = None
+        self.markettwits_events = []
+        self.last_markettwits_refresh = 0.0
+        self.last_markettwits_error = None
         self.live_exchange_context_cache = None
         self.live_exchange_context_cache_ts = 0.0
         self.live_exchange_history_cache = {}
@@ -255,7 +263,7 @@ class PonchBot:
         if str(title or "").strip() == "Bitunix Startup Check":
             tg.send_execution_notice(title, lines=lines, chat_id=exec_chat, icon=icon)
             return
-        body_lines = [str(line) for line in (lines or []) if str(line).strip()]
+        body_lines = [str(line) for line in (lines or []) if line is not None and str(line).strip() and str(line).strip() != "None"]
         title_text = str(title or "").strip()
         if title_text and title_text not in {"Exec Control", "Confirm Exec Action", "Exec Action Result"}:
             body_lines.insert(0, title_text)
@@ -1524,13 +1532,15 @@ class PonchBot:
             self._send_private_execution_notice("Exec Control", [f"Unsupported action: {action_type}"], icon="вљ пёЏ")
             return False
 
+        current_sig = dict(sig or {})
         if result.payload:
             sig["execution"] = result.payload
+            current_sig["execution"] = result.payload
         self._save_state()
         self._send_private_execution_notice(
             "Exec Action Result",
             self._format_execution_lines(
-                sig,
+                current_sig,
                 extra=[
                     f"I finished that for you. {result.message}" if result.accepted else f"I could not finish that. {result.message}",
                 ],
@@ -1572,6 +1582,18 @@ class PonchBot:
 
         lower = text.lower()
         chat_id = str((message.get("chat") or {}).get("id") or "")
+        if any(phrase in lower for phrase in ["still open", "is it open", "is this open", "is that open"]):
+            focus_payload = self._apply_context_to_action({"action": "status"}, text)
+            sig = self._resolve_signal_for_action(focus_payload, allow_unexecuted=False)
+            if sig:
+                execution = sig.get("execution") or {}
+                if execution.get("active"):
+                    self._send_private_execution_answer("Yes, that position is still open on the exchange.")
+                else:
+                    self._send_private_execution_answer("No, that position is not open anymore.")
+                return True
+            self._send_simple_open_positions_answer()
+            return True
         if self._looks_like_open_positions_text(lower):
             self._send_open_positions_snapshot("Open Positions")
             return True
@@ -1953,8 +1975,15 @@ class PonchBot:
                 next_event = upcoming[0]
                 event_dt = next_event["datetime"].astimezone(timezone.utc).strftime("%d %b %H:%M UTC")
                 return f"The next high-impact US event is {next_event['event']} at {event_dt}."
+            self._refresh_markettwits_events(now)
+            if self.markettwits_events:
+                latest = self.markettwits_events[0]
+                event_dt = latest["datetime"].astimezone(timezone.utc).strftime("%d %b %H:%M UTC")
+                return f"The latest MarketTwits headline shock was '{latest['event']}' at {event_dt}."
             if self.last_live_news_error:
                 return f"The live news feed is having an issue right now: {self.last_live_news_error}."
+            if self.last_markettwits_error:
+                return f"The MarketTwits feed is having an issue right now: {self.last_markettwits_error}."
             return "There are no upcoming high-impact US events right now."
         manual = get_active_news_blackout(now)
         if manual:
@@ -2334,9 +2363,13 @@ class PonchBot:
         side = sig.get("side")
         signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (((sig.get("execution") or {}).get("signal_id")))
         symbol = str(sig.get("symbol") or (sig.get("meta") or {}).get("symbol") or (sig.get("execution") or {}).get("symbol") or SYMBOL).upper()
+        execution = sig.get("execution") or {}
         if signal_id:
-            lines.append("Here is the position ID:")
+            lines.append("Signal ID:")
             lines.append(f"<pre>{signal_id}</pre>")
+        if execution.get("position_id"):
+            lines.append("Bitunix Position ID:")
+            lines.append(f"<pre>{execution.get('position_id')}</pre>")
         detail_lines = []
         if tf or sig_type or side:
             detail_lines.append(f"{sig_type or 'Signal'} {side or 'N/A'} [{tf or 'N/A'}] {symbol}")
@@ -2345,10 +2378,9 @@ class PonchBot:
             detail_lines.append(f"SL: {self._format_live_sl_value(sig)}")
             detail_lines.append(self._format_active_tp_line(sig))
         if detail_lines:
-            lines.append("Here are the current trade details:")
             lines.append("<pre>" + "\n".join(detail_lines) + "</pre>")
         if extra:
-            lines.extend([str(line) for line in extra if str(line).strip()])
+            lines.extend([str(line) for line in extra if line is not None and str(line).strip() and str(line).strip() != "None"])
         return lines
 
     def _session_is_tradeable_today(self, session_name, now):
@@ -2373,6 +2405,131 @@ class PonchBot:
                 return datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc)
             except Exception:
                 continue
+        return None
+
+    def _score_markettwits_post(self, text):
+        raw = str(text or "").strip()
+        lower = raw.lower()
+        if not lower:
+            return None
+
+        score = 0
+        reasons = []
+
+        def hit(words, points, label):
+            nonlocal score
+            if any(word in lower for word in words):
+                score += points
+                reasons.append(label)
+                return True
+            return False
+
+        macro_hit = False
+        macro_hit |= hit(["fomc", "federal reserve", "fed ", "powell", "ставк", "ставка", "фрс"], 4, "fed")
+        macro_hit |= hit(["cpi", "инфляц", "pce", "ppi", "nfp", "payroll", "безработ", "jobless", "pmi", "gdp"], 4, "macro")
+
+        geo_hit = False
+        geo_hit |= hit(["иран", "iran", "израил", "israel", "геополит", "geopolit", "война", "war"], 3, "geopolitics")
+        geo_hit |= hit(["ормуз", "hormuz", "oil", "нефть", "missile", "ракет", "удар", "attack", "санкц", "sanction"], 3, "oil-geo")
+
+        crypto_hit = False
+        crypto_hit |= hit(["bitcoin", "btc", "биткоин", "crypto", "крипт"], 2, "crypto")
+        crypto_hit |= hit(["sec", "etf", "binance", "coinbase", "stablecoin", "usdt", "usdc"], 3, "crypto-market")
+
+        policy_hit = hit(["tariff", "тариф", "трамп", "trump", "ultimatum", "ультимат"], 2, "policy")
+        direct_btc_link = any(word in lower for word in [
+            "bitcoin", "btc", "биткоин", "crypto", "крипт", "etf", "sec", "binance", "coinbase", "stablecoin"
+        ])
+        direct_macro_link = any(word in lower for word in [
+            "fomc", "fed", "powell", "cpi", "pce", "ppi", "nfp", "jobless", "payroll", "ставка", "фрс", "инфляц"
+        ])
+        direct_shock_link = any(word in lower for word in [
+            "oil", "нефть", "ormuz", "ормуз", "missile", "ракет", "attack", "удар", "sanction", "санкц",
+            "war", "война", "iran", "иран", "israel", "израил"
+        ])
+        generic_macro_noise = any(word in lower for word in [
+            "кризис", "crisis", "энергоресурс", "энергетическ", "поставк", "переговор", "серб", "венгр"
+        ])
+        if generic_macro_noise and not (direct_btc_link or direct_macro_link or direct_shock_link):
+            return None
+
+        if ("calendar" in lower or "календарь" in lower) and (direct_macro_link or direct_shock_link):
+            score += 1
+            reasons.append("calendar")
+
+        impactful = False
+        if macro_hit:
+            impactful = True
+        elif geo_hit and (direct_btc_link or "рын" in lower or "market" in lower or "oil" in lower or "нефть" in lower):
+            impactful = True
+        elif geo_hit and policy_hit:
+            impactful = True
+        elif crypto_hit and score >= 5:
+            impactful = True
+        elif score >= 6:
+            impactful = True
+
+        if not impactful:
+            return None
+        if score < int(MARKETTWITS_MIN_BLOCK_SCORE):
+            return None
+
+        headline = raw.splitlines()[0].strip()
+        headline = re.sub(r"\s+", " ", headline)
+        return {
+            "score": score,
+            "reasons": reasons[:4],
+            "headline": headline[:180],
+        }
+
+    def _refresh_markettwits_events(self, now):
+        if not MARKETTWITS_NEWS_ENABLED or not NEWS_FILTER_ENABLED:
+            return
+        current_ts = time.time()
+        if self.markettwits_events and (current_ts - self.last_markettwits_refresh) < max(30, MARKETTWITS_REFRESH_SEC):
+            return
+        posts = fetch_markettwits_posts(MARKETTWITS_CHANNEL_URL, limit=30)
+        parsed = []
+        cutoff = (now - timedelta(hours=max(1, MARKETTWITS_LOOKBACK_HOURS))).astimezone(timezone.utc)
+        for post in posts or []:
+            event_dt = self._parse_te_datetime(post.get("datetime"))
+            if not event_dt or event_dt < cutoff:
+                continue
+            scored = self._score_markettwits_post(post.get("text"))
+            if not scored:
+                continue
+            parsed.append({
+                "id": str(post.get("id") or "").strip(),
+                "datetime": event_dt,
+                "event": scored["headline"] or "MarketTwits headline shock",
+                "score": int(scored["score"]),
+                "reasons": list(scored["reasons"]),
+                "url": str(post.get("url") or "").strip(),
+                "source": "MARKETTWITS",
+            })
+        self.markettwits_events = sorted(parsed, key=lambda row: row["datetime"], reverse=True)
+        self.last_markettwits_refresh = current_ts
+        self.last_markettwits_error = None if parsed or posts == [] else "No parsable MarketTwits posts returned."
+
+    def _get_markettwits_blackout(self, now):
+        if not MARKETTWITS_NEWS_ENABLED or not NEWS_FILTER_ENABLED:
+            return None
+        self._refresh_markettwits_events(now)
+        now_utc = now.astimezone(timezone.utc) if now.tzinfo else now.replace(tzinfo=timezone.utc)
+        block_after = timedelta(minutes=max(1, MARKETTWITS_BLOCK_AFTER_MIN))
+        for event in self.markettwits_events:
+            start = event["datetime"]
+            end = event["datetime"] + block_after
+            if start <= now_utc <= end:
+                return {
+                    "source": "MARKETTWITS",
+                    "label": event["event"],
+                    "start": start,
+                    "end": end,
+                    "event_time": event["datetime"],
+                    "score": event.get("score"),
+                    "url": event.get("url"),
+                }
         return None
 
     def _refresh_live_news_events(self, now):
@@ -2433,7 +2590,76 @@ class PonchBot:
             manual = dict(manual)
             manual["source"] = "MANUAL"
             return manual
-        return self._get_live_news_blackout(now)
+        live_block = self._get_live_news_blackout(now)
+        if live_block:
+            return live_block
+        return self._get_markettwits_blackout(now)
+
+    def _get_5m_strict_news_block(self, now):
+        if not NEWS_FILTER_ENABLED or not FIVE_MIN_STRICT_NEWS_FILTER:
+            return None
+        manual = get_active_news_blackout(now)
+        if manual:
+            manual = dict(manual)
+            manual["source"] = "MANUAL"
+            return manual
+        if TRADING_ECONOMICS_NEWS_ENABLED:
+            self._refresh_live_news_events(now)
+            before = timedelta(minutes=max(0, FIVE_MIN_NEWS_BLOCK_BEFORE_MIN))
+            after = timedelta(minutes=max(0, FIVE_MIN_NEWS_BLOCK_AFTER_MIN))
+            now_utc = now.astimezone(timezone.utc) if now.tzinfo else now.replace(tzinfo=timezone.utc)
+            for event in self.live_news_events:
+                start = event["datetime"] - before
+                end = event["datetime"] + after
+                if start <= now_utc <= end:
+                    return {
+                        "source": "TRADING_ECONOMICS_5M",
+                        "label": event["event"],
+                        "country": event["country"],
+                        "importance": event["importance"],
+                        "start": start,
+                        "end": end,
+                        "event_time": event["datetime"],
+                    }
+        markettwits_block = self._get_markettwits_blackout(now)
+        if markettwits_block:
+            mt_block = dict(markettwits_block)
+            mt_block["source"] = "MARKETTWITS_5M"
+            return mt_block
+        return None
+
+    def _get_5m_higher_tf_guard_reason(self, side):
+        if not FIVE_MIN_REQUIRE_15M_PERMISSION:
+            return None
+        df_15m = self.latest_data.get("15m")
+        try:
+            if df_15m is None or df_15m.empty or len(df_15m) < 3:
+                return None
+        except Exception:
+            return None
+
+        curr = df_15m.iloc[-1]
+        prev = df_15m.iloc[-2]
+        rsi_now = float(curr.get("RSI", 50) or 50)
+        rsi_prev = float(prev.get("RSI", rsi_now) or rsi_now)
+        smooth_now = float(curr.get("MomentumSmooth", rsi_now) or rsi_now)
+        smooth_prev = float(prev.get("MomentumSmooth", smooth_now) or smooth_now)
+        zone_15m = classify_momentum_zone(smooth_now, "15m")
+        trend_15m = (getattr(self, "tf_trends", {}) or {}).get("15m") or detect_trend(df_15m)
+        trend_side_15m = self._trend_side(trend_15m)
+        side = str(side or "").upper()
+
+        if side == "LONG":
+            if trend_side_15m == "SHORT" and rsi_now < 52 and smooth_now <= smooth_prev:
+                return f"15m trend is still bearish and RSI is not recovering yet ({rsi_now:.1f})"
+            if zone_15m != "OS" and rsi_now < 50 and rsi_now <= rsi_prev and smooth_now <= smooth_prev:
+                return f"15m RSI still has room to fall ({rsi_now:.1f})"
+        elif side == "SHORT":
+            if trend_side_15m == "LONG" and rsi_now > 48 and smooth_now >= smooth_prev:
+                return f"15m trend is still bullish and RSI is not rolling over yet ({rsi_now:.1f})"
+            if zone_15m != "OB" and rsi_now > 50 and rsi_now >= rsi_prev and smooth_now >= smooth_prev:
+                return f"15m RSI still has room to rise ({rsi_now:.1f})"
+        return None
 
     def _get_current_session_name(self, now):
         """Return active session name (ASIA/LONDON/NY) or None."""
@@ -2920,6 +3146,31 @@ class PonchBot:
         if not SCALP_EXPOSURE_ENABLED:
             return {"total": 0, "by_side": {}, "by_tf": {}}
         return self.tracker.get_open_signal_counts("SCALP")
+
+    def _has_active_opposite_signal(self, side, symbol=None):
+        """Return the latest active opposite-side signal if one is still open."""
+        if not BLOCK_OPPOSITE_SIDE_SIGNALS:
+            return None
+        wanted_symbol = str(symbol or SYMBOL).upper()
+        opposite = "SHORT" if str(side).upper() == "LONG" else "LONG"
+        terminal_statuses = {"SL", "TP3", "CLOSED", "ENTRY_CLOSE", "PROFIT_SL"}
+        for sig in reversed(self.tracker.signals):
+            sig_side = str(sig.get("side") or "").upper()
+            sig_symbol = str(sig.get("symbol") or (sig.get("meta") or {}).get("symbol") or SYMBOL).upper()
+            if sig_side != opposite or sig_symbol != wanted_symbol:
+                continue
+            execution = sig.get("execution") or {}
+            status = str(sig.get("status") or "OPEN").upper()
+            if execution:
+                if execution.get("active"):
+                    return sig
+                if status in terminal_statuses:
+                    continue
+            elif status in terminal_statuses:
+                continue
+            else:
+                return sig
+        return None
 
 
     def run(self):
@@ -3476,8 +3727,20 @@ class PonchBot:
                     
                     if proximity_blocked: continue
 
-                    # 3. Calculate targets (Wider 1.0 ATR for confluence breathing room)
-                    sl_m, tp1_m, tp2_m, tp3_m = 1.0, 0.8, 1.6, 2.4 
+                    opposite_sig = self._has_active_opposite_signal(side, SYMBOL)
+                    if opposite_sig:
+                        print(
+                            f"  [CONFLUENCE] Blocked {side}: opposite active "
+                            f"{opposite_sig.get('side')} [{opposite_sig.get('tf', 'N/A')}] still open"
+                        )
+                        continue
+
+                    # 3. Calculate targets from timeframe ATR model.
+                    risk_cfg = TIMEFRAME_RISK_MULTIPLIERS.get(tf, TIMEFRAME_RISK_MULTIPLIERS.get("5m", {}))
+                    sl_m = float(risk_cfg.get("sl", 1.0))
+                    tp1_m = float(risk_cfg.get("tp1", 1.0))
+                    tp2_m = float(risk_cfg.get("tp2", 1.8))
+                    tp3_m = float(risk_cfg.get("tp3", 2.5))
                     if side == "LONG":
                         sl_c  = latest_price - ref_atr * sl_m
                         tp1_c = latest_price + ref_atr * tp1_m
@@ -3490,7 +3753,10 @@ class PonchBot:
                         tp3_c = latest_price - ref_atr * tp3_m
 
                     if ce["type"] == "STRONG":
-                        strong_size = round(max(MIN_SIGNAL_SIZE_PCT, min(ce["points"] * 1.5, 10.0)), 1)
+                        strong_size = round(
+                            min(MAX_SIGNAL_SIZE_PCT, max(MIN_SIGNAL_SIZE_PCT, ce["points"] * 1.5)),
+                            1,
+                        )
                         tp_liq = self._estimate_tp_liquidity(side, latest_price, tp1_c, tp2_c, tp3_c)
                         signal_id = new_signal_id()
                         resp = tg.send_strong(
@@ -3521,12 +3787,16 @@ class PonchBot:
                             }
                         )
                         self.tracker.signals[-1]["signal_id"] = signal_id
+                        self.tracker.signals[-1]["signal_size_pct"] = strong_size
                         self._execute_exchange_trade(self.tracker.signals[-1])
                         self._save_state()
                         print(f"  [CONFLUENCE] STRONG {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
 
                     elif ce["type"] == "EXTREME":
-                        extreme_size = round(max(MIN_SIGNAL_SIZE_PCT + 2.5, min(ce["points"] * 2.0, 15.0)), 1)
+                        extreme_size = round(
+                            min(MAX_SIGNAL_SIZE_PCT, max(MIN_SIGNAL_SIZE_PCT, ce["points"] * 2.0)),
+                            1,
+                        )
                         tp_liq = self._estimate_tp_liquidity(side, latest_price, tp1_c, tp2_c, tp3_c)
                         signal_id = new_signal_id()
                         resp = tg.send_extreme(
@@ -3557,6 +3827,7 @@ class PonchBot:
                             }
                         )
                         self.tracker.signals[-1]["signal_id"] = signal_id
+                        self.tracker.signals[-1]["signal_size_pct"] = extreme_size
                         self._execute_exchange_trade(self.tracker.signals[-1])
                         self._save_state()
                         print(f"  [CONFLUENCE] EXTREME {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
@@ -3581,19 +3852,9 @@ class PonchBot:
                 current_candle_ts_set=current_candle_ts_set
             )
             today_str = now.strftime("%Y-%m-%d")
-            inactive_event_signals = set()
-
             for event in trade_events:
                 sig = event["sig"]
                 evt_type = event["type"] # "TP1", "TP2", "TP3", "SL"
-                signal_id = str(
-                    sig.get("signal_id")
-                    or ((sig.get("meta") or {}).get("signal_id"))
-                    or (((sig.get("execution") or {}).get("signal_id")))
-                    or ""
-                ).strip()
-                if signal_id and signal_id in inactive_event_signals:
-                    continue
                 side = sig.get("side")
                 risk_state_changed = False
 
@@ -3668,9 +3929,6 @@ class PonchBot:
 
                 if evt_type in ("TP1", "TP2", "TP3", "ENTRY_CLOSE", "PROFIT_SL", "SL"):
                     self._sync_exchange_trade_event(sig, evt_type)
-                    execution = (sig.get("execution") or {})
-                    if signal_id and execution and not execution.get("active", True):
-                        inactive_event_signals.add(signal_id)
 
             # 2. Liquidation Squeezes
             if self.last_liqs >= LIQ_SQUEEZE_THRESHOLD:
@@ -4265,9 +4523,7 @@ class PonchBot:
                 self._format_execution_lines(
                     sig_obj,
                     extra=[
-                        str(e),
-                        f"endpoint={endpoint}" if endpoint else None,
-                        f"response={response_text}" if response_text else None,
+                        f"I could not open it. {str(e)}",
                     ],
                 ),
             )
@@ -4276,6 +4532,19 @@ class PonchBot:
         status = "accepted" if result.accepted else "blocked"
         print(f"  [TRADE] {status.upper()} {sig_obj.get('type')} {sig_obj.get('side')}: {result.message}")
         details = result.payload or {}
+        actual_size_pct = details.get("signal_size_pct")
+        try:
+            actual_size_pct = float(actual_size_pct)
+        except Exception:
+            actual_size_pct = 0.0
+        if actual_size_pct > 0:
+            sig_obj["signal_size_pct"] = actual_size_pct
+            meta = sig_obj.setdefault("meta", {})
+            meta["size"] = actual_size_pct
+            try:
+                self.tracker.persist()
+            except Exception:
+                pass
         if "exchange_open_positions" in details:
             print(f"  [TRADE] Exchange open positions: {int(details.get('exchange_open_positions', 0) or 0)}")
         if details:
@@ -4335,18 +4604,20 @@ class PonchBot:
                 print(f"  [TRADE] Protection ready: {bool(exec_info.get('protection_ready'))}")
             for warning in exec_info.get("protection_warnings", []) or []:
                 print(f"  [TRADE] Protection warning: {warning}")
+        current_sig = dict(sig_obj or {})
+        if result.accepted and result.payload:
+            current_sig["execution"] = result.payload
         summary_lines = [
             f"{sig_obj.get('type', 'Signal')} {sig_obj.get('side', 'N/A')} [{sig_obj.get('tf', 'N/A')}] {str(sig_obj.get('symbol') or (sig_obj.get('meta') or {}).get('symbol') or SYMBOL).upper()}",
             f"Entry: {float(sig_obj.get('entry', 0) or 0):.2f}",
-            f"SL: {self._format_live_sl_value(sig_obj)}",
-            self._format_active_tp_line(sig_obj),
+            f"SL: {self._format_live_sl_value(current_sig)}",
+            self._format_active_tp_line(current_sig),
         ]
         notice_lines = []
         signal_id = sig_obj.get("signal_id") or ((sig_obj.get("meta") or {}).get("signal_id")) or (((sig_obj.get("execution") or {}).get("signal_id")))
         if signal_id:
-            notice_lines.append("Here is the signal ID:")
+            notice_lines.append("Signal ID:")
             notice_lines.append(f"<pre>{signal_id}</pre>")
-        notice_lines.append("Here is the trade that was sent to Bitunix:")
         notice_lines.append("<pre>" + "\n".join(summary_lines) + "</pre>")
         notice_lines.append(
             f"I opened it successfully. {result.message}"
@@ -4354,11 +4625,10 @@ class PonchBot:
             else f"I could not open it. {result.message}"
         )
         if details.get("position_id"):
-            notice_lines.append("Bitunix returned this position ID:")
+            notice_lines.append("Bitunix Position ID:")
             notice_lines.append(f"<pre>{details.get('position_id')}</pre>")
         warning_lines = [str(w) for w in (details.get("protection_warnings") or []) if str(w).strip()]
         if warning_lines:
-            notice_lines.append("A few execution details came back with it:")
             notice_lines.append("<pre>" + "\n".join(warning_lines) + "</pre>")
         self._send_private_execution_notice(
             f"Exchange {status.title()}: {sig_obj.get('type')} {sig_obj.get('side')}",
@@ -4395,10 +4665,18 @@ class PonchBot:
             )
             return
         print(f"  [TRADE] {event_type}: {result.message}")
+        if str(result.message or "").strip().lower() == "execution already inactive.":
+            if result.payload:
+                sig_obj["execution"] = result.payload
+                self._save_state()
+            return
+        current_sig = dict(sig_obj or {})
+        if result.payload:
+            current_sig["execution"] = result.payload
         self._send_private_execution_notice(
             f"Execution Update: {event_type}",
             self._format_execution_lines(
-                sig_obj,
+                current_sig,
                 extra=[
                     f"I updated it. {result.message}",
                     f"The new stop is {float(result.payload.get('sl_moved_to') or 0):.2f}." if (result.payload or {}).get("sl_moved_to") is not None else None,
@@ -4608,6 +4886,8 @@ class PonchBot:
                     })
 
         divergence_sides = set()
+        div_sigs = check_rsi_divergence(df, tf)
+        divergence_sides = {str(s.get("side")).upper() for s in div_sigs if s.get("active", True) and s.get("side")}
         # 5m is scalp-only: skip non-scalp confirmation engines on this timeframe.
         if tf != "5m":
             # 1. Trade Signals (Channels)
@@ -4621,8 +4901,6 @@ class PonchBot:
 
             # 2. Momentum confirmation
             mom_sigs = check_momentum_confirm(df)
-            div_sigs = check_rsi_divergence(df, tf)
-            divergence_sides = {s.get("side") for s in div_sigs if s.get("active", True)}
             for sig in mom_sigs:
                 sig_key = f"mom_sig_{tf}_{sig['side']}_{candle_ts}"
                 if sig_key not in self.sent_signals:
@@ -4647,16 +4925,15 @@ class PonchBot:
                     self.sent_signals.add(sig_key)
                     sig["tf"] = tf
                     self.confirmations.add_signal(sig)
-
-            # 5. RSI divergence confirmation
-            for sig in div_sigs:
-                if not sig.get("active", True):
-                    continue
-                sig_key = f"rsi_div_{tf}_{sig['side']}_{candle_ts}"
-                if sig_key not in self.sent_signals:
-                    self.sent_signals.add(sig_key)
-                    sig["tf"] = tf
-                    self.confirmations.add_signal(sig)
+        # 5. RSI divergence confirmation
+        for sig in div_sigs:
+            if not sig.get("active", True):
+                continue
+            sig_key = f"rsi_div_{tf}_{sig['side']}_{candle_ts}"
+            if sig_key not in self.sent_signals:
+                self.sent_signals.add(sig_key)
+                sig["tf"] = tf
+                self.confirmations.add_signal(sig)
 
         # в”Ђв”Ђв”Ђ Scalp Momentum System в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ
         tracker = self.scalp_trackers[tf]
@@ -4739,9 +5016,6 @@ class PonchBot:
                         evt, df, self.levels, self.macro_trend, self.last_oi, self.last_liqs
                     )
                 side = evt["side"]
-                if side in divergence_sides:
-                    score += 1
-                    reasons.append("RSI Divergence")
 
                 divergence_note = self._get_opposite_divergence_note(side)
                 if divergence_note:
@@ -4854,6 +5128,26 @@ class PonchBot:
                     source = str(news_blackout.get("source") or "NEWS")
                     print(f"  [SCALP] Blocked {tf} {side}: news blackout active ({label} via {source})")
                     continue
+                if tf == "5m":
+                    news_blackout_5m = self._get_5m_strict_news_block(now)
+                    if news_blackout_5m:
+                        label = str(news_blackout_5m.get("label") or "High Impact News")
+                        source = str(news_blackout_5m.get("source") or "NEWS")
+                        print(f"  [SCALP] Blocked {tf} {side}: strict 5m news guard active ({label} via {source})")
+                        continue
+
+                opposite_sig = self._has_active_opposite_signal(side, SYMBOL)
+                if opposite_sig:
+                    print(
+                        f"  [SCALP] Blocked {tf} {side}: opposite active "
+                        f"{opposite_sig.get('side')} [{opposite_sig.get('tf', 'N/A')}] still open"
+                    )
+                    continue
+                if tf == "5m":
+                    htf_guard_reason = self._get_5m_higher_tf_guard_reason(side)
+                    if htf_guard_reason:
+                        print(f"  [SCALP] Blocked {tf} {side}: {htf_guard_reason}")
+                        continue
 
                 # --- Minimum score gate by timeframe ---
                 min_score_tf = SCALP_MIN_SCORE_BY_TF.get(tf, 0)
@@ -4960,10 +5254,16 @@ class PonchBot:
 
                 # Dynamic size: scale base size by score, with a global minimum size floor.
                 if str(evt.get("strategy", "")).upper() == "SMART_MONEY_LIQUIDITY":
-                    dyn_size = max(float(MIN_SIGNAL_SIZE_PCT), float(evt.get("size", SMART_MONEY_RISK_PCT)))
+                    dyn_size = min(
+                        float(MAX_SIGNAL_SIZE_PCT),
+                        max(float(MIN_SIGNAL_SIZE_PCT), float(evt.get("size", SMART_MONEY_RISK_PCT))),
+                    )
                 else:
                     dyn_base = max(float(MIN_SIGNAL_SIZE_PCT), (score / 10) * profile["size"]) if score else max(float(MIN_SIGNAL_SIZE_PCT), profile["size"])
-                    dyn_size = round(max(float(MIN_SIGNAL_SIZE_PCT), dyn_base * size_mult), 1)
+                    dyn_size = round(
+                        min(float(MAX_SIGNAL_SIZE_PCT), max(float(MIN_SIGNAL_SIZE_PCT), dyn_base * size_mult)),
+                        1,
+                    )
                 tp_liq = self._estimate_tp_liquidity(evt["side"], evt["entry"], evt["tp1"], evt["tp2"], evt["tp3"])
                 signal_id = new_signal_id()
 
@@ -5020,6 +5320,7 @@ class PonchBot:
                     }
                 )
                 self.tracker.signals[-1]["signal_id"] = signal_id
+                self.tracker.signals[-1]["signal_size_pct"] = dyn_size
                 self._execute_exchange_trade(self.tracker.signals[-1])
 
             elif evt["type"] == "CLOSED":
