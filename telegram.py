@@ -1,7 +1,7 @@
 ﻿import os
 import json
 import requests
-from config import BOT_TOKEN, SYMBOL, PRIVATE_CHAT_ID, PRIVATE_EXEC_CHAT_ID
+from config import BOT_TOKEN, SYMBOL, CHAT_ID, PRIVATE_EXEC_CHAT_ID
 
 API_URL_MSG   = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 API_URL_PHOTO = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
@@ -25,7 +25,7 @@ def get_updates(offset=None):
 
 def send(text, parse_mode=None, chat_id=None, reply_markup=None, reply_to_message_id=None):
     """Send a message via Telegram Bot API."""
-    target_chat = chat_id if chat_id else PRIVATE_CHAT_ID
+    target_chat = chat_id if chat_id else CHAT_ID
     try:
         payload = {
             "chat_id": target_chat,
@@ -50,7 +50,7 @@ def send(text, parse_mode=None, chat_id=None, reply_markup=None, reply_to_messag
 
 def send_execution_notice(title, lines=None, chat_id=None, icon="🔐"):
     """Send a private execution/update notice to the execution channel."""
-    target_chat = chat_id if chat_id else (PRIVATE_EXEC_CHAT_ID or PRIVATE_CHAT_ID)
+    target_chat = chat_id if chat_id else (PRIVATE_EXEC_CHAT_ID or CHAT_ID)
     body = ""
     if lines:
         clean_lines = [str(line) for line in lines if str(line).strip()]
@@ -122,7 +122,7 @@ def send_profit_sl_alert(chat_id, message_id, tf):
 
 def edit_message_text(message_id, text, chat_id=None, parse_mode="HTML"):
     """Edit an existing text message."""
-    target_chat = chat_id if chat_id else PRIVATE_CHAT_ID
+    target_chat = chat_id if chat_id else CHAT_ID
     try:
         payload = {
             "chat_id": target_chat,
@@ -145,7 +145,7 @@ def edit_message_text(message_id, text, chat_id=None, parse_mode="HTML"):
 
 def send_photo(photo_path, caption=None, chat_id=None):
     """Send a photo via Telegram Bot API."""
-    target_chat = chat_id if chat_id else PRIVATE_CHAT_ID
+    target_chat = chat_id if chat_id else CHAT_ID
     try:
         with open(photo_path, 'rb') as f:
             files = {'photo': f}
@@ -166,7 +166,7 @@ def send_photo(photo_path, caption=None, chat_id=None):
 
 def edit_message_media(message_id, photo_path, caption=None, chat_id=None):
     """Edit the photo of an existing message."""
-    target_chat = chat_id if chat_id else PRIVATE_CHAT_ID
+    target_chat = chat_id if chat_id else CHAT_ID
     try:
         with open(photo_path, 'rb') as f:
             media = {

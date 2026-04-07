@@ -20,7 +20,7 @@ from config import (
     FUNDING_COOLDOWN, VOLUME_SPIKE_MULT, VOLUME_SPIKE_TIMEFRAMES,
     VOLUME_AVG_PERIOD, APPROACH_THRESHOLD, APPROACH_COOLDOWN,
     APPROACH_LEVELS, SESSIONS, get_adjusted_sessions, ALERT_BATCH_WINDOW,
-    OI_CHANGE_THRESHOLD, LIQ_SQUEEZE_THRESHOLD, LIQ_ALERT_COOLDOWN, PRIVATE_CHAT_ID,
+    OI_CHANGE_THRESHOLD, LIQ_SQUEEZE_THRESHOLD, LIQ_ALERT_COOLDOWN, CHAT_ID,
     FAST_MOVE_THRESHOLD, FAST_MOVE_WINDOW, FAST_MOVE_COOLDOWN,
     BITUNIX_REG_LINK, INVITE_LINK, COMMAND_POLL_INTERVAL,
     SCALP_TREND_FILTER_MODE, SCALP_COUNTERTREND_MIN_SCORE,
@@ -246,10 +246,10 @@ class PonchBot:
             self.batch_timer_start = time.time()
 
     def _execution_chat_id(self):
-        return PRIVATE_EXEC_CHAT_ID or PRIVATE_CHAT_ID
+        return PRIVATE_EXEC_CHAT_ID or CHAT_ID
 
     def _signal_chat_id(self):
-        return PRIVATE_CHAT_ID
+        return CHAT_ID
 
     def _execution_updates_private_only(self):
         return bool(EXECUTION_UPDATES_PRIVATE_ONLY and self._execution_chat_id())
@@ -3070,7 +3070,7 @@ class PonchBot:
         lines.append("</pre>")
         msg = "\n".join(lines)
         if not self.is_booting:
-            tg.send(msg, parse_mode="HTML", chat_id=PRIVATE_CHAT_ID)
+            tg.send(msg, parse_mode="HTML", chat_id=CHAT_ID)
         self._save_state()
 
     def _estimate_tp_liquidity(self, side, entry, tp1, tp2, tp3):
@@ -3238,7 +3238,7 @@ class PonchBot:
         print(f"  Symbol: {SYMBOL}")
         print(f"  Timeframes: {', '.join(SIGNAL_TIMEFRAMES)}")
         print(f"  Poll interval: {POLL_INTERVAL}s")
-        print(f"  Private Chat: {PRIVATE_CHAT_ID}")
+        print(f"  Chat: {CHAT_ID}")
         print(f"{'='*50}")
 
         tg.send_startup()
@@ -3617,7 +3617,7 @@ class PonchBot:
                 if abs(move_pct) >= FAST_MOVE_THRESHOLD:
                     if current_time - self.last_market_alert > FAST_MOVE_COOLDOWN:
                         if not self.is_booting:
-                            tg.send_market_alert(move_pct * 100, FAST_MOVE_WINDOW, past_p, curr_p, chat_id=PRIVATE_CHAT_ID)
+                            tg.send_market_alert(move_pct * 100, FAST_MOVE_WINDOW, past_p, curr_p, chat_id=CHAT_ID)
                         self.last_market_alert = current_time
                         self._save_state()
                         print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Market Alert: {move_pct*100:.1f}%")
@@ -3642,7 +3642,7 @@ class PonchBot:
                     if current_time - self.last_funding_alert > FUNDING_COOLDOWN:
                         direction = "POSITIVE" if rate > 0 else "NEGATIVE"
                         if not self.is_booting:
-                            tg.send_funding_alert(rate, direction, chat_id=PRIVATE_CHAT_ID)
+                            tg.send_funding_alert(rate, direction, chat_id=CHAT_ID)
                         self.last_funding_alert = current_time
                         print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Funding Alert: {direction} {rate:.4f}")
 
@@ -3990,7 +3990,7 @@ class PonchBot:
             if self.last_liqs >= LIQ_SQUEEZE_THRESHOLD:
                 if current_time - self.last_liq_alert_time > LIQ_ALERT_COOLDOWN:
                     if not self.is_booting:
-                        tg.send_squeeze_alert(self.last_liqs, latest_price, chat_id=PRIVATE_CHAT_ID)
+                        tg.send_squeeze_alert(self.last_liqs, latest_price, chat_id=CHAT_ID)
                     self.last_liq_alert_time = current_time
                     print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Liquidation Squeeze: ${self.last_liqs/1e6:.1f}M")
 
@@ -4014,7 +4014,7 @@ class PonchBot:
                         if sig_key not in self.sent_signals:
                             self.sent_signals.add(sig_key)
                             if not self.is_booting:
-                                tg.send_oi_divergence(price_chg*100, oi_chg*100, note, chat_id=PRIVATE_CHAT_ID)
+                                tg.send_oi_divergence(price_chg*100, oi_chg*100, note, chat_id=CHAT_ID)
                             self._save_state()
                             print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} OI Divergence: {note}")
 
@@ -4085,7 +4085,7 @@ class PonchBot:
                             high=self.session_data[session_id]["high"],
                             low=self.session_data[session_id]["low"],
                             chart_path=chart_path,
-                            chat_id=PRIVATE_CHAT_ID
+                            chat_id=CHAT_ID
                         )
                         
                         if resp and "response" in resp:
@@ -4135,7 +4135,7 @@ class PonchBot:
                             chart_path = self._generate_current_chart(f"session_close_{s_name}.png")
 
                             if not self.is_booting:
-                                tg.send_session_summary(s_name, open_p, latest_price, stats["total"], levels, history=history_text, high=s_high, low=s_low, chart_path=chart_path, chat_id=PRIVATE_CHAT_ID)
+                                tg.send_session_summary(s_name, open_p, latest_price, stats["total"], levels, history=history_text, high=s_high, low=s_low, chart_path=chart_path, chat_id=CHAT_ID)
                             
                             # Save to history for NEXT sessions
                             change = latest_price - open_p
@@ -4212,7 +4212,7 @@ class PonchBot:
                             low=s_data.get("low")
                         )
                         if not self.is_booting:
-                            res = tg.edit_message_media(info["msg_id"], chart_path, caption=new_html, chat_id=PRIVATE_CHAT_ID)
+                            res = tg.edit_message_media(info["msg_id"], chart_path, caption=new_html, chat_id=CHAT_ID)
                             if res == "DELETED":
                                 del self.session_msg_ids[s_id]
                                 self._save_state()
@@ -4258,7 +4258,7 @@ class PonchBot:
                             indicators=new_inds
                         )
                         if not self.is_booting:
-                            tg.edit_message_media(d_msg_id, chart_path, caption=new_html, chat_id=PRIVATE_CHAT_ID)
+                            tg.edit_message_media(d_msg_id, chart_path, caption=new_html, chat_id=CHAT_ID)
                         else:
                             print(f"  [TG] Skipped editing daily report (booting)")
 
@@ -4353,7 +4353,7 @@ class PonchBot:
                 critical_low=self.levels.get("DumpMax", 0),
                 indicators=indicators,
                 chart_path=chart_path,
-                chat_id=PRIVATE_CHAT_ID
+                chat_id=CHAT_ID
             )
         else:
             print(f"  [TG] Skipped sending daily levels report (booting)")
@@ -4509,7 +4509,7 @@ class PonchBot:
             stats = self.tracker.get_daily_summary(window_end)
             if stats:
                 if not self.is_booting:
-                    tg.send_performance_summary(stats, chat_id=PRIVATE_CHAT_ID)
+                    tg.send_performance_summary(stats, chat_id=CHAT_ID)
                 else:
                     print(f"  [TG] Skipped sending performance summary (booting)")
             else:
@@ -4813,7 +4813,7 @@ class PonchBot:
                         },
                         callback=tg.send_volume_spike,
                         args=(tf, current_vol, avg_vol, current_vol/avg_vol, close),
-                        chat_id=PRIVATE_CHAT_ID
+                        chat_id=CHAT_ID
                     )
                     print(f"  [SIG] Volume Spike [{tf}] {current_vol/avg_vol:.1f}x avg vol")
 
@@ -4866,7 +4866,7 @@ class PonchBot:
                             },
                             callback=tg.send_approaching_level,
                             args=(lvl_name, lvl_price, close, closest_dist * 100),
-                            chat_id=PRIVATE_CHAT_ID
+                            chat_id=CHAT_ID
                         )
                         self.approach_alerts[lvl_name] = current_time
                         self._save_state()
@@ -4891,7 +4891,7 @@ class PonchBot:
                     self._save_state()
                     
                     if not self.is_booting:
-                        tg.send_liquidity_sweep(**sw, chat_id=PRIVATE_CHAT_ID)
+                        tg.send_liquidity_sweep(**sw, chat_id=CHAT_ID)
                     
                     print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Liquidity Sweep: {sw['level']} ({sw['side']})")
 
@@ -4920,7 +4920,7 @@ class PonchBot:
                     self.sent_signals.add(sig_key)
                     
                     if not self.is_booting:
-                        tg.send_volatility_touch(**vt, chat_id=PRIVATE_CHAT_ID)
+                        tg.send_volatility_touch(**vt, chat_id=CHAT_ID)
                         self._save_state()
                     
                     print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Vol Zone Touch: {vt['level']} ({vt['side']})")
