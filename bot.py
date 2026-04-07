@@ -2383,6 +2383,46 @@ class PonchBot:
             lines.extend([str(line) for line in extra if line is not None and str(line).strip() and str(line).strip() != "None"])
         return lines
 
+    def _build_private_execution_update_html(self, sig, event_type, result_message=None):
+        sig = sig or {}
+        side = str(sig.get("side") or "N/A").upper()
+        tf = str(sig.get("tf") or "N/A")
+        trade_name = f"{side} trade on {tf}"
+        event_key = str(event_type or "").upper()
+        result_text = str(result_message or "").strip()
+
+        if event_key == "TP1":
+            intro = f"I took the first target on this {trade_name} and moved the stop to entry."
+        elif event_key == "TP2":
+            if "closed the full position" in result_text.lower():
+                intro = f"I closed the full {trade_name} at TP2."
+            else:
+                intro = f"I took the second target on this {trade_name}."
+        elif event_key == "TP3":
+            intro = f"This {trade_name} hit the final target and is fully closed."
+        elif event_key == "ENTRY_CLOSE":
+            intro = f"This {trade_name} closed at breakeven after protection was on."
+        elif event_key == "PROFIT_SL":
+            intro = f"This {trade_name} closed on the protected stop in profit."
+        elif event_key == "SL":
+            intro = f"This {trade_name} was closed by the stop loss."
+        else:
+            intro = f"I updated this {trade_name}."
+
+        detail_lines = self._format_execution_lines(
+            sig,
+            extra=[
+                f"The new stop is {float((sig.get('execution') or {}).get('sl_moved_to') or 0):.2f}."
+                if (sig.get("execution") or {}).get("sl_moved_to") is not None
+                else None
+            ],
+        )
+        rendered = [html.escape(intro)]
+        if detail_lines:
+            rendered.append("")
+            rendered.extend(detail_lines)
+        return "\n".join(part for part in rendered if part is not None and str(part).strip() != "")
+
     def _session_is_tradeable_today(self, session_name, now):
         if session_name == "NY" and is_ny_market_holiday(now):
             return False
@@ -3918,12 +3958,6 @@ class PonchBot:
                     elif evt_type == "PROFIT_SL":
                         tg.send_profit_sl_alert(sig["chat_id"], sig["msg_id"], sig.get("tf", "Unknown"))
 
-                if self._execution_chat_id():
-                    self._send_private_execution_notice(
-                        f"{evt_type} {sig.get('side', 'N/A')} [{sig.get('tf', 'N/A')}]",
-                        self._format_execution_lines(sig),
-                    )
-
                 if risk_state_changed:
                     self._save_state()
 
@@ -4673,15 +4707,8 @@ class PonchBot:
         current_sig = dict(sig_obj or {})
         if result.payload:
             current_sig["execution"] = result.payload
-        self._send_private_execution_notice(
-            f"Execution Update: {event_type}",
-            self._format_execution_lines(
-                current_sig,
-                extra=[
-                    f"I updated it. {result.message}",
-                    f"The new stop is {float(result.payload.get('sl_moved_to') or 0):.2f}." if (result.payload or {}).get("sl_moved_to") is not None else None,
-                ],
-            ),
+        self._send_private_execution_answer(
+            self._build_private_execution_update_html(current_sig, event_type, result.message)
         )
         if result.payload:
             sig_obj["execution"] = result.payload
