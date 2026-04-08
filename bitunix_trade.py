@@ -33,6 +33,7 @@ from config import (
     BITUNIX_TP_SPLITS,
     BITUNIX_TRADING_ENABLED,
     BITUNIX_TRADING_MODE,
+    BREAKEVEN_FEE_BUFFER_PCT,
     SMART_MONEY_TP_SPLITS,
     SYMBOL,
 )
@@ -655,6 +656,29 @@ class TradeExecutor:
                 return price
         return None
 
+    @staticmethod
+    def _breakeven_lock_price(signal: Dict[str, Any]) -> float:
+        entry = float(signal.get("entry") or 0)
+        side = str(signal.get("side") or "").upper()
+        buffer_pct = max(0.0, float(BREAKEVEN_FEE_BUFFER_PCT or 0.0))
+        if entry <= 0:
+            return 0.0
+        if side == "LONG":
+            return entry * (1.0 + buffer_pct / 100.0)
+        if side == "SHORT":
+            return entry * (1.0 - buffer_pct / 100.0)
+        return entry
+
+    def _update_position_stop(self, symbol: str, position_id: str, signal: Dict[str, Any], execution: Dict[str, Any], new_sl: float) -> None:
+        current_tp_price = self._current_position_tp_price(signal, execution)
+        if current_tp_price is not None:
+            self.client.modify_position_tpsl(symbol, str(position_id), current_tp_price, new_sl)
+            return
+        try:
+            self.client.place_position_tpsl(symbol, str(position_id), None, new_sl)
+        except BitunixTradeError:
+            self.client.modify_position_tpsl(symbol, str(position_id), None, new_sl)
+
     def can_trade(self) -> bool:
         self._refresh_state()
         return self.enabled
@@ -1083,7 +1107,8 @@ class TradeExecutor:
 
         if event_type == "TP1" and position_id:
             self._ensure_tp_leg_closed(signal, execution, 1)
-            remaining_qty = max(0.0, float(execution.get("qty", 0) or 0) - float((execution.get("tp_qtys") or [0.0])[0] or 0))
+            qtys = list(execution.get("tp_qtys") or [0.0, 0.0, 0.0])
+            remaining_qty = max(0.0, float(execution.get("qty", 0) or 0) - float(qtys[0] or 0))
             if remaining_qty <= 1e-12:
                 self._cancel_remaining_protection(execution)
                 if sl_order_id:
@@ -1093,11 +1118,31 @@ class TradeExecutor:
                         pass
                 execution["active"] = False
                 execution["sl_moved_to"] = None
-                return ExecutionResult(self.mode, True, "TP1 closed the full position.", execution)
-            current_tp_price = self._current_position_tp_price(signal, execution)
-            self.client.modify_position_tpsl(symbol, str(position_id), current_tp_price, float(signal["entry"]))
-            execution["sl_moved_to"] = float(signal["entry"])
-            return ExecutionResult(self.mode, True, "Moved SL to entry after TP1.", execution)
+                return ExecutionResult(self.mode, True, "Take profit closed the full position.", execution)
+            return ExecutionResult(self.mode, True, "TP1 reached; stop stays in place for now.", execution)
+
+        if event_type == "TP2" and position_id:
+            self._ensure_tp_leg_closed(signal, execution, 2)
+            qtys = list(execution.get("tp_qtys") or [0.0, 0.0, 0.0])
+            remaining_qty = max(
+                0.0,
+                float(execution.get("qty", 0) or 0) - float(qtys[0] or 0) - float(qtys[1] or 0),
+            )
+            if remaining_qty <= 1e-12:
+                self._cancel_remaining_protection(execution)
+                if sl_order_id:
+                    try:
+                        self.client.cancel_tpsl(symbol, str(sl_order_id))
+                    except Exception:
+                        pass
+                execution["active"] = False
+                execution["sl_moved_to"] = None
+                return ExecutionResult(self.mode, True, "Take profit closed the full position.", execution)
+            new_sl = self._breakeven_lock_price(signal)
+            self._update_position_stop(symbol, str(position_id), signal, execution, new_sl)
+            signal["sl"] = new_sl
+            execution["sl_moved_to"] = new_sl
+            return ExecutionResult(self.mode, True, "Moved SL to protected breakeven after TP2.", execution)
 
         if event_type == "TP2" and position_id:
             self._ensure_tp_leg_closed(signal, execution, 2)
@@ -1628,8 +1673,7 @@ class TradeExecutor:
             signal["sl"] = new_sl
             execution["sl_moved_to"] = new_sl
             return ExecutionResult(self.mode, True, "Demo stop moved.", execution)
-        current_tp_price = self._current_position_tp_price(signal, execution)
-        self.client.modify_position_tpsl(symbol, str(position_id), current_tp_price, new_sl)
+        self._update_position_stop(symbol, str(position_id), signal, execution, new_sl)
         signal["sl"] = new_sl
         execution["sl_moved_to"] = new_sl
         return ExecutionResult(self.mode, True, f"Moved SL to {new_sl:.2f}.", execution)
@@ -2040,9 +2084,9 @@ class TradeExecutor:
         active_target_indices = [i + 1 for i, price in enumerate(targets[:3]) if float(price or 0) > 0]
         if len(active_target_indices) == 1:
             return active_target_indices[0]
-        if 2 in active_target_indices:
-            return 2
-        return 2
+        if 1 in active_target_indices:
+            return 1
+        return 1
 
     def _get_symbol_rules(self, symbol: str) -> Dict[str, Any]:
         symbol_key = str(symbol or SYMBOL).upper()

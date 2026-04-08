@@ -8,8 +8,17 @@ import requests
 from channels import calculate_channels
 from config import (
     BASE_MOMENTUM_ENABLED_TFS,
+    BITUNIX_DEFAULT_LEVERAGE,
+    BITUNIX_LIQUIDATION_MAX_LEVERAGE_BY_TF,
+    BITUNIX_MAX_RISK_USD,
+    BITUNIX_MIN_BASE_QTY,
+    BITUNIX_MIN_NOTIONAL_USD,
+    BITUNIX_QTY_STEP,
+    BITUNIX_RISK_CAP_PCT,
     BITUNIX_TP_SPLITS,
     BREAKEVEN_WIN_MIN_TP,
+    BREAKEVEN_MOVE_AFTER_TP,
+    BREAKEVEN_FEE_BUFFER_PCT,
     FALLING_KNIFE_FILTER_ENABLED,
     FALLING_KNIFE_LOOKBACK_5M,
     FALLING_KNIFE_LOOKBACK_15M,
@@ -45,11 +54,14 @@ from config import (
     SCALP_SELF_TUNE_LOW_AVGR,
     SCALP_SELF_TUNE_HIGH_AVGR,
     SCALP_EXPOSURE_ENABLED,
+    MIN_SIGNAL_SIZE_PCT,
+    MAX_SIGNAL_SIZE_PCT,
     SCALP_MAX_OPEN_TOTAL,
     SCALP_MAX_OPEN_PER_SIDE,
     SCALP_MAX_OPEN_PER_TF,
     SMART_MONEY_EXECUTION_TFS,
     SMART_MONEY_TP_SPLITS,
+    TIMEFRAME_PROFILES,
     SESSION_SCALP_MODE,
     SIGNAL_TIMEFRAMES,
     SYMBOL,
@@ -77,46 +89,68 @@ def _resolve_trade_event(tr: dict, high: float, low: float, candle_ts: str):
     entry_candle = tr.get("entry_candle_ts") == candle_ts
     sl_touched = (low <= tr["sl"]) if is_long else (high >= tr["sl"])
     tp1_touched = (high >= tr["tp1"]) if is_long else (low <= tr["tp1"])
+    active_tp_indices = list(tr.get("active_tp_indices") or [1, 2, 3])
+    breakeven_trigger = tr.get("breakeven_trigger")
+    breakeven_price = float(tr.get("breakeven_price", tr["entry"]) or tr["entry"])
 
     # Same-candle ambiguity for fresh trades: TP1+SL => ENTRY_CLOSE (never direct SL)
-    if not entry_candle and not tr["tp1_hit"] and tp1_touched and sl_touched:
+    if not entry_candle and breakeven_trigger == 1 and not tr["tp1_hit"] and tp1_touched and sl_touched:
         tr["tp1_hit"] = True
-        tr["sl"] = float(tr["entry"])
+        tr["sl"] = breakeven_price
         return "ENTRY_CLOSE"
 
     # Progressive TP checks (disabled on entry candle)
     if not entry_candle:
         tp_price = high if is_long else low
         if is_long:
-            if not tr["tp1_hit"] and tp_price >= tr["tp1"]:
+            if 1 in active_tp_indices and not tr["tp1_hit"] and tp_price >= tr["tp1"]:
                 tr["tp1_hit"] = True
-                tr["sl"] = float(tr["entry"])
-            if not tr["tp2_hit"] and tp_price >= tr["tp2"]:
+                if len(active_tp_indices) == 1 and active_tp_indices[0] == 1:
+                    return "TP1"
+            if 2 in active_tp_indices and not tr["tp2_hit"] and tp_price >= tr["tp2"]:
                 tr["tp2_hit"] = True
-            if not tr["tp3_hit"] and tp_price >= tr["tp3"]:
+                if breakeven_trigger == 2:
+                    tr["sl"] = breakeven_price
+                if len(active_tp_indices) == 1 and active_tp_indices[0] == 2:
+                    return "TP2"
+            if 3 in active_tp_indices and not tr["tp3_hit"] and tp_price >= tr["tp3"]:
                 tr["tp3_hit"] = True
+                if breakeven_trigger == 3:
+                    tr["sl"] = breakeven_price
                 return "TP3"
         else:
-            if not tr["tp1_hit"] and tp_price <= tr["tp1"]:
+            if 1 in active_tp_indices and not tr["tp1_hit"] and tp_price <= tr["tp1"]:
                 tr["tp1_hit"] = True
-                tr["sl"] = float(tr["entry"])
-            if not tr["tp2_hit"] and tp_price <= tr["tp2"]:
+                if len(active_tp_indices) == 1 and active_tp_indices[0] == 1:
+                    return "TP1"
+            if 2 in active_tp_indices and not tr["tp2_hit"] and tp_price <= tr["tp2"]:
                 tr["tp2_hit"] = True
-            if not tr["tp3_hit"] and tp_price <= tr["tp3"]:
+                if breakeven_trigger == 2:
+                    tr["sl"] = breakeven_price
+                if len(active_tp_indices) == 1 and active_tp_indices[0] == 2:
+                    return "TP2"
+            if 3 in active_tp_indices and not tr["tp3_hit"] and tp_price <= tr["tp3"]:
                 tr["tp3_hit"] = True
+                if breakeven_trigger == 3:
+                    tr["sl"] = breakeven_price
                 return "TP3"
 
     # Breakeven close while stop is parked at entry.
-    stop_at_entry = abs(float(tr.get("sl", tr["entry"])) - float(tr["entry"])) < 1e-9
-    if tr["tp1_hit"] and stop_at_entry:
-        entry_hit = (low <= tr["entry"]) if is_long else (high >= tr["entry"])
+    stop_at_entry = abs(float(tr.get("sl", tr["entry"])) - breakeven_price) < 1e-9
+    trigger_hit = (
+        (breakeven_trigger == 1 and tr.get("tp1_hit"))
+        or (breakeven_trigger == 2 and tr.get("tp2_hit"))
+        or (breakeven_trigger == 3 and tr.get("tp3_hit"))
+    )
+    if trigger_hit and stop_at_entry:
+        entry_hit = (low <= breakeven_price) if is_long else (high >= breakeven_price)
         if entry_hit:
             return "ENTRY_CLOSE"
 
     # SL / protected SL-in-profit
     sl_price = low if is_long else high
     if (is_long and sl_price <= tr["sl"]) or ((not is_long) and sl_price >= tr["sl"]):
-        return "PROFIT_SL" if (tr["tp1_hit"] and not stop_at_entry) else "SL"
+        return "PROFIT_SL" if (trigger_hit and not stop_at_entry) else "SL"
 
     return None
 
@@ -191,7 +225,86 @@ def _trade_remaining_frac(tr: dict) -> float:
     return max(0.0, 1.0 - consumed)
 
 
+def _breakeven_trigger_index_for_active(active_tp_indices):
+    active_tp_indices = list(active_tp_indices or [])
+    if len(active_tp_indices) <= 1:
+        return None
+    threshold = int(BREAKEVEN_MOVE_AFTER_TP)
+    if threshold in active_tp_indices:
+        return threshold
+    return active_tp_indices[min(1, len(active_tp_indices) - 1)]
+
+
+def _breakeven_lock_price_for_trade(side: str, entry: float) -> float:
+    entry = float(entry or 0)
+    buffer_pct = max(0.0, float(BREAKEVEN_FEE_BUFFER_PCT or 0.0))
+    side = str(side or "").upper()
+    if side == "LONG":
+        return entry * (1.0 + buffer_pct / 100.0)
+    if side == "SHORT":
+        return entry * (1.0 - buffer_pct / 100.0)
+    return entry
+
+
+def _round_qty_down_replay(qty: float, step: float) -> float:
+    if step <= 0:
+        return max(0.0, float(qty))
+    return max(0.0, int(float(qty) / step) * step)
+
+
+def _split_qty_replay(qty: float, splits) -> tuple[list[float], list[int]]:
+    step = max(float(BITUNIX_QTY_STEP or 0), 0.00000001)
+    min_leg = max(float(BITUNIX_MIN_BASE_QTY or 0), step)
+    total = _round_qty_down_replay(float(qty), step)
+    if total <= 0 or total < min_leg:
+        return [0.0, 0.0, 0.0], []
+
+    a, b, c = splits
+    q1 = _round_qty_down_replay(total * a, step)
+    q2 = _round_qty_down_replay(total * b, step)
+    q3 = _round_qty_down_replay(max(0.0, total - q1 - q2), step)
+    nonzero = [q for q in (q1, q2, q3) if q > 0]
+    if len(nonzero) == 3 and min(nonzero) >= min_leg and abs((q1 + q2 + q3) - total) < (step + 1e-12):
+        qtys = [q1, q2, q3]
+        active = [1, 2, 3]
+        return qtys, active
+
+    qtys = [total, 0.0, 0.0]
+    return qtys, [1]
+
+
+def _simulate_replay_tp_plan(entry: float, sl: float, size_pct: float, tf: str, strategy_name: str = ""):
+    risk_per_unit = abs(float(entry) - float(sl))
+    if risk_per_unit <= 0:
+        return [0.0, 0.0, 0.0], []
+    balance_available = max(0.0, float(BITUNIX_MIN_NOTIONAL_USD or 0.0) * 2.0)
+    leverage = int(BITUNIX_LIQUIDATION_MAX_LEVERAGE_BY_TF.get(tf, BITUNIX_DEFAULT_LEVERAGE) or BITUNIX_DEFAULT_LEVERAGE or 1)
+    leverage = max(1, leverage)
+    effective_risk_cap_pct = (float(size_pct) / 100.0) if float(size_pct or 0) > 0 else float(BITUNIX_RISK_CAP_PCT)
+    risk_from_balance = balance_available * effective_risk_cap_pct
+    risk_budget = min(float(BITUNIX_MAX_RISK_USD), risk_from_balance) if balance_available > 0 else 0.0
+    risk_qty = (risk_budget / risk_per_unit) if risk_budget > 0 else 0.0
+    affordable_notional = max(0.0, balance_available * leverage * 0.98)
+    affordable_qty = (affordable_notional / float(entry)) if float(entry) > 0 else 0.0
+    qty = min(risk_qty, affordable_qty) if affordable_qty > 0 else 0.0
+    if (
+        qty > 0
+        and balance_available >= float(BITUNIX_MIN_NOTIONAL_USD)
+        and affordable_notional >= float(BITUNIX_MIN_NOTIONAL_USD)
+        and qty * float(entry) < float(BITUNIX_MIN_NOTIONAL_USD)
+    ):
+        qty = min(float(BITUNIX_MIN_NOTIONAL_USD) / float(entry), affordable_qty)
+    qty = _round_qty_down_replay(qty, float(BITUNIX_QTY_STEP))
+    if qty < float(BITUNIX_MIN_BASE_QTY):
+        qty = float(BITUNIX_MIN_BASE_QTY) if affordable_qty >= float(BITUNIX_MIN_BASE_QTY) else 0.0
+    qty = _round_qty_down_replay(qty, float(BITUNIX_QTY_STEP))
+    splits = SMART_MONEY_TP_SPLITS if str(strategy_name or "").upper() == "SMART_MONEY_LIQUIDITY" else BITUNIX_TP_SPLITS
+    return _split_qty_replay(qty, splits)
+
+
 def _trade_outcome_r(tr: dict, evt_type: str) -> float:
+    if evt_type in {"TP1", "TP2", "TP3"}:
+        return _trade_realized_partial_r(tr)
     if evt_type == "TP3":
         return _trade_realized_partial_r(tr)
     if evt_type == "ENTRY_CLOSE":
@@ -774,6 +887,14 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_
             if risk <= 0:
                 continue
 
+            profile = TIMEFRAME_PROFILES.get(tf, TIMEFRAME_PROFILES.get("5m", {"size": float(MIN_SIGNAL_SIZE_PCT)}))
+            size_mult = float(regime_cfg.get("size_mult", 1.0))
+            dyn_base = max(float(MIN_SIGNAL_SIZE_PCT), (score / 10) * float(profile.get("size", MIN_SIGNAL_SIZE_PCT))) if score else max(float(MIN_SIGNAL_SIZE_PCT), float(profile.get("size", MIN_SIGNAL_SIZE_PCT)))
+            dyn_size = round(min(float(MAX_SIGNAL_SIZE_PCT), max(float(MIN_SIGNAL_SIZE_PCT), dyn_base * size_mult)), 1)
+            tp_qtys, active_tp_indices = _simulate_replay_tp_plan(evt["entry"], evt["sl"], dyn_size, tf, evt.get("strategy"))
+            if not active_tp_indices:
+                active_tp_indices = [1, 2, 3]
+
             active.append(
                 {
                     "side": side,
@@ -788,6 +909,11 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_
                     "tp3_hit": False,
                     "tf": tf,
                     "entry_candle_ts": candle_ts,
+                    "tp_qtys": tp_qtys,
+                    "signal_size_pct": dyn_size,
+                    "active_tp_indices": active_tp_indices,
+                    "breakeven_trigger": _breakeven_trigger_index_for_active(active_tp_indices),
+                    "breakeven_price": _breakeven_lock_price_for_trade(side, evt["entry"]),
                 }
             )
 
@@ -800,7 +926,7 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_
                 continue
 
             side = tr["side"]
-            if evt_type == "TP3":
+            if evt_type in {"TP1", "TP2", "TP3"}:
                 results.append({"r": _trade_outcome_r(tr, evt_type), "metric": "wins"})
                 loss_streak[side] = 0
             elif evt_type == "PROFIT_SL":
@@ -904,6 +1030,14 @@ def simulate_smart_money_timeframe(tf: str, days: int):
                 if event_id not in seen_event_ids:
                     risk = abs(float(evt["entry"]) - float(evt["sl"]))
                     if risk > 0:
+                        size_pct = float(evt.get("size", 0) or 0) if evt.get("size") is not None else 0.0
+                        if size_pct <= 0:
+                            size_pct = float(MIN_SIGNAL_SIZE_PCT)
+                        tp_qtys, active_tp_indices = _simulate_replay_tp_plan(
+                            evt["entry"], evt["sl"], size_pct, tf, "SMART_MONEY_LIQUIDITY"
+                        )
+                        if not active_tp_indices:
+                            active_tp_indices = [1, 2, 3]
                         active.append(
                             {
                                 "side": evt["side"],
@@ -919,7 +1053,11 @@ def simulate_smart_money_timeframe(tf: str, days: int):
                                 "tf": tf,
                                 "entry_candle_ts": candle_ts,
                                 "event_id": event_id,
-                                "tp_qtys": list(SMART_MONEY_TP_SPLITS),
+                                "tp_qtys": tp_qtys,
+                                "signal_size_pct": size_pct,
+                                "active_tp_indices": active_tp_indices,
+                                "breakeven_trigger": _breakeven_trigger_index_for_active(active_tp_indices),
+                                "breakeven_price": _breakeven_lock_price_for_trade(evt["side"], evt["entry"]),
                             }
                         )
                         seen_event_ids.add(event_id)
@@ -932,7 +1070,7 @@ def simulate_smart_money_timeframe(tf: str, days: int):
                 survivors.append(tr)
                 continue
 
-            if evt_type == "TP3":
+            if evt_type in {"TP1", "TP2", "TP3"}:
                 results.append({"r": _trade_outcome_r(tr, evt_type), "metric": "wins"})
             elif evt_type == "PROFIT_SL":
                 results.append({"r": _trade_outcome_r(tr, evt_type), "metric": "wins"})

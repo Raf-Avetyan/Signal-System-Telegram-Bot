@@ -8,7 +8,7 @@ Persists data to signals_log.json for restart survival.
 import json
 import os
 from datetime import datetime, timezone, timedelta
-from config import BREAKEVEN_WIN_MIN_TP, BITUNIX_TP_SPLITS
+from config import BREAKEVEN_WIN_MIN_TP, BREAKEVEN_MOVE_AFTER_TP, BREAKEVEN_FEE_BUFFER_PCT, BITUNIX_TP_SPLITS
 
 LOG_FILE = os.path.join(os.path.dirname(__file__), "signals_log.json")
 
@@ -49,6 +49,28 @@ class SignalTracker:
         if threshold == 2:
             return bool(sig.get("tp2_hit"))
         return bool(sig.get("tp3_hit"))
+
+    def _breakeven_trigger_index(self, sig, active_tp_indices):
+        active_tp_indices = list(active_tp_indices or [])
+        if len(active_tp_indices) <= 1:
+            return None
+        threshold = int(BREAKEVEN_MOVE_AFTER_TP)
+        if threshold in active_tp_indices:
+            return threshold
+        return active_tp_indices[min(1, len(active_tp_indices) - 1)]
+
+    @staticmethod
+    def _breakeven_lock_price(sig):
+        entry = float(sig.get("entry", 0) or 0)
+        if entry <= 0:
+            return entry
+        side = str(sig.get("side", "")).upper()
+        buffer_pct = max(0.0, float(BREAKEVEN_FEE_BUFFER_PCT or 0.0))
+        if side == "LONG":
+            return entry * (1.0 + buffer_pct / 100.0)
+        if side == "SHORT":
+            return entry * (1.0 - buffer_pct / 100.0)
+        return entry
 
     def _metric_outcome(self, sig):
         """Return metric outcome label and R-multiple for summaries/analytics."""
@@ -225,6 +247,8 @@ class SignalTracker:
             if not active_tp_indices:
                 active_tp_indices = [1, 2, 3]
             single_active_tp = active_tp_indices[0] if len(active_tp_indices) == 1 else None
+            breakeven_trigger = self._breakeven_trigger_index(sig, active_tp_indices)
+            breakeven_lock_price = self._breakeven_lock_price(sig)
 
             # Skip signal if we're still on the candle it was born on
             entry_ts = sig.get("entry_candle_ts")
@@ -237,14 +261,21 @@ class SignalTracker:
             is_long = sig["side"] == "LONG"
             sl_touched = (p_low <= sig["sl"]) if is_long else (p_high >= sig["sl"])
             tp1_touched = (p_high >= sig["tp1"]) if is_long else (p_low <= sig["tp1"])
+            trigger_tp_touched = False
+            if breakeven_trigger == 2:
+                trigger_tp_touched = (p_high >= sig["tp2"]) if is_long else (p_low <= sig["tp2"])
+            elif breakeven_trigger == 3:
+                trigger_tp_touched = (p_high >= sig["tp3"]) if is_long else (p_low <= sig["tp3"])
+            elif breakeven_trigger == 1:
+                trigger_tp_touched = tp1_touched
 
             # Ambiguous one-candle case: TP1 and SL both touched for a fresh trade.
             # We treat this as TP reached and then return to entry (breakeven close),
             # never as direct SL, to preserve scalp lifecycle semantics.
-            if not is_entry_candle and not sig["tp1_hit"] and tp1_touched and sl_touched:
+            if not is_entry_candle and breakeven_trigger == 1 and not sig["tp1_hit"] and tp1_touched and sl_touched:
                 sig["tp1_hit"] = True
                 sig["tp1_at"] = sig.get("tp1_at") or datetime.now(timezone.utc).isoformat()
-                sig["sl"] = float(sig["entry"])
+                sig["sl"] = breakeven_lock_price
                 sig["status"] = "TP1"
                 changed = True
                 events.append({"type": "TP1", "sig": sig})
@@ -263,25 +294,30 @@ class SignalTracker:
                     if 1 in active_tp_indices and not sig["tp1_hit"] and tp_price >= sig["tp1"]:
                         sig["tp1_hit"] = True
                         sig["tp1_at"] = sig.get("tp1_at") or datetime.now(timezone.utc).isoformat()
-                        sig["sl"] = float(sig["entry"])
                         sig["status"] = "TP1"
                         changed = True
                         events.append({"type": "TP1", "sig": sig})
                         if single_active_tp == 1:
+                            sig["status"] = "CLOSED"
                             sig["closed_at"] = datetime.now(timezone.utc).isoformat()
                             continue
                     if 2 in active_tp_indices and not sig["tp2_hit"] and tp_price >= sig["tp2"]:
                         sig["tp2_hit"] = True
                         sig["tp2_at"] = sig.get("tp2_at") or datetime.now(timezone.utc).isoformat()
+                        if breakeven_trigger == 2:
+                            sig["sl"] = breakeven_lock_price
                         sig["status"] = "TP2"
                         changed = True
                         events.append({"type": "TP2", "sig": sig})
                         if single_active_tp == 2:
+                            sig["status"] = "CLOSED"
                             sig["closed_at"] = datetime.now(timezone.utc).isoformat()
                             continue
                     if 3 in active_tp_indices and not sig["tp3_hit"] and tp_price >= sig["tp3"]:
                         sig["tp3_hit"] = True
                         sig["tp3_at"] = sig.get("tp3_at") or datetime.now(timezone.utc).isoformat()
+                        if breakeven_trigger == 3:
+                            sig["sl"] = breakeven_lock_price
                         sig["status"] = "TP3"
                         sig["closed_at"] = datetime.now(timezone.utc).isoformat()
                         changed = True
@@ -291,25 +327,30 @@ class SignalTracker:
                     if 1 in active_tp_indices and not sig["tp1_hit"] and tp_price <= sig["tp1"]:
                         sig["tp1_hit"] = True
                         sig["tp1_at"] = sig.get("tp1_at") or datetime.now(timezone.utc).isoformat()
-                        sig["sl"] = float(sig["entry"])
                         sig["status"] = "TP1"
                         changed = True
                         events.append({"type": "TP1", "sig": sig})
                         if single_active_tp == 1:
+                            sig["status"] = "CLOSED"
                             sig["closed_at"] = datetime.now(timezone.utc).isoformat()
                             continue
                     if 2 in active_tp_indices and not sig["tp2_hit"] and tp_price <= sig["tp2"]:
                         sig["tp2_hit"] = True
                         sig["tp2_at"] = sig.get("tp2_at") or datetime.now(timezone.utc).isoformat()
+                        if breakeven_trigger == 2:
+                            sig["sl"] = breakeven_lock_price
                         sig["status"] = "TP2"
                         changed = True
                         events.append({"type": "TP2", "sig": sig})
                         if single_active_tp == 2:
+                            sig["status"] = "CLOSED"
                             sig["closed_at"] = datetime.now(timezone.utc).isoformat()
                             continue
                     if 3 in active_tp_indices and not sig["tp3_hit"] and tp_price <= sig["tp3"]:
                         sig["tp3_hit"] = True
                         sig["tp3_at"] = sig.get("tp3_at") or datetime.now(timezone.utc).isoformat()
+                        if breakeven_trigger == 3:
+                            sig["sl"] = breakeven_lock_price
                         sig["status"] = "TP3"
                         sig["closed_at"] = datetime.now(timezone.utc).isoformat()
                         changed = True
@@ -317,12 +358,17 @@ class SignalTracker:
                         continue
 
             # 2. Check Entry Return when stop has been moved to breakeven.
-            stop_at_entry = abs(float(sig.get("sl", sig["entry"])) - float(sig["entry"])) < 1e-9
-            if sig.get("tp1_hit") and stop_at_entry and sig["status"] != "ENTRY_CLOSE":
+            stop_at_entry = abs(float(sig.get("sl", sig["entry"])) - float(breakeven_lock_price)) < 1e-9
+            trigger_hit = (
+                (breakeven_trigger == 1 and sig.get("tp1_hit"))
+                or (breakeven_trigger == 2 and sig.get("tp2_hit"))
+                or (breakeven_trigger == 3 and sig.get("tp3_hit"))
+            )
+            if trigger_hit and stop_at_entry and sig["status"] != "ENTRY_CLOSE":
                 entry_hit = False
-                if is_long and p_low <= sig["entry"]:
+                if is_long and p_low <= breakeven_lock_price:
                     entry_hit = True
-                elif not is_long and p_high >= sig["entry"]:
+                elif not is_long and p_high >= breakeven_lock_price:
                     entry_hit = True
                 
                 if entry_hit:
@@ -337,7 +383,7 @@ class SignalTracker:
             sl_price = p_low if is_long else p_high
 
             if (is_long and sl_price <= sig["sl"]) or (not is_long and sl_price >= sig["sl"]):
-                if sig["tp1_hit"] and abs(float(sig.get("sl", sig["entry"])) - float(sig["entry"])) >= 1e-9:
+                if trigger_hit and abs(float(sig.get("sl", sig["entry"])) - float(sig.get("initial_sl", sig["entry"]))) >= 1e-9:
                     # Stop was moved into profit after targets; this is a protected win.
                     sig["status"] = "PROFIT_SL"
                     sig["closed_at"] = datetime.now(timezone.utc).isoformat()

@@ -63,36 +63,43 @@ def send_tp1_hit_congrats(
     chat_id, message_id, tf, side=None, lock_price=None,
     entry=None, sl=None, tp1=None, tp2=None, size=None
 ):
-    """Send a reply for hitting TP1 and moving stop to breakeven."""
+    """Send a reply for hitting TP1 without changing the stop yet."""
     import random
     messages = [
-        f"🟢 <b>TP1 HIT!</b> [{tf}] First target reached. Trade is protected now.",
-        f"✅ <b>FIRST TARGET CLEARED!</b> [{tf}] Good reaction. Risk is off the table.",
-        f"🛡 <b>BREAKEVEN PROTECTION ON</b> [{tf}] TP1 was reached cleanly.",
+        f"🟢 <b>TP1 HIT!</b> [{tf}] First target reached cleanly.",
+        f"✅ <b>FIRST TARGET CLEARED!</b> [{tf}] Good reaction so far.",
+        f"📈 <b>TP1 REACHED</b> [{tf}] The first target was filled.",
     ]
     txt = random.choice(messages)
-
-    be_price = entry if entry is not None else lock_price
-    if be_price is not None:
-        side_txt = side if side else "POSITION"
-        txt += (
-            f"\n\n\U0001F6E1 <b>Safety Update</b>\n"
-            f"Set SL to <b>breakeven</b> for <b>{side_txt}</b> at <b>{fmt_price(be_price)}</b>"
-        )
     return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
 
 def send_tp2_hit_congrats(
     chat_id, message_id, tf, side=None, lock_price=None,
-    entry=None, sl=None, tp1=None, tp2=None, size=None
+    entry=None, sl=None, tp1=None, tp2=None, size=None, single_full=False
 ):
-    """Send a reply for hitting TP2 without moving the stop beyond breakeven."""
+    """Send a reply for hitting TP2 or the only active fallback take profit."""
     import random
+    if single_full:
+        messages = [
+            f"🎯 <b>TAKE PROFIT HIT!</b> [{tf}] The full position was closed.",
+            f"✅ <b>FULL TAKE PROFIT FILLED!</b> [{tf}] The trade is finished in profit.",
+            f"💰 <b>TARGET HIT!</b> [{tf}] The whole position was closed at take profit.",
+        ]
+        txt = random.choice(messages)
+        return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
+
     messages = [
-        f"⚡️ <b>TARGET 2 SMACKED!</b> [{tf}] Moving fast! Final goal in sight.",
-        f"💹 <b>TP2 REACHED!</b> [{tf}] Trade stays protected at breakeven.",
-        f"🔥 <b>MID-TARGET HIT!</b> [{tf}] 2/3 TPs done. Let the runner work.",
+        f"⚡️ <b>TARGET 2 SMACKED!</b> [{tf}] The runner is protected now.",
+        f"💹 <b>TP2 REACHED!</b> [{tf}] The stop was moved to protected breakeven.",
+        f"🛡 <b>PROTECTION ON</b> [{tf}] TP2 was reached and the trade is locked.",
     ]
     txt = random.choice(messages)
+    if lock_price is not None:
+        side_txt = side if side else "POSITION"
+        txt += (
+            f"\n\n\U0001F6E1 <b>Safety Update</b>\n"
+            f"Set SL to <b>protected breakeven</b> for <b>{side_txt}</b> at <b>{fmt_price(lock_price)}</b>"
+        )
     return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
 
 def send_tp3_hit_congrats(chat_id, message_id, tf):
@@ -109,7 +116,7 @@ def send_tp3_hit_congrats(chat_id, message_id, tf):
 
 def send_breakeven_alert(chat_id, message_id, tf):
     """Send a reply when price returns to entry after TPs hit."""
-    txt = f"📉 <b>REVERSAL ALERT!</b> [{tf}] Price returned to Entry level after hitting targets. Signal closed at Breakeven. ⚖️"
+    txt = f"📉 <b>REVERSAL ALERT!</b> [{tf}] Price returned to the protected breakeven level after hitting targets. Signal closed safely. ⚖️"
     return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
 
 def send_profit_sl_alert(chat_id, message_id, tf):

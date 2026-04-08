@@ -2616,6 +2616,27 @@ class PonchBot:
             sl_price = 0.0
         return f"{sl_price:.2f}" if sl_price > 0 else "none"
 
+    def _single_active_tp_index(self, sig):
+        execution = (sig or {}).get("execution") or {}
+        qtys = list(execution.get("tp_qtys") or [])
+        active = []
+        for idx, qty in enumerate(qtys[:3], start=1):
+            try:
+                if float(qty or 0) > 0:
+                    active.append(idx)
+            except Exception:
+                pass
+        return active[0] if len(active) == 1 else None
+
+    def _is_single_full_tp_execution(self, sig):
+        execution = (sig or {}).get("execution") or {}
+        qtys = list(execution.get("tp_qtys") or [])
+        total_qty = float(execution.get("qty", 0) or 0)
+        active = [float(q or 0) for q in qtys[:3] if float(q or 0) > 0]
+        if len(active) != 1 or total_qty <= 0:
+            return False
+        return abs(active[0] - total_qty) <= 1e-9
+
     def _format_active_tp_line(self, sig):
         execution = (sig or {}).get("execution") or {}
         tp_qtys = list(execution.get("tp_qtys") or [])
@@ -2630,7 +2651,10 @@ class PonchBot:
                 continue
             target = float(tp_targets[idx - 1] or sig.get(f"tp{idx}") or 0)
             if target > 0:
-                active_parts.append(f"TP{idx} {target:.2f}")
+                if self._is_single_full_tp_execution(sig):
+                    active_parts.append(f"TP {target:.2f}")
+                else:
+                    active_parts.append(f"TP{idx} {target:.2f}")
         if active_parts:
             label = "Active TP" if len(active_parts) == 1 else "Active TPs"
             return f"{label}: " + " / ".join(active_parts)
@@ -2679,12 +2703,12 @@ class PonchBot:
         result_text = str(result_message or "").strip()
 
         if event_key == "TP1":
-            intro = f"I took the first target on this {trade_name} and moved the stop to entry."
+            intro = f"I took the first target on this {trade_name}."
         elif event_key == "TP2":
-            if "closed the full position" in result_text.lower():
-                intro = f"I closed the full {trade_name} at TP2."
+            if "closed the full position" in result_text.lower() or self._is_single_full_tp_execution(sig):
+                intro = f"I closed the full {trade_name} at take profit."
             else:
-                intro = f"I took the second target on this {trade_name}."
+                intro = f"I took the second target on this {trade_name} and moved the stop to protected breakeven."
         elif event_key == "TP3":
             intro = f"This {trade_name} hit the final target and is fully closed."
         elif event_key == "ENTRY_CLOSE":
@@ -2700,7 +2724,7 @@ class PonchBot:
             sig,
             extra=[
                 f"The new stop is {float((sig.get('execution') or {}).get('sl_moved_to') or 0):.2f}."
-                if (sig.get("execution") or {}).get("sl_moved_to") is not None
+                if event_key in {"TP2", "PROFIT_SL", "ENTRY_CLOSE"} and (sig.get("execution") or {}).get("sl_moved_to") is not None
                 else None
             ],
         )
@@ -4193,11 +4217,20 @@ class PonchBot:
                 current_candle_ts_set=current_candle_ts_set
             )
             today_str = now.strftime("%Y-%m-%d")
+            signal_tick_events = {}
+            terminal_event_types = {"TP3", "ENTRY_CLOSE", "PROFIT_SL", "SL"}
+            for event in trade_events:
+                sig = event.get("sig") or {}
+                sig_key = str(sig.get("signal_id") or (sig.get("meta") or {}).get("signal_id") or id(sig))
+                signal_tick_events.setdefault(sig_key, []).append(str(event.get("type") or "").upper())
             for event in trade_events:
                 sig = event["sig"]
                 evt_type = event["type"] # "TP1", "TP2", "TP3", "SL"
                 side = sig.get("side")
                 risk_state_changed = False
+                sig_key = str(sig.get("signal_id") or (sig.get("meta") or {}).get("signal_id") or id(sig))
+                tick_event_types = signal_tick_events.get(sig_key, [])
+                suppress_intermediate_notice = evt_type in {"TP1", "TP2"} and any(t in terminal_event_types for t in tick_event_types)
 
                 # --- Loss-streak protection state updates ---
                 if side in ("LONG", "SHORT"):
@@ -4230,7 +4263,7 @@ class PonchBot:
                     tg.update_signal_message(sig["chat_id"], sig["msg_id"], sig)
 
                 # Public reply alerts keep the original public behavior.
-                if sig.get("msg_id") and sig.get("chat_id") and not private_exec_paper_signal:
+                if sig.get("msg_id") and sig.get("chat_id") and not private_exec_paper_signal and not suppress_intermediate_notice:
                     if evt_type == "TP1":
                         tg.send_tp1_hit_congrats(
                             sig["chat_id"],
@@ -4250,12 +4283,13 @@ class PonchBot:
                             sig["msg_id"],
                             sig.get("tf", "Unknown"),
                             side=sig.get("side"),
-                            lock_price=sig.get("entry"),
+                            lock_price=(sig.get("execution") or {}).get("sl_moved_to") or sig.get("sl"),
                             entry=sig.get("entry"),
                             sl=sig.get("sl"),
                             tp1=sig.get("tp1"),
                             tp2=sig.get("tp2"),
-                            size=(sig.get("meta", {}) or {}).get("size")
+                            size=(sig.get("meta", {}) or {}).get("size"),
+                            single_full=self._is_single_full_tp_execution(sig),
                         )
                     elif evt_type == "TP3":
                         tg.send_tp3_hit_congrats(sig["chat_id"], sig["msg_id"], sig.get("tf", "Unknown"))
@@ -4267,7 +4301,7 @@ class PonchBot:
                 if risk_state_changed:
                     self._save_state()
 
-                if evt_type in ("TP1", "TP2", "TP3", "ENTRY_CLOSE", "PROFIT_SL", "SL"):
+                if evt_type in ("TP1", "TP2", "TP3", "ENTRY_CLOSE", "PROFIT_SL", "SL") and not suppress_intermediate_notice:
                     self._sync_exchange_trade_event(sig, evt_type)
 
             # 2. Liquidation Squeezes

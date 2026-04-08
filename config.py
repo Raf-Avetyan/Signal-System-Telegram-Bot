@@ -22,7 +22,7 @@ BITUNIX_TRADING_ENABLED = os.getenv("BITUNIX_TRADING_ENABLED", "false").strip().
 BITUNIX_TRADING_MODE = os.getenv("BITUNIX_TRADING_MODE", "off").strip().lower()  # off | demo | live
 BITUNIX_MARGIN_COIN = os.getenv("BITUNIX_MARGIN_COIN", "USDT")
 BITUNIX_REQUIRED_MARGIN_MODE = os.getenv("BITUNIX_REQUIRED_MARGIN_MODE", "ISOLATION").strip().upper()
-BITUNIX_DEFAULT_LEVERAGE = int(os.getenv("BITUNIX_DEFAULT_LEVERAGE", "3"))
+BITUNIX_DEFAULT_LEVERAGE = int(os.getenv("BITUNIX_DEFAULT_LEVERAGE", "50"))
 BITUNIX_POSITION_MODE = os.getenv("BITUNIX_POSITION_MODE", "ONE_WAY").strip().upper()
 BITUNIX_MAX_OPEN_POSITIONS = int(os.getenv("BITUNIX_MAX_OPEN_POSITIONS", "3"))
 BITUNIX_MAX_RISK_USD = float(os.getenv("BITUNIX_MAX_RISK_USD", "25"))
@@ -91,7 +91,9 @@ RSI_DIVERGENCE_POINTS = 2
 # Metric rule: count breakeven exits as wins once this TP threshold was reached.
 # 1 = TP1 hit then breakeven counts as win
 # 2 = TP2 hit then breakeven counts as win
-BREAKEVEN_WIN_MIN_TP = max(1, min(3, int(os.getenv("BREAKEVEN_WIN_MIN_TP", "1"))))
+BREAKEVEN_WIN_MIN_TP = max(1, min(3, int(os.getenv("BREAKEVEN_WIN_MIN_TP", "2"))))
+BREAKEVEN_MOVE_AFTER_TP = max(1, min(3, int(os.getenv("BREAKEVEN_MOVE_AFTER_TP", "2"))))
+BREAKEVEN_FEE_BUFFER_PCT = float(os.getenv("BREAKEVEN_FEE_BUFFER_PCT", "0.08"))
 
 # --- SCALP PARAMETERS -----------------------------------------------
 # ATR multipliers for SL/TP calculation
@@ -151,8 +153,8 @@ TIMEFRAME_PROFILES = {
     "1h":  {"strength": "Strong", "emoji": "🚀", "size": 7.5},
     "4h":  {"strength": "Ultra",  "emoji": "💎", "size": 9.0},
 }
-MIN_SIGNAL_SIZE_PCT = float(os.getenv("MIN_SIGNAL_SIZE_PCT", "3.0"))
-MAX_SIGNAL_SIZE_PCT = float(os.getenv("MAX_SIGNAL_SIZE_PCT", "8.0"))
+MIN_SIGNAL_SIZE_PCT = float(os.getenv("MIN_SIGNAL_SIZE_PCT", "5.0"))
+MAX_SIGNAL_SIZE_PCT = float(os.getenv("MAX_SIGNAL_SIZE_PCT", "10.0"))
 
 # Scalp confirmation buffer (RSI points beyond zone edge):
 # LONG confirm when RSI > MOMENTUM_OS + buffer
