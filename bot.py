@@ -426,28 +426,30 @@ class PonchBot:
         return False
 
     def _handle_private_todo_message(self, text):
-        lower = str(text or "").strip().lower()
-        if not lower:
+        normalized = self._normalize_intent_text(text)
+        if not normalized:
             return False
-        if any(phrase in lower for phrase in [
+        if self._intent_has_any_normalized(normalized, [
             "show my to do", "show my todo", "show to do", "show todo",
             "what is on my to do", "what is on my todo", "my to do list", "my todo list",
-            "list my tasks", "show my tasks"
+            "list my tasks", "show my tasks", "what tasks do i have", "what todos do i have"
         ]):
             return self._todo_show()
-        if any(phrase in lower for phrase in [
-            "show open tasks", "show open to do", "show open todo", "open tasks", "open to do"
+        if self._intent_has_any_normalized(normalized, [
+            "show open tasks", "show open to do", "show open todo", "open tasks", "open to do",
+            "unfinished tasks", "undone tasks", "pending tasks"
         ]):
             return self._todo_show(open_only=True)
-        if any(phrase in lower for phrase in [
-            "clear my to do", "clear my todo", "delete all tasks", "clear tasks", "remove all tasks"
+        if self._intent_has_any_normalized(normalized, [
+            "clear my to do", "clear my todo", "delete all tasks", "clear tasks", "remove all tasks",
+            "delete my todo", "wipe my tasks"
         ]):
             return self._todo_clear()
-        if any(phrase in lower for phrase in ["mark task", "complete task", "done task", "finish task"]):
+        if self._intent_has_any_normalized(normalized, ["mark task", "complete task", "done task", "finish task"]):
             return self._todo_update_by_index(text, "done")
-        if any(phrase in lower for phrase in ["remove task", "delete task"]):
+        if self._intent_has_any_normalized(normalized, ["remove task", "delete task"]):
             return self._todo_update_by_index(text, "remove")
-        if any(phrase in lower for phrase in [
+        if self._intent_has_any_normalized(normalized, [
             "remember this", "remember that", "add to do", "add todo", "save this task", "save this note",
             "add task", "add note", "todo:", "to do:", "task:", "note:"
         ]):
@@ -488,13 +490,88 @@ class PonchBot:
     def _record_signal_sent(self, key, now=None):
         self._record_signal_debug("sent", key, now=now)
 
+    def _normalize_intent_text(self, text):
+        raw = str(text or "").strip().lower()
+        if not raw:
+            return ""
+        replacements = {
+            "what's": "what is",
+            "whats": "what is",
+            "can't": "can not",
+            "dont": "do not",
+            "doesnt": "does not",
+            "wont": "will not",
+            "singals": "signals",
+            "singal": "signal",
+            "baalnce": "balance",
+            "balalnce": "balance",
+            "wallet": "wallet",
+            "posiiton": "position",
+            "poisition": "position",
+            "poistion": "position",
+            "psoition": "position",
+            "contructions": "constructions",
+            "markettwits": "markettwits",
+        }
+        for src, dst in replacements.items():
+            raw = raw.replace(src, dst)
+        raw = re.sub(r"[^a-z0-9]+", " ", raw)
+        tokens = []
+        for token in raw.split():
+            if not token:
+                continue
+            tokens.append(token)
+            if token.endswith("ies") and len(token) > 4:
+                tokens.append(token[:-3] + "y")
+            elif token.endswith("s") and len(token) > 3 and not token.endswith("ss"):
+                tokens.append(token[:-1])
+        deduped = []
+        seen = set()
+        for token in tokens:
+            if token in seen:
+                continue
+            seen.add(token)
+            deduped.append(token)
+        return " ".join(deduped)
+
+    def _intent_has_phrase_in_normalized(self, normalized_text, phrase):
+        target = self._normalize_intent_text(phrase)
+        if not normalized_text or not target:
+            return False
+        return f" {target} " in f" {normalized_text} "
+
+    def _intent_has_any_normalized(self, normalized_text, phrases):
+        return any(self._intent_has_phrase_in_normalized(normalized_text, phrase) for phrase in (phrases or []))
+
+    def _intent_has_any(self, text, phrases):
+        return self._intent_has_any_normalized(self._normalize_intent_text(text), phrases)
+
+    def _intent_has_all(self, text, groups):
+        normalized = self._normalize_intent_text(text)
+        if not normalized:
+            return False
+        for group in groups:
+            variants = list(group) if isinstance(group, (list, tuple, set)) else [group]
+            if not any(self._intent_has_phrase_in_normalized(normalized, phrase) for phrase in variants):
+                return False
+        return True
+
     def _looks_like_block_reasons_text(self, text):
-        lower = str(text or "").lower()
-        return any(phrase in lower for phrase in [
-            "why no signals", "why no signal", "what is blocking", "what's blocking",
-            "why no scalp", "why no scalps", "blocked reasons", "why nothing today",
-            "why no entries", "why no trades today", "why no alerts today"
-        ])
+        normalized = self._normalize_intent_text(text)
+        if not normalized:
+            return False
+        if self._intent_has_any_normalized(normalized, [
+            "blocked reasons", "block reasons", "what is blocking", "what is blockin",
+            "what blocks signals", "what blocked signals", "why nothing today"
+        ]):
+            return True
+        if any(self._intent_has_phrase_in_normalized(normalized, phrase) for phrase in ["why", "how come"]):
+            no_output = self._intent_has_any_normalized(normalized, ["no", "not getting", "nothing", "zero"])
+            signal_words = self._intent_has_any_normalized(normalized, ["signal", "scalp", "entry", "trade", "alert"])
+            timing_words = self._intent_has_any_normalized(normalized, ["today", "right now", "so far"])
+            if signal_words and (no_output or timing_words):
+                return True
+        return False
 
     def _send_signal_debug_summary(self):
         now = datetime.now(timezone.utc)
@@ -1109,8 +1186,8 @@ class PonchBot:
         return "\n".join(lines)
 
     def _answer_news_question(self, text: str) -> bool:
-        lower = str(text or "").lower()
-        if not any(term in lower for term in ["news", "fomc", "cpi", "nfp", "pce", "event", "economic", "holiday"]):
+        normalized = self._normalize_intent_text(text)
+        if not self._intent_has_any_normalized(normalized, ["news", "fomc", "cpi", "nfp", "pce", "event", "economic", "holiday"]):
             return False
         now = datetime.now(timezone.utc)
         self._refresh_live_news_events(now)
@@ -1780,8 +1857,9 @@ class PonchBot:
             self._send_private_execution_notice("Confirm Exec Action", preview_lines, icon="🤖")
 
         lower = text.lower()
+        normalized = self._normalize_intent_text(text)
         chat_id = str((message.get("chat") or {}).get("id") or "")
-        if any(phrase in lower for phrase in ["still open", "is it open", "is this open", "is that open"]):
+        if self._intent_has_any_normalized(normalized, ["still open", "is it open", "is this open", "is that open", "is it still open"]):
             focus_payload = self._apply_context_to_action({"action": "status"}, text)
             sig = self._resolve_signal_for_action(focus_payload, allow_unexecuted=False)
             if sig:
@@ -1804,7 +1882,7 @@ class PonchBot:
             "pending signals", "show pending signals", "what signals are pending",
             "show waiting signals", "waiting signals", "pending setups"
         ]
-        if any(phrase in lower for phrase in pending_phrases):
+        if self._intent_has_any_normalized(normalized, pending_phrases):
             self._send_pending_signals_snapshot("Pending Signals")
             return True
 
@@ -1813,7 +1891,7 @@ class PonchBot:
             "position performance", "how are my positions doing", "show open position roi",
             "show open position pnl", "all position roi", "all position pnl"
         ]
-        if any(phrase in lower for phrase in performance_phrases):
+        if self._intent_has_any_normalized(normalized, performance_phrases):
             self._send_positions_performance_snapshot("Position Performance")
             return True
 
@@ -1823,12 +1901,12 @@ class PonchBot:
             "how many positions did i open today", "trades i opened today",
             "opened today", "today trades", "today trade count"
         ]
-        if any(phrase in lower for phrase in today_trade_phrases):
+        if self._intent_has_any_normalized(normalized, today_trade_phrases):
             self._send_today_trade_count_answer()
             return True
 
         today_pnl_words = ["gain", "gained", "lose", "lost", "loss", "profit", "pnl", "made", "earned", "result"]
-        if "today" in lower and any(word in lower for word in today_pnl_words):
+        if self._intent_has_phrase_in_normalized(normalized, "today") and self._intent_has_any_normalized(normalized, today_pnl_words):
             self._send_today_pnl_answer()
             return True
 
@@ -1855,7 +1933,7 @@ class PonchBot:
             "open last pending signal", "open latest pending signal", "open the latest pending signal",
             "open the last pending signal", "open last waiting signal", "open latest waiting signal"
         ]
-        if any(phrase in lower for phrase in open_latest_pending_phrases):
+        if self._intent_has_any_normalized(normalized, open_latest_pending_phrases):
             pending = self._recent_unexecuted_signals()
             if not pending:
                 self._send_private_execution_answer("I do not see any pending tracked signal right now.")
@@ -1866,11 +1944,11 @@ class PonchBot:
             _ask_to_confirm(action, chat_id, source_text=text)
             return True
 
-        if ("close all" in lower or "close everything" in lower) and any(word in lower for word in ["position", "positions", "trade", "trades", "everything"]):
+        if self._intent_has_any_normalized(normalized, ["close all", "close everything"]) and self._intent_has_any_normalized(normalized, ["position", "trade", "everything"]):
             action = {"action": "close_all_positions"}
-            if "long" in lower:
+            if self._intent_has_phrase_in_normalized(normalized, "long"):
                 action["side"] = "LONG"
-            elif "short" in lower:
+            elif self._intent_has_phrase_in_normalized(normalized, "short"):
                 action["side"] = "SHORT"
             action = self._apply_context_to_action(action, text)
             self._remember_exec_suggestion(action)
@@ -2131,38 +2209,41 @@ class PonchBot:
         return f"Your balance is {total:.2f} total, with {free:.2f} free and {used:.2f} tied up in positions."
 
     def _looks_like_balance_only_text(self, text):
-        lower = str(text or "").lower()
-        has_balance_signal = any(term in lower for term in [
+        normalized = self._normalize_intent_text(text)
+        has_balance_signal = self._intent_has_any_normalized(normalized, [
             "balance", "wallet balance", "equity", "wallet", "how much money do i have"
         ])
-        wants_full_status = any(term in lower for term in [
+        wants_full_status = self._intent_has_any_normalized(normalized, [
             "account status", "live status", "startup check", "balance summary",
             "wallet information", "account information", "account info", "full status", "summary"
         ])
         return has_balance_signal and not wants_full_status
 
     def _looks_like_open_positions_text(self, text):
-        lower = str(text or "").lower()
-        return any(term in lower for term in [
+        normalized = self._normalize_intent_text(text)
+        return self._intent_has_any_normalized(normalized, [
             "open positions", "open position", "do i have any open", "which position is open",
             "which positions are open", "show my positions", "show my position", "list positions", "list position"
-        ])
+        ]) or (
+            self._intent_has_any_normalized(normalized, ["position", "trade"]) and
+            self._intent_has_any_normalized(normalized, ["open", "active"])
+        )
 
     def _looks_like_account_mode_text(self, text):
-        lower = str(text or "").lower()
-        return any(term in lower for term in [
+        normalized = self._normalize_intent_text(text)
+        return self._intent_has_any_normalized(normalized, [
             "margin mode", "what mode", "what is my mode", "leverage", "what leverage",
             "account mode", "cross mode", "isolated mode", "cross or isolated"
-        ]) and not any(term in lower for term in ["position mode"])
+        ]) and not self._intent_has_any_normalized(normalized, ["position mode"])
 
     def _looks_like_account_status_text(self, text):
-        lower = str(text or "").lower()
-        return any(term in lower for term in [
+        normalized = self._normalize_intent_text(text)
+        return self._intent_has_any_normalized(normalized, [
             "account status", "show account status", "show live status",
             "balance summary", "show balance summary", "startup check",
             "wallet information", "account information", "account info",
             "full status", "full account", "full snapshot", "live snapshot"
-        ])
+        ]) or self._intent_has_all(normalized, [("account", "wallet"), ("status", "summary", "snapshot")])
 
     def _format_news_status_line(self, now):
         if not NEWS_FILTER_ENABLED:
