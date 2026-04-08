@@ -53,6 +53,7 @@ from config import (
     SESSION_SCALP_MODE,
     SIGNAL_TIMEFRAMES,
     SYMBOL,
+    FIVE_MIN_REQUIRE_15M_PERMISSION,
     VOLATILITY_FILTER_ENABLED,
     VOLATILITY_MAX_ATR_PCT,
     VOLATILITY_MIN_ATR_PCT,
@@ -369,6 +370,49 @@ def _has_opposite_divergence(df_slice: pd.DataFrame, side: str, timeframe: str) 
     return any(sig.get("active", True) and sig.get("side") == opposite for sig in div_sigs)
 
 
+def _get_5m_higher_tf_guard_reason_replay(slice_data: dict, side: str, trend_map: dict, idx):
+    if not FIVE_MIN_REQUIRE_15M_PERMISSION:
+        return None
+    df_15m = (slice_data or {}).get("15m")
+    try:
+        if df_15m is None or df_15m.empty or len(df_15m) < 3:
+            return None
+    except Exception:
+        return None
+
+    curr = df_15m.iloc[-1]
+    prev = df_15m.iloc[-2]
+    rsi_now = float(curr.get("RSI", 50) or 50)
+    rsi_prev = float(prev.get("RSI", rsi_now) or rsi_now)
+    smooth_now = float(curr.get("MomentumSmooth", rsi_now) or rsi_now)
+    smooth_prev = float(prev.get("MomentumSmooth", smooth_now) or smooth_now)
+    zone_15m = classify_momentum_zone(smooth_now, "15m")
+
+    trend_15m = "Ranging"
+    try:
+        series_15m = (trend_map or {}).get("15m")
+        if series_15m is not None and not series_15m.empty:
+            val = series_15m.asof(idx)
+            if isinstance(val, str):
+                trend_15m = val
+    except Exception:
+        trend_15m = "Ranging"
+    trend_side_15m = _trend_side(trend_15m)
+    side = str(side or "").upper()
+
+    if side == "LONG":
+        if trend_side_15m == "SHORT" and rsi_now < 52 and smooth_now <= smooth_prev:
+            return f"15m trend is still bearish and RSI is not recovering yet ({rsi_now:.1f})"
+        if zone_15m != "OS" and rsi_now < 50 and rsi_now <= rsi_prev and smooth_now <= smooth_prev:
+            return f"15m RSI still has room to fall ({rsi_now:.1f})"
+    elif side == "SHORT":
+        if trend_side_15m == "LONG" and rsi_now > 48 and smooth_now >= smooth_prev:
+            return f"15m trend is still bullish and RSI is not rolling over yet ({rsi_now:.1f})"
+        if zone_15m != "OB" and rsi_now > 50 and rsi_now >= rsi_prev and smooth_now >= smooth_prev:
+            return f"15m RSI still has room to rise ({rsi_now:.1f})"
+    return None
+
+
 def _is_unstable_impulse_replay(data: dict, side: str):
     if not FALLING_KNIFE_FILTER_ENABLED:
         return False, ""
@@ -619,6 +663,9 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_
             if impulse_blocked:
                 continue
 
+            if any(tr.get("side") != side for tr in active):
+                continue
+
             if now_ts < side_cooldown_until.get(side, 0.0):
                 continue
 
@@ -663,6 +710,11 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_
             allowed = SCALP_ALLOWED_SESSIONS_BY_TF.get(tf)
             if allowed and session_name not in allowed and not (relaxed and SCALP_RELAX_ALLOW_OFFSESSION):
                 continue
+
+            if tf == "5m":
+                htf_guard_reason = _get_5m_higher_tf_guard_reason_replay(slice_data, side, trend_map, idx)
+                if htf_guard_reason:
+                    continue
 
             min_score_tf = SCALP_MIN_SCORE_BY_TF.get(tf, 0)
             if relaxed:
