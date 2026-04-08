@@ -145,6 +145,7 @@ class PonchBot:
         self.last_exec_suggested_action = state.get("last_exec_suggested_action")
         self.private_exec_focus = state.get("private_exec_focus", {})
         self.private_todo_items = state.get("private_todo_items", [])
+        self.signal_debug_stats = state.get("signal_debug_stats", {})
         self.last_scalp_open_alert = state.get("last_scalp_open_alert", {})
         self.scalp_countertrend_hits = state.get("scalp_countertrend_hits", {"LONG": [], "SHORT": []})
         self.scalp_loss_streak = state.get("scalp_loss_streak", {"LONG": 0, "SHORT": 0})
@@ -456,6 +457,75 @@ class PonchBot:
     def _is_private_exec_chat(self, chat_id):
         exec_chat = str(self._execution_chat_id() or "").strip()
         return bool(exec_chat and str(chat_id or "").strip() == exec_chat)
+
+    def _ensure_signal_debug_day(self, now=None):
+        now = now or datetime.now(timezone.utc)
+        today = now.astimezone(timezone.utc).strftime("%Y-%m-%d")
+        stats = self.signal_debug_stats or {}
+        if str(stats.get("date") or "") != today:
+            stats = {
+                "date": today,
+                "blocked": {},
+                "suppressed": {},
+                "sent": {},
+            }
+            self.signal_debug_stats = stats
+        return stats
+
+    def _record_signal_debug(self, bucket, key, now=None):
+        if not key:
+            return
+        stats = self._ensure_signal_debug_day(now)
+        section = stats.setdefault(bucket, {})
+        section[key] = int(section.get(key, 0) or 0) + 1
+
+    def _record_signal_block(self, key, now=None):
+        self._record_signal_debug("blocked", key, now=now)
+
+    def _record_signal_suppressed(self, key, now=None):
+        self._record_signal_debug("suppressed", key, now=now)
+
+    def _record_signal_sent(self, key, now=None):
+        self._record_signal_debug("sent", key, now=now)
+
+    def _looks_like_block_reasons_text(self, text):
+        lower = str(text or "").lower()
+        return any(phrase in lower for phrase in [
+            "why no signals", "why no signal", "what is blocking", "what's blocking",
+            "why no scalp", "why no scalps", "blocked reasons", "why nothing today",
+            "why no entries", "why no trades today", "why no alerts today"
+        ])
+
+    def _send_signal_debug_summary(self):
+        now = datetime.now(timezone.utc)
+        stats = self._ensure_signal_debug_day(now)
+        sent = stats.get("sent") or {}
+        blocked = stats.get("blocked") or {}
+        suppressed = stats.get("suppressed") or {}
+        total_sent = sum(int(v or 0) for v in sent.values())
+
+        lines = [f"Today in UTC I have sent {total_sent} confirmed signal{'s' if total_sent != 1 else ''} so far."]
+        if sent:
+            sent_lines = [f"{k}: {int(v or 0)}" for k, v in sorted(sent.items(), key=lambda item: (-int(item[1] or 0), item[0]))]
+            lines.append("")
+            lines.append("Confirmed sends:")
+            lines.append("<pre>" + html.escape("\n".join(sent_lines)) + "</pre>")
+        if blocked:
+            top_blocked = sorted(blocked.items(), key=lambda item: (-int(item[1] or 0), item[0]))[:8]
+            block_lines = [f"{k}: {int(v or 0)}" for k, v in top_blocked]
+            lines.append("")
+            lines.append("Main blockers:")
+            lines.append("<pre>" + html.escape("\n".join(block_lines)) + "</pre>")
+        if suppressed:
+            top_suppressed = sorted(suppressed.items(), key=lambda item: (-int(item[1] or 0), item[0]))[:6]
+            suppress_lines = [f"{k}: {int(v or 0)}" for k, v in top_suppressed]
+            lines.append("")
+            lines.append("Other suppressions:")
+            lines.append("<pre>" + html.escape("\n".join(suppress_lines)) + "</pre>")
+        if not blocked and not suppressed and total_sent == 0:
+            lines.append("")
+            lines.append("I do not have any blocker history recorded for today yet. That usually means the bot has not been running long enough today, or there really have not been any signal attempts yet.")
+        self._send_private_execution_answer("\n".join(lines))
 
 
     def _refresh_private_execution_state(self):
@@ -1772,6 +1842,10 @@ class PonchBot:
 
         if self._looks_like_account_status_text(lower):
             self._send_execution_status_snapshot(datetime.now(timezone.utc), title="Bitunix Live Status")
+            return True
+
+        if self._looks_like_block_reasons_text(text):
+            self._send_signal_debug_summary()
             return True
 
         if self._handle_private_todo_message(text):
@@ -3612,6 +3686,7 @@ class PonchBot:
                 "last_exec_suggested_action": self.last_exec_suggested_action,
                 "private_exec_focus": self.private_exec_focus,
                 "private_todo_items": self.private_todo_items,
+                "signal_debug_stats": self.signal_debug_stats,
                 "last_scalp_open_alert": self.last_scalp_open_alert,
                 "scalp_countertrend_hits": self.scalp_countertrend_hits,
                 "scalp_loss_streak": self.scalp_loss_streak,
@@ -3850,6 +3925,7 @@ class PonchBot:
                             blocked_trends.append(f"{trend_name} ({trend_src or 'N/A'})")
 
                     if blocked_trends:
+                        self._record_signal_block("confluence_trend_guard", now=now)
                         print(
                             f"  [CONFLUENCE] Blocked {side} {ce['type']}: "
                             f"against trend {', '.join(blocked_trends)}"
@@ -3858,12 +3934,14 @@ class PonchBot:
 
                     divergence_note = self._get_opposite_divergence_note(side)
                     if divergence_note:
+                        self._record_signal_block("confluence_opposite_divergence", now=now)
                         print(f"  [CONFLUENCE] Blocked {side} {ce['type']}: {divergence_note}")
                         continue
 
                     # 1.5 Falling-knife / blow-off safety filter.
                     impulse_blocked, impulse_note = self._is_unstable_impulse(data, side)
                     if impulse_blocked:
+                        self._record_signal_block("confluence_unstable_impulse", now=now)
                         print(f"  [CONFLUENCE] Blocked {side} {ce['type']}: {impulse_note}")
                         continue
 
@@ -3871,12 +3949,14 @@ class PonchBot:
                     # and LONG when RSI already very high.
                     if confluence_rsi is not None:
                         if side == "SHORT" and confluence_rsi <= (MOMENTUM_OS + CONFIRMATION_RSI_EXHAUSTION_BUFFER):
+                            self._record_signal_block("confluence_rsi_exhausted", now=now)
                             print(
                                 f"  [CONFLUENCE] Blocked SHORT {ce['type']}: "
                                 f"RSI exhausted low ({confluence_rsi:.1f})"
                             )
                             continue
                         if side == "LONG" and confluence_rsi >= (MOMENTUM_OB - CONFIRMATION_RSI_EXHAUSTION_BUFFER):
+                            self._record_signal_block("confluence_rsi_exhausted", now=now)
                             print(
                                 f"  [CONFLUENCE] Blocked LONG {ce['type']}: "
                                 f"RSI exhausted high ({confluence_rsi:.1f})"
@@ -3966,6 +4046,7 @@ class PonchBot:
                         )
                         self.tracker.signals[-1]["signal_id"] = signal_id
                         self.tracker.signals[-1]["signal_size_pct"] = strong_size
+                        self._record_signal_sent("STRONG", now=now)
                         self._execute_exchange_trade(self.tracker.signals[-1])
                         self._save_state()
                         print(f"  [CONFLUENCE] STRONG {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
@@ -4006,6 +4087,7 @@ class PonchBot:
                         )
                         self.tracker.signals[-1]["signal_id"] = signal_id
                         self.tracker.signals[-1]["signal_size_pct"] = extreme_size
+                        self._record_signal_sent("EXTREME", now=now)
                         self._execute_exchange_trade(self.tracker.signals[-1])
                         self._save_state()
                         print(f"  [CONFLUENCE] EXTREME {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
@@ -5148,6 +5230,7 @@ class PonchBot:
             if evt["type"] == "OPEN":
                 block_reason = self._get_scalp_window_block_reason(tf, evt["side"], local_trend, local_trend_src)
                 if block_reason:
+                    self._record_signal_suppressed("open_window_guard", now=now)
                     print(f"  [SCALP] Suppressed Open [{tf}] {evt['side']}: {block_reason}")
                     continue
                 open_key = f"{tf}_{evt['side']}"
@@ -5161,6 +5244,7 @@ class PonchBot:
                 if self.is_booting:
                     print(f"  [TG] Skipped Scalp Open [{tf}] {evt['side']} (booting)")
                 elif not can_send_open:
+                    self._record_signal_suppressed("open_cooldown", now=now)
                     print(f"  [SCALP] Suppressed Open [{tf}] {evt['side']} (cooldown)")
                 else:
                     print(f"  [TG] Sent Scalp Open [{tf}] {evt['side']}")
@@ -5168,6 +5252,7 @@ class PonchBot:
             elif evt["type"] == "PREPARE":
                 block_reason = self._get_scalp_window_block_reason(tf, evt["side"], local_trend, local_trend_src)
                 if block_reason:
+                    self._record_signal_suppressed("prepare_window_guard", now=now)
                     print(f"  [SCALP] Suppressed Prepare [{tf}] {evt['side']}: {block_reason}")
                     continue
                 if not self.is_booting:
@@ -5189,11 +5274,13 @@ class PonchBot:
 
                 divergence_note = self._get_opposite_divergence_note(side)
                 if divergence_note:
+                    self._record_signal_block("opposite_divergence", now=now)
                     print(f"  [SCALP] Blocked {tf} {side}: {divergence_note}")
                     continue
 
                 impulse_blocked, impulse_note = self._is_unstable_impulse(self.latest_data or {}, side)
                 if impulse_blocked:
+                    self._record_signal_block("unstable_impulse", now=now)
                     print(f"  [SCALP] Blocked {tf} {side}: {impulse_note}")
                     continue
 
@@ -5201,6 +5288,7 @@ class PonchBot:
                 # do not SHORT in bullish local trend, do not LONG in bearish local trend.
                 local_side = self._trend_side(local_trend)
                 if local_side and side != local_side:
+                    self._record_signal_block("local_trend_reversal", now=now)
                     print(
                         f"  [SCALP] Blocked {tf} {side}: local trend reversal "
                         f"({local_trend} from {local_trend_src or tf})"
@@ -5252,6 +5340,7 @@ class PonchBot:
                 # --- Losing streak cooldown per side ---
                 cooldown_until = self.scalp_side_cooldown_until.get(side, 0)
                 if current_time < cooldown_until:
+                    self._record_signal_block("side_cooldown", now=now)
                     wait_m = int((cooldown_until - current_time) / 60) + 1
                     print(f"  [SCALP] Blocked {tf} {side}: side cooldown active ({wait_m}m left)")
                     continue
@@ -5267,6 +5356,7 @@ class PonchBot:
                     min_pct *= regime_vol_min_mult
                     max_pct *= regime_vol_max_mult
                     if atr_pct < min_pct or atr_pct > max_pct:
+                        self._record_signal_block("volatility_filter", now=now)
                         print(
                             f"  [SCALP] Blocked {tf} {side}: ATR% {atr_pct:.3f} "
                             f"outside [{min_pct:.3f}, {max_pct:.3f}]"
@@ -5277,6 +5367,7 @@ class PonchBot:
                 if ORDERFLOW_SAFETY_ENABLED:
                     anomaly, oi_pct = self._is_orderflow_anomaly()
                     if anomaly and score < ORDERFLOW_ANOMALY_SCORE_MIN:
+                        self._record_signal_block("orderflow_anomaly", now=now)
                         print(
                             f"  [SCALP] Blocked {tf} {side}: order-flow anomaly "
                             f"(OI {oi_pct:.2f}%, LIQ ${self.last_liqs:,.0f}) and score {score}"
@@ -5286,6 +5377,7 @@ class PonchBot:
                 # --- Session whitelist per timeframe ---
                 allowed_sessions = SCALP_ALLOWED_SESSIONS_BY_TF.get(tf)
                 if allowed_sessions and session_name not in allowed_sessions and not (relaxed_filters and SCALP_RELAX_ALLOW_OFFSESSION):
+                    self._record_signal_block("session_whitelist", now=now)
                     print(
                         f"  [SCALP] Blocked {tf} {side}: session {session_name} "
                         f"not in {allowed_sessions}"
@@ -5294,6 +5386,7 @@ class PonchBot:
 
                 news_blackout = self._get_active_news_block(now)
                 if news_blackout:
+                    self._record_signal_block("news_blackout", now=now)
                     label = str(news_blackout.get("label") or "High Impact News")
                     source = str(news_blackout.get("source") or "NEWS")
                     print(f"  [SCALP] Blocked {tf} {side}: news blackout active ({label} via {source})")
@@ -5301,6 +5394,7 @@ class PonchBot:
                 if tf == "5m":
                     news_blackout_5m = self._get_5m_strict_news_block(now)
                     if news_blackout_5m:
+                        self._record_signal_block("strict_5m_news", now=now)
                         label = str(news_blackout_5m.get("label") or "High Impact News")
                         source = str(news_blackout_5m.get("source") or "NEWS")
                         print(f"  [SCALP] Blocked {tf} {side}: strict 5m news guard active ({label} via {source})")
@@ -5308,6 +5402,7 @@ class PonchBot:
 
                 opposite_sig = self._has_active_opposite_signal(side, SYMBOL)
                 if opposite_sig:
+                    self._record_signal_block("opposite_active_signal", now=now)
                     print(
                         f"  [SCALP] Blocked {tf} {side}: opposite active "
                         f"{opposite_sig.get('side')} [{opposite_sig.get('tf', 'N/A')}] still open"
@@ -5316,6 +5411,7 @@ class PonchBot:
                 if tf == "5m":
                     htf_guard_reason = self._get_5m_higher_tf_guard_reason(side)
                     if htf_guard_reason:
+                        self._record_signal_block("5m_higher_tf_guard", now=now)
                         print(f"  [SCALP] Blocked {tf} {side}: {htf_guard_reason}")
                         continue
 
@@ -5325,6 +5421,7 @@ class PonchBot:
                     min_score_tf = max(0, int(min_score_tf) - int(SCALP_RELAX_MIN_SCORE_DELTA))
                 min_score_tf = max(0, int(min_score_tf) + score_delta + tuning_delta)
                 if score < min_score_tf:
+                    self._record_signal_block("score_gate", now=now)
                     print(
                         f"  [SCALP] Blocked {tf} {side}: score {score}<{min_score_tf} "
                         f"(tf quality gate)"
@@ -5339,12 +5436,15 @@ class PonchBot:
                     open_tf = int(exposure["by_tf"].get(tf, 0))
                     tf_limit = int(SCALP_MAX_OPEN_PER_TF.get(tf, 1))
                     if open_total >= SCALP_MAX_OPEN_TOTAL:
+                        self._record_signal_block("exposure_total", now=now)
                         print(f"  [SCALP] Blocked {tf} {side}: total exposure {open_total}/{SCALP_MAX_OPEN_TOTAL}")
                         continue
                     if open_side >= SCALP_MAX_OPEN_PER_SIDE:
+                        self._record_signal_block("exposure_side", now=now)
                         print(f"  [SCALP] Blocked {tf} {side}: side exposure {open_side}/{SCALP_MAX_OPEN_PER_SIDE}")
                         continue
                     if open_tf >= tf_limit:
+                        self._record_signal_block("exposure_tf", now=now)
                         print(f"  [SCALP] Blocked {tf} {side}: tf exposure {open_tf}/{tf_limit}")
                         continue
 
@@ -5368,11 +5468,13 @@ class PonchBot:
                                 f"counter-trend allowed in hard mode vs {trend_name}"
                             )
                         else:
+                            self._record_signal_block("countertrend_hard", now=now)
                             print(f"  [SCALP] Blocked {tf} {side}: counter-trend vs {trend_name} (mode=hard)")
                             continue
                     if filter_mode == "soft":
                         required_score = countertrend_min_score + session_score_boost
                         if score < required_score:
+                            self._record_signal_block("countertrend_score", now=now)
                             print(
                                 f"  [SCALP] Blocked {tf} {side}: "
                                 f"counter-trend score {score}<{required_score} vs {trend_name} (mode=soft)"
@@ -5390,6 +5492,7 @@ class PonchBot:
                         ct_extra = int(SCALP_RELAX_COUNTERTREND_EXTRA) if relaxed_filters else 0
                         ct_limit = session_countertrend_max + ct_extra
                         if len(side_hits) >= ct_limit:
+                            self._record_signal_block("countertrend_quota", now=now)
                             print(
                                 f"  [SCALP] Blocked {tf} {side}: "
                                 f"counter-trend quota reached ({len(side_hits)}/"
@@ -5412,6 +5515,7 @@ class PonchBot:
                         ct_extra = int(SCALP_RELAX_COUNTERTREND_EXTRA)
                         ct_limit = session_countertrend_max + ct_extra
                         if len(side_hits) >= ct_limit:
+                            self._record_signal_block("countertrend_quota", now=now)
                             print(
                                 f"  [SCALP] Blocked {tf} {side}: "
                                 f"relaxed hard-mode quota reached ({len(side_hits)}/"
@@ -5461,6 +5565,7 @@ class PonchBot:
                 msg_id = resp.get("result", {}).get("message_id") if resp else None
                 self._save_state()
                 sent_label = "Smart Money Confirmed" if str(evt.get("strategy", "")).upper() == "SMART_MONEY_LIQUIDITY" else "Scalp Confirmed"
+                self._record_signal_sent("SMART_MONEY" if str(evt.get("strategy", "")).upper() == "SMART_MONEY_LIQUIDITY" else f"SCALP_{tf}", now=now)
                 print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} {sent_label} [{tf}] {evt['side']} @ {evt['entry']:,.2f}")
 
                 # Log signal for performance tracking
