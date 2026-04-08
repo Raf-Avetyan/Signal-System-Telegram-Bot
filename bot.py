@@ -144,6 +144,7 @@ class PonchBot:
         self.pending_exec_action = state.get("pending_exec_action")
         self.last_exec_suggested_action = state.get("last_exec_suggested_action")
         self.private_exec_focus = state.get("private_exec_focus", {})
+        self.private_todo_items = state.get("private_todo_items", [])
         self.last_scalp_open_alert = state.get("last_scalp_open_alert", {})
         self.scalp_countertrend_hits = state.get("scalp_countertrend_hits", {"LONG": [], "SHORT": []})
         self.scalp_loss_streak = state.get("scalp_loss_streak", {"LONG": 0, "SHORT": 0})
@@ -340,6 +341,117 @@ class PonchBot:
         if not answer:
             return
         tg.send(answer, chat_id=exec_chat, parse_mode="HTML")
+
+    def _todo_extract_item(self, text):
+        raw = str(text or "").strip()
+        patterns = [
+            r"^(?:remember|save|add)\s+(?:this\s+)?(?:to[- ]?do|task|note)?\s*:?\s*(.+)$",
+            r"^(?:my\s+)?to[- ]?do\s*:?\s*(.+)$",
+            r"^(?:task|note)\s*:?\s*(.+)$",
+        ]
+        for pattern in patterns:
+            match = re.match(pattern, raw, flags=re.I)
+            if match:
+                item = str(match.group(1) or "").strip(" .")
+                if item:
+                    return item
+        return ""
+
+    def _todo_add(self, text):
+        item = self._todo_extract_item(text)
+        if not item:
+            return False
+        todo = {
+            "text": item,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "done": False,
+        }
+        self.private_todo_items.append(todo)
+        self._save_state()
+        self._send_private_execution_answer(
+            "I saved that to your to-do list.\n\n<pre>" + html.escape(item) + "</pre>"
+        )
+        return True
+
+    def _todo_render(self, include_done=True):
+        items = list(self.private_todo_items or [])
+        if not include_done:
+            items = [item for item in items if not bool(item.get("done"))]
+        if not items:
+            return "Your to-do list is empty right now."
+        lines = []
+        for idx, item in enumerate(items, start=1):
+            mark = "done" if bool(item.get("done")) else "open"
+            lines.append(f"{idx}. [{mark}] {str(item.get('text') or '').strip()}")
+        return "Here is your to-do list.\n\n<pre>" + html.escape("\n".join(lines)) + "</pre>"
+
+    def _todo_show(self, open_only=False):
+        self._send_private_execution_answer(self._todo_render(include_done=not open_only))
+        return True
+
+    def _todo_clear(self):
+        if not self.private_todo_items:
+            self._send_private_execution_answer("Your to-do list is already empty.")
+            return True
+        self.private_todo_items = []
+        self._save_state()
+        self._send_private_execution_answer("I cleared your to-do list.")
+        return True
+
+    def _todo_update_by_index(self, text, action):
+        match = re.search(r"\b(?:task|todo|to[- ]?do|item)?\s*(\d+)\b", str(text or ""), flags=re.I)
+        if not match:
+            return False
+        idx = int(match.group(1))
+        if idx < 1 or idx > len(self.private_todo_items):
+            self._send_private_execution_answer(f"I could not find task {idx} in your to-do list.")
+            return True
+        item = self.private_todo_items[idx - 1]
+        if action == "remove":
+            removed = str(item.get("text") or "").strip()
+            self.private_todo_items.pop(idx - 1)
+            self._save_state()
+            self._send_private_execution_answer(
+                "I removed that task.\n\n<pre>" + html.escape(removed) + "</pre>"
+            )
+            return True
+        if action == "done":
+            item["done"] = True
+            self._save_state()
+            self._send_private_execution_answer(
+                "I marked that task as done.\n\n<pre>" + html.escape(str(item.get("text") or "").strip()) + "</pre>"
+            )
+            return True
+        return False
+
+    def _handle_private_todo_message(self, text):
+        lower = str(text or "").strip().lower()
+        if not lower:
+            return False
+        if any(phrase in lower for phrase in [
+            "show my to do", "show my todo", "show to do", "show todo",
+            "what is on my to do", "what is on my todo", "my to do list", "my todo list",
+            "list my tasks", "show my tasks"
+        ]):
+            return self._todo_show()
+        if any(phrase in lower for phrase in [
+            "show open tasks", "show open to do", "show open todo", "open tasks", "open to do"
+        ]):
+            return self._todo_show(open_only=True)
+        if any(phrase in lower for phrase in [
+            "clear my to do", "clear my todo", "delete all tasks", "clear tasks", "remove all tasks"
+        ]):
+            return self._todo_clear()
+        if any(phrase in lower for phrase in ["mark task", "complete task", "done task", "finish task"]):
+            return self._todo_update_by_index(text, "done")
+        if any(phrase in lower for phrase in ["remove task", "delete task"]):
+            return self._todo_update_by_index(text, "remove")
+        if any(phrase in lower for phrase in [
+            "remember this", "remember that", "add to do", "add todo", "save this task", "save this note",
+            "add task", "add note", "todo:", "to do:", "task:", "note:"
+        ]):
+            return self._todo_add(text)
+        return False
 
     def _is_private_exec_chat(self, chat_id):
         exec_chat = str(self._execution_chat_id() or "").strip()
@@ -1662,6 +1774,9 @@ class PonchBot:
             self._send_execution_status_snapshot(datetime.now(timezone.utc), title="Bitunix Live Status")
             return True
 
+        if self._handle_private_todo_message(text):
+            return True
+
         open_latest_pending_phrases = [
             "open last pending signal", "open latest pending signal", "open the latest pending signal",
             "open the last pending signal", "open last waiting signal", "open latest waiting signal"
@@ -2000,7 +2115,7 @@ class PonchBot:
             if self.last_live_news_error:
                 return f"The live news feed is having an issue right now: {self.last_live_news_error}."
             if self.last_markettwits_error:
-                return f"The MarketTwits feed is having an issue right now: {self.last_markettwits_error}."
+                return f"MarketTwits is quiet for BTC right now: {self.last_markettwits_error}"
             return "There are no upcoming high-impact US events right now."
         manual = get_active_news_blackout(now)
         if manual:
@@ -2566,7 +2681,12 @@ class PonchBot:
             })
         self.markettwits_events = sorted(parsed, key=lambda row: row["datetime"], reverse=True)
         self.last_markettwits_refresh = current_ts
-        self.last_markettwits_error = None if parsed or posts == [] else "No parsable MarketTwits posts returned."
+        if parsed:
+            self.last_markettwits_error = None
+        elif posts:
+            self.last_markettwits_error = "Feed loaded, but there were no recent BTC-relevant headlines strong enough to keep."
+        else:
+            self.last_markettwits_error = "No recent public posts were returned from the channel page."
 
     def _get_markettwits_blackout(self, now):
         if not MARKETTWITS_NEWS_ENABLED or not NEWS_FILTER_ENABLED:
@@ -3491,6 +3611,7 @@ class PonchBot:
                 "pending_exec_action": self.pending_exec_action,
                 "last_exec_suggested_action": self.last_exec_suggested_action,
                 "private_exec_focus": self.private_exec_focus,
+                "private_todo_items": self.private_todo_items,
                 "last_scalp_open_alert": self.last_scalp_open_alert,
                 "scalp_countertrend_hits": self.scalp_countertrend_hits,
                 "scalp_loss_streak": self.scalp_loss_streak,
