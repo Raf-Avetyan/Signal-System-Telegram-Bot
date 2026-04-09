@@ -865,6 +865,7 @@ class TradeExecutor:
             "balance_used": 0.0,
             "open_positions": 0,
             "position_sides": [],
+            "required_position_mode": str(BITUNIX_POSITION_MODE or "ONE_WAY").strip().upper(),
             "errors": [],
         }
         if not self.client.is_configured():
@@ -877,6 +878,7 @@ class TradeExecutor:
         info["balance_used"] = float(bal.get("used", 0) or 0)
         raw = bal.get("raw") or {}
         info["position_mode"] = str(raw.get("positionMode") or BITUNIX_POSITION_MODE or "UNKNOWN").strip().upper()
+        info["position_mode_ok"] = info["position_mode"] == info["required_position_mode"]
         info["leverage"] = int(raw.get("leverage") or BITUNIX_DEFAULT_LEVERAGE or 0)
         info["required_margin_mode"] = BITUNIX_REQUIRED_MARGIN_MODE
         if bal.get("error"):
@@ -932,6 +934,9 @@ class TradeExecutor:
                 {"exchange_open_positions": exchange_open_positions},
             )
         if self.mode == "live" and self.client.is_configured():
+            position_guard = self._ensure_required_position_mode(exchange_open_positions=exchange_open_positions)
+            if not position_guard.get("ok", False):
+                return ExecutionResult(self.mode, False, position_guard.get("message", "Required position mode not satisfied."), position_guard)
             margin_guard = self._ensure_required_margin_mode(SYMBOL, exchange_open_positions=exchange_open_positions)
             if not margin_guard.get("ok", False):
                 return ExecutionResult(self.mode, False, margin_guard.get("message", "Required margin mode not satisfied."), margin_guard)
@@ -2468,6 +2473,62 @@ class TradeExecutor:
             "margin_mode": confirmed_mode,
             "required_margin_mode": required,
             "message": f"Bitunix margin mode switched to {required}.",
+        }
+
+    def _ensure_required_position_mode(self, exchange_open_positions: int = 0) -> Dict[str, Any]:
+        required = str(BITUNIX_POSITION_MODE or "ONE_WAY").strip().upper()
+        try:
+            account = self.client.get_single_account(BITUNIX_MARGIN_COIN).get("data", {}) or {}
+            if isinstance(account, list):
+                account = account[0] if account else {}
+        except Exception as e:
+            return {
+                "ok": False,
+                "required_position_mode": required,
+                "error": str(e),
+                "message": f"Could not verify Bitunix position mode: {e}",
+            }
+
+        current_mode = str(account.get("positionMode") or "").strip().upper()
+        if current_mode == required:
+            return {"ok": True, "position_mode": current_mode, "required_position_mode": required}
+
+        if exchange_open_positions > 0:
+            return {
+                "ok": False,
+                "position_mode": current_mode,
+                "required_position_mode": required,
+                "message": f"Position mode is {current_mode}; required {required}. Close open positions before switching.",
+            }
+
+        try:
+            self.client.change_position_mode(required)
+            confirm = self.client.get_single_account(BITUNIX_MARGIN_COIN).get("data", {}) or {}
+            if isinstance(confirm, list):
+                confirm = confirm[0] if confirm else {}
+            confirmed_mode = str(confirm.get("positionMode") or "").strip().upper()
+        except Exception as e:
+            return {
+                "ok": False,
+                "position_mode": current_mode,
+                "required_position_mode": required,
+                "error": str(e),
+                "message": f"Failed to switch Bitunix position mode to {required}: {e}",
+            }
+
+        if confirmed_mode != required:
+            return {
+                "ok": False,
+                "position_mode": confirmed_mode,
+                "required_position_mode": required,
+                "message": f"Bitunix position mode stayed {confirmed_mode}; required {required}.",
+            }
+
+        return {
+            "ok": True,
+            "position_mode": confirmed_mode,
+            "required_position_mode": required,
+            "message": f"Bitunix position mode switched to {required}.",
         }
 
 

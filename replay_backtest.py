@@ -13,6 +13,7 @@ from config import (
     BITUNIX_MAX_RISK_USD,
     BITUNIX_MIN_BASE_QTY,
     BITUNIX_MIN_NOTIONAL_USD,
+    BITUNIX_POSITION_MODE,
     BITUNIX_QTY_STEP,
     BITUNIX_RISK_CAP_PCT,
     BITUNIX_TP_SPLITS,
@@ -730,6 +731,7 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_
 
     active = []
     results = []
+    hedge_mode = str(BITUNIX_POSITION_MODE or "").strip().upper() == "HEDGE"
     cutoff_dt = datetime.now(timezone.utc) - timedelta(days=days)
     side_hits = {"LONG": [], "SHORT": []}
     loss_streak = {"LONG": 0, "SHORT": 0}
@@ -776,7 +778,7 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_
             if impulse_blocked:
                 continue
 
-            if any(tr.get("side") != side for tr in active):
+            if (not hedge_mode) and any(tr.get("side") != side for tr in active):
                 continue
 
             if now_ts < side_cooldown_until.get(side, 0.0):
@@ -1183,8 +1185,10 @@ def main():
 
     relaxed_mode = bool(args.relaxed or (SCALP_RELAXED_FILTERS and not args.strict))
 
+    position_mode_label = str(BITUNIX_POSITION_MODE or "ONE_WAY").strip().upper()
+
     if args.smart_money_only:
-        print(f"Replay backtest for {SYMBOL} | days={args.days} | mode=SMART_MONEY_ONLY")
+        print(f"Replay backtest for {SYMBOL} | days={args.days} | mode=SMART_MONEY_ONLY | position_mode={position_mode_label}")
         print("-" * 64)
         all_rows = []
         for tf in SMART_MONEY_EXECUTION_TFS:
@@ -1206,7 +1210,7 @@ def main():
     mode_label = "RELAXED" if relaxed_mode else "STRICT"
     if args.with_smart_money:
         mode_label = f"{mode_label}+SMART_MONEY"
-    print(f"Replay backtest for {SYMBOL} | days={args.days} | mode={mode_label}")
+    print(f"Replay backtest for {SYMBOL} | days={args.days} | mode={mode_label} | position_mode={position_mode_label}")
     print("-" * 64)
     sm_rows_by_tf = {}
     if args.with_smart_money:

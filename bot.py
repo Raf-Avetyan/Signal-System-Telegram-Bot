@@ -61,6 +61,7 @@ from config import (
     MIN_SIGNAL_SIZE_PCT, MAX_SIGNAL_SIZE_PCT, PRIVATE_EXEC_CHAT_ID, EXECUTION_UPDATES_PRIVATE_ONLY,
     PRIVATE_EXEC_AI_CONTROL_ENABLED, PRIVATE_EXEC_CONFIRM_TIMEOUT_SEC,
     GEMINI_API_KEY, GEMINI_MODEL, TIMEFRAME_RISK_MULTIPLIERS, BITUNIX_DEFAULT_LEVERAGE,
+    BITUNIX_POSITION_MODE,
     NEWS_FILTER_ENABLED, get_active_news_blackout, is_ny_market_holiday,
     TRADING_ECONOMICS_NEWS_ENABLED, TRADING_ECONOMICS_API_KEY,
     TRADING_ECONOMICS_COUNTRIES, TRADING_ECONOMICS_MIN_IMPORTANCE,
@@ -256,6 +257,9 @@ class PonchBot:
     def _execution_updates_private_only(self):
         return bool(EXECUTION_UPDATES_PRIVATE_ONLY and self._execution_chat_id())
 
+    def _hedge_mode_enabled(self):
+        return str(BITUNIX_POSITION_MODE or "").strip().upper() == "HEDGE"
+
     def _should_update_public_signal(self, sig):
         if not self._execution_updates_private_only():
             return True
@@ -290,6 +294,106 @@ class PonchBot:
             body_lines = [title_text] if title_text else []
         if body_lines:
             tg.send("\n".join(body_lines), chat_id=exec_chat, parse_mode="HTML")
+
+    def _send_private_execution_signal_card(self, sig):
+        exec_chat = self._execution_chat_id()
+        if not exec_chat or not sig:
+            return None
+        meta = sig.get("meta", {}) or {}
+        signal_type = str(sig.get("type") or "SCALP").upper()
+        signal_html_type = signal_type if signal_type in {"SCALP", "STRONG", "EXTREME"} else "SCALP"
+        tf_val = sig.get("tf")
+        indicators = meta.get("indicators")
+        if tf_val == "Confluence" and indicators:
+            tfs = sorted(list(set(ind.get('tf', 'N/A') for ind in indicators)))
+            tf_val = ", ".join(tfs)
+        html_text = tg.get_signal_html(
+            signal_type=signal_html_type,
+            side=sig.get("side"),
+            timeframe=tf_val or "N/A",
+            entry=sig.get("entry"),
+            sl=sig.get("sl"),
+            initial_sl=sig.get("initial_sl", sig.get("sl")),
+            tp1=sig.get("tp1"),
+            tp2=sig.get("tp2"),
+            tp3=sig.get("tp3"),
+            status="OPEN",
+            score=meta.get("score"),
+            trend=meta.get("trend"),
+            indicators=indicators,
+            reasons=meta.get("reasons"),
+            size=sig.get("signal_size_pct", meta.get("size")),
+            tp_liq_prob=meta.get("tp_liq_prob"),
+            tp_liq_usd=meta.get("tp_liq_usd"),
+            tp_liq_target=meta.get("tp_liq_target"),
+            trigger_label=meta.get("trigger"),
+        )
+        return tg.send(html_text, parse_mode="HTML", chat_id=exec_chat)
+
+    def _send_private_execution_position_id_reply(self, sig, merged=False, owner_sig=None):
+        exec_chat = self._execution_chat_id()
+        execution = (sig or {}).get("execution") or {}
+        msg_id = execution.get("exec_msg_id")
+        position_id = execution.get("position_id")
+        if not exec_chat or not msg_id or not position_id:
+            return None
+        if merged:
+            owner_tf = (owner_sig or {}).get("tf") or "n/a"
+            owner_side = str((owner_sig or {}).get("side") or "N/A").upper()
+            text = (
+                f"🔗 <b>MERGED INTO EXISTING POSITION</b>\n"
+                f"{'🟢' if str(sig.get('side') or '').upper() == 'LONG' else '🔴'} <b>{str(sig.get('side') or '').upper()} [{sig.get('tf', 'N/A')}]</b>\n\n"
+                f"Following the existing <b>{owner_side} [{owner_tf}]</b> Bitunix position.\n"
+                f"Bitunix Position ID:\n<pre>{html.escape(str(position_id))}</pre>"
+            )
+        else:
+            text = (
+                f"✅ <b>LIVE ON BITUNIX</b>\n"
+                f"Bitunix Position ID:\n<pre>{html.escape(str(position_id))}</pre>"
+            )
+        return tg.send(text, parse_mode="HTML", chat_id=exec_chat, reply_to_message_id=msg_id)
+
+    def _send_private_execution_lifecycle_reply(self, sig, event_type):
+        exec_chat = self._execution_chat_id()
+        execution = (sig or {}).get("execution") or {}
+        msg_id = execution.get("exec_msg_id")
+        if not exec_chat or not msg_id:
+            return None
+        evt_type = str(event_type or "").upper()
+        if evt_type == "TP1":
+            return tg.send_tp1_hit_congrats(
+                exec_chat,
+                msg_id,
+                sig.get("tf", "Unknown"),
+                side=sig.get("side"),
+                lock_price=sig.get("entry"),
+                entry=sig.get("entry"),
+                sl=sig.get("sl"),
+                tp1=sig.get("tp1"),
+                tp2=sig.get("tp2"),
+                size=(sig.get("meta", {}) or {}).get("size"),
+            )
+        if evt_type == "TP2":
+            return tg.send_tp2_hit_congrats(
+                exec_chat,
+                msg_id,
+                sig.get("tf", "Unknown"),
+                side=sig.get("side"),
+                lock_price=(execution.get("sl_moved_to") or sig.get("sl")),
+                entry=sig.get("entry"),
+                sl=sig.get("sl"),
+                tp1=sig.get("tp1"),
+                tp2=sig.get("tp2"),
+                size=(sig.get("meta", {}) or {}).get("size"),
+                single_full=self._is_single_full_tp_execution(sig),
+            )
+        if evt_type == "TP3":
+            return tg.send_tp3_hit_congrats(exec_chat, msg_id, sig.get("tf", "Unknown"))
+        if evt_type == "ENTRY_CLOSE":
+            return tg.send_breakeven_alert(exec_chat, msg_id, sig.get("tf", "Unknown"))
+        if evt_type == "PROFIT_SL":
+            return tg.send_profit_sl_alert(exec_chat, msg_id, sig.get("tf", "Unknown"))
+        return None
 
     def _format_private_answer_for_telegram(self, text):
         answer = str(text or "").strip()
@@ -619,6 +723,46 @@ class PonchBot:
                 active.append(sig)
         return active
 
+    def _ambiguous_active_position_message(self):
+        return "I can see more than one active position right now. Tell me which one, for example: long, short, 5m, 15m, or the exact signal."
+
+    def _signal_id_value(self, sig):
+        sig = sig or {}
+        return sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (((sig.get("execution") or {}).get("signal_id")))
+
+    def _execution_position_id(self, sig):
+        execution = (sig or {}).get("execution") or {}
+        return str(execution.get("position_id") or "").strip()
+
+    def _find_position_owner_signal(self, position_id, exclude_signal_id=None):
+        position_id = str(position_id or "").strip()
+        if not position_id:
+            return None
+        excluded = str(exclude_signal_id or "").strip()
+        for sig in self.tracker.signals:
+            sig_id = str(self._signal_id_value(sig) or "").strip()
+            if excluded and sig_id == excluded:
+                continue
+            execution = (sig or {}).get("execution") or {}
+            if not execution.get("active"):
+                continue
+            if execution.get("merge_shadow"):
+                continue
+            if self._execution_position_id(sig) == position_id:
+                return sig
+        return None
+
+    def _mark_execution_as_merge_shadow(self, execution, owner_sig):
+        execution = dict(execution or {})
+        owner_sig = owner_sig or {}
+        execution["merge_shadow"] = True
+        execution["merged_into_existing"] = True
+        execution["active"] = False
+        execution["merged_owner_signal_id"] = self._signal_id_value(owner_sig)
+        execution["merged_owner_tf"] = owner_sig.get("tf")
+        execution["merged_owner_side"] = owner_sig.get("side")
+        return execution
+
     def _recent_unexecuted_signals(self):
         pending = []
         for sig in reversed(self.tracker.signals):
@@ -626,6 +770,8 @@ class PonchBot:
                 continue
             execution = (sig or {}).get("execution") or {}
             if execution.get("active"):
+                continue
+            if execution.get("merge_shadow") or execution.get("merged_into_existing"):
                 continue
             pending.append(sig)
         return pending
@@ -1297,7 +1443,13 @@ class PonchBot:
             if tf and str(sig.get("tf", "")) != tf:
                 continue
             matches.append(sig)
-        return matches[0] if matches else (pool[0] if pool else None)
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            return None
+        if len(pool) == 1:
+            return pool[0]
+        return None
 
     def _resolve_signals_for_bulk_action(self, payload):
         side = str(payload.get("side") or "").strip().upper()
@@ -1667,6 +1819,9 @@ class PonchBot:
                 self._remember_private_focus(sig=sig)
                 self._send_single_position_snapshot(sig, title="Position Info")
             else:
+                if len(self._active_execution_signals()) > 1 and not wants_account_status:
+                    self._send_private_execution_answer(self._ambiguous_active_position_message())
+                    return True
                 self._send_execution_status_snapshot(datetime.now(timezone.utc), title="Bitunix Live Status")
             return True
 
@@ -1744,7 +1899,10 @@ class PonchBot:
 
         sig = self._resolve_signal_for_action(action, allow_unexecuted=False)
         if not sig:
-            self._send_private_execution_notice("Exec Control", ["No active exchange position matched your request."], icon="вљ пёЏ")
+            if len(self._active_execution_signals()) > 1:
+                self._send_private_execution_notice("Exec Control", [self._ambiguous_active_position_message()], icon="⚠️")
+            else:
+                self._send_private_execution_notice("Exec Control", ["No active exchange position matched your request."], icon="⚠️")
             return False
         self._remember_private_focus(sig=sig)
 
@@ -2284,7 +2442,7 @@ class PonchBot:
         lines = [
             f"The bot is running in {trade_check.get('mode')} mode on {SYMBOL}, and Bitunix auth is {'OK' if trade_check.get('auth_ok') else 'failing'}.",
             self._format_balance_line(trade_check),
-            f"Your account is in {trade_check.get('margin_mode') or 'N/A'} mode at {int(trade_check.get('leverage', 0) or 0)}x.",
+            f"Your account is in {trade_check.get('margin_mode') or 'N/A'} mode at {int(trade_check.get('leverage', 0) or 0)}x, with {trade_check.get('position_mode') or BITUNIX_POSITION_MODE or 'UNKNOWN'} position mode.",
             f"You currently have {int(trade_check.get('open_positions', 0) or 0)} open position(s).",
         ]
         matched = int(reconcile.get("matched", 0) or 0)
@@ -2329,9 +2487,10 @@ class PonchBot:
     def _send_simple_account_mode_answer(self):
         trade_check, _, _ = self._build_trade_check_bundle()
         margin_mode = str(trade_check.get("margin_mode") or "N/A")
+        position_mode = str(trade_check.get("position_mode") or BITUNIX_POSITION_MODE or "UNKNOWN")
         leverage = int(trade_check.get("leverage", 0) or 0)
         self._send_private_execution_answer(
-            f"Your account is in {margin_mode} mode at {leverage}x right now."
+            f"Your account is in {margin_mode} mode at {leverage}x, with {position_mode} position mode right now."
         )
 
     def _send_today_trade_count_answer(self):
@@ -3515,6 +3674,8 @@ class PonchBot:
         """Return the latest active opposite-side signal if one is still open."""
         if not BLOCK_OPPOSITE_SIDE_SIGNALS:
             return None
+        if self._hedge_mode_enabled():
+            return None
         wanted_symbol = str(symbol or SYMBOL).upper()
         opposite = "SHORT" if str(side).upper() == "LONG" else "LONG"
         terminal_statuses = {"SL", "TP3", "CLOSED", "ENTRY_CLOSE", "PROFIT_SL"}
@@ -4306,6 +4467,16 @@ class PonchBot:
                     elif evt_type == "PROFIT_SL":
                         tg.send_profit_sl_alert(sig["chat_id"], sig["msg_id"], sig.get("tf", "Unknown"))
 
+                exec_chat = self._execution_chat_id()
+                exec_msg_id = ((sig.get("execution") or {}).get("exec_msg_id"))
+                if exec_chat and exec_msg_id:
+                    try:
+                        tg.update_signal_message(exec_chat, exec_msg_id, sig)
+                    except Exception:
+                        pass
+                    if not suppress_intermediate_notice:
+                        self._send_private_execution_lifecycle_reply(sig, evt_type)
+
                 if risk_state_changed:
                     self._save_state()
 
@@ -4914,6 +5085,20 @@ class PonchBot:
         status = "accepted" if result.accepted else "blocked"
         print(f"  [TRADE] {status.upper()} {sig_obj.get('type')} {sig_obj.get('side')}: {result.message}")
         details = result.payload or {}
+        merged_owner_sig = None
+        if result.accepted and result.mode == "live" and details.get("position_id"):
+            merged_owner_sig = self._find_position_owner_signal(
+                details.get("position_id"),
+                exclude_signal_id=self._signal_id_value(sig_obj),
+            )
+            if merged_owner_sig:
+                merged_owner_id = self._signal_id_value(merged_owner_sig)
+                print(
+                    f"  [TRADE] MERGED into existing position_id={details.get('position_id')} "
+                    f"owner_signal_id={merged_owner_id}"
+                )
+                result.payload = self._mark_execution_as_merge_shadow(result.payload, merged_owner_sig)
+                details = result.payload or {}
         actual_size_pct = details.get("signal_size_pct")
         try:
             actual_size_pct = float(actual_size_pct)
@@ -4989,34 +5174,33 @@ class PonchBot:
         current_sig = dict(sig_obj or {})
         if result.accepted and result.payload:
             current_sig["execution"] = result.payload
-        summary_lines = [
-            f"{sig_obj.get('type', 'Signal')} {sig_obj.get('side', 'N/A')} [{sig_obj.get('tf', 'N/A')}] {str(sig_obj.get('symbol') or (sig_obj.get('meta') or {}).get('symbol') or SYMBOL).upper()}",
-            f"Entry: {float(sig_obj.get('entry', 0) or 0):.2f}",
-            f"SL: {self._format_live_sl_value(current_sig)}",
-            self._format_active_tp_line(current_sig),
-        ]
-        notice_lines = []
-        signal_id = sig_obj.get("signal_id") or ((sig_obj.get("meta") or {}).get("signal_id")) or (((sig_obj.get("execution") or {}).get("signal_id")))
-        if signal_id:
-            notice_lines.append("Signal ID:")
-            notice_lines.append(f"<pre>{signal_id}</pre>")
-        notice_lines.append("<pre>" + "\n".join(summary_lines) + "</pre>")
-        notice_lines.append(
-            f"I opened it successfully. {result.message}"
-            if result.accepted
-            else f"I could not open it. {result.message}"
-        )
-        if details.get("position_id"):
-            notice_lines.append("Bitunix Position ID:")
-            notice_lines.append(f"<pre>{details.get('position_id')}</pre>")
-        warning_lines = [str(w) for w in (details.get("protection_warnings") or []) if str(w).strip()]
-        if warning_lines:
-            notice_lines.append("<pre>" + "\n".join(warning_lines) + "</pre>")
-        self._send_private_execution_notice(
-            f"Exchange {status.title()}: {sig_obj.get('type')} {sig_obj.get('side')}",
-            notice_lines,
-            icon="✅" if result.accepted else "⚠️",
-        )
+        if result.accepted:
+            if merged_owner_sig:
+                self._send_private_execution_notice(
+                    f"Exchange Merged: {sig_obj.get('type')} {sig_obj.get('side')}",
+                    [
+                        f"{'🟢' if str(sig_obj.get('side') or '').upper() == 'LONG' else '🔴'} {sig_obj.get('type', 'Signal')} {sig_obj.get('side', 'N/A')} [{sig_obj.get('tf', 'N/A')}] merged into the existing Bitunix position.",
+                        "Bitunix Position ID:",
+                        f"<pre>{details.get('position_id')}</pre>",
+                    ],
+                    icon="🔗",
+                )
+            else:
+                exec_resp = self._send_private_execution_signal_card(current_sig)
+                exec_msg_id = exec_resp.get("result", {}).get("message_id") if exec_resp else None
+                if exec_msg_id:
+                    result.payload["exec_msg_id"] = exec_msg_id
+                    current_sig["execution"] = result.payload
+                self._send_private_execution_position_id_reply(current_sig, merged=False)
+        else:
+            self._send_private_execution_notice(
+                f"Exchange {status.title()}: {sig_obj.get('type')} {sig_obj.get('side')}",
+                self._format_execution_lines(
+                    sig_obj,
+                    extra=[f"I could not open it. {result.message}"],
+                ),
+                icon="⚠️",
+            )
         if result.accepted and result.payload:
             sig_obj["execution"] = result.payload
             self._save_state()
@@ -5025,6 +5209,12 @@ class PonchBot:
         """Apply TP/SL lifecycle changes to exchange-side protection orders."""
         execution = sig_obj.get("execution") or {}
         if not execution:
+            return
+        if execution.get("merge_shadow"):
+            print(
+                f"  [TRADE] Skip merged shadow sync for {event_type}: "
+                f"signal_id={self._signal_id_value(sig_obj)} position_id={execution.get('position_id')}"
+            )
             return
         try:
             result = self.trade_executor.sync_outcome(sig_obj, event_type)
@@ -5052,15 +5242,8 @@ class PonchBot:
                 sig_obj["execution"] = result.payload
                 self._save_state()
             return
-        current_sig = dict(sig_obj or {})
-        if result.payload:
-            current_sig["execution"] = result.payload
-        self._send_private_execution_answer(
-            self._build_private_execution_update_html(current_sig, event_type, result.message)
-        )
         if result.payload:
             sig_obj["execution"] = result.payload
-            self._save_state()
             self._save_state()
 
 
