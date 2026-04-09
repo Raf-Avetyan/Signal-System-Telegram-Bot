@@ -2675,6 +2675,7 @@ class PonchBot:
         signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (((sig.get("execution") or {}).get("signal_id")))
         symbol = str(sig.get("symbol") or (sig.get("meta") or {}).get("symbol") or (sig.get("execution") or {}).get("symbol") or SYMBOL).upper()
         execution = sig.get("execution") or {}
+        side_emoji = "🟢" if str(side or "").upper() == "LONG" else ("🔴" if str(side or "").upper() == "SHORT" else "⚪")
         if signal_id:
             lines.append("Signal ID:")
             lines.append(f"<pre>{signal_id}</pre>")
@@ -2683,7 +2684,7 @@ class PonchBot:
             lines.append(f"<pre>{execution.get('position_id')}</pre>")
         detail_lines = []
         if tf or sig_type or side:
-            detail_lines.append(f"{sig_type or 'Signal'} {side or 'N/A'} [{tf or 'N/A'}] {symbol}")
+            detail_lines.append(f"{side_emoji} {sig_type or 'Signal'} {side or 'N/A'} [{tf or 'N/A'}] {symbol}")
         if sig.get("entry") is not None:
             detail_lines.append(f"Entry: {float(sig.get('entry') or 0):.2f}")
             detail_lines.append(f"SL: {self._format_live_sl_value(sig)}")
@@ -2701,11 +2702,15 @@ class PonchBot:
         trade_name = f"{side} trade on {tf}"
         event_key = str(event_type or "").upper()
         result_text = str(result_message or "").strip()
+        is_single_full = self._is_single_full_tp_execution(sig)
 
         if event_key == "TP1":
-            intro = f"I took the first target on this {trade_name}."
+            if is_single_full or "closed the full position" in result_text.lower():
+                intro = f"I closed the full {trade_name} at take profit."
+            else:
+                intro = f"I took the first target on this {trade_name}."
         elif event_key == "TP2":
-            if "closed the full position" in result_text.lower() or self._is_single_full_tp_execution(sig):
+            if "closed the full position" in result_text.lower() or is_single_full:
                 intro = f"I closed the full {trade_name} at take profit."
             else:
                 intro = f"I took the second target on this {trade_name} and moved the stop to protected breakeven."
@@ -2720,11 +2725,14 @@ class PonchBot:
         else:
             intro = f"I updated this {trade_name}."
 
+        if event_key in {"TP1", "TP2"} and is_single_full:
+            intro = f"I closed the full {trade_name} at take profit."
+
         detail_lines = self._format_execution_lines(
             sig,
             extra=[
                 f"The new stop is {float((sig.get('execution') or {}).get('sl_moved_to') or 0):.2f}."
-                if event_key in {"TP2", "PROFIT_SL", "ENTRY_CLOSE"} and (sig.get("execution") or {}).get("sl_moved_to") is not None
+                if event_key in {"TP2", "PROFIT_SL", "ENTRY_CLOSE"} and not is_single_full and (sig.get("execution") or {}).get("sl_moved_to") is not None
                 else None
             ],
         )

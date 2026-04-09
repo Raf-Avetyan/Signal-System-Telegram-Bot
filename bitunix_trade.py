@@ -2064,8 +2064,8 @@ class TradeExecutor:
         if len(nonzero) == 3 and min(nonzero) >= min_leg and abs((q1 + q2 + q3) - total) < (step + 1e-12):
             return [q1, q2, q3], None
 
-        return [total, 0.0, 0.0], (
-            f"Compressed TP legs to a single full TP1 because partial TP legs fall below Bitunix min qty {min_leg:.8f}."
+        return [0.0, total, 0.0], (
+            f"Compressed TP legs to a single full TP2 because partial TP legs fall below Bitunix min qty {min_leg:.8f}."
         )
 
     @staticmethod
@@ -2084,9 +2084,9 @@ class TradeExecutor:
         active_target_indices = [i + 1 for i, price in enumerate(targets[:3]) if float(price or 0) > 0]
         if len(active_target_indices) == 1:
             return active_target_indices[0]
-        if 1 in active_target_indices:
-            return 1
-        return 1
+        if 2 in active_target_indices:
+            return 2
+        return 2
 
     def _get_symbol_rules(self, symbol: str) -> Dict[str, Any]:
         symbol_key = str(symbol or SYMBOL).upper()
