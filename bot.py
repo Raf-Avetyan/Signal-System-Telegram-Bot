@@ -71,7 +71,8 @@ from config import (
     FIVE_MIN_REQUIRE_15M_PERMISSION, MARKETTWITS_NEWS_ENABLED,
     MARKETTWITS_CHANNEL_URL, MARKETTWITS_REFRESH_SEC,
     MARKETTWITS_LOOKBACK_HOURS, MARKETTWITS_BLOCK_AFTER_MIN,
-    MARKETTWITS_MIN_BLOCK_SCORE
+    MARKETTWITS_MIN_BLOCK_SCORE, REVERSAL_OVERRIDE_ENABLED,
+    REVERSAL_OVERRIDE_MIN_SCORE, REVERSAL_OVERRIDE_MIN_PROOFS
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
@@ -3631,6 +3632,86 @@ class PonchBot:
         label = "bearish" if opposite == "SHORT" else "bullish"
         return f"opposite RSI divergence on {', '.join(hits)} ({label})"
 
+    def _get_same_side_divergence_hits(self, side):
+        div_map = getattr(self, "divergence_map", {}) or {}
+        target = str(side or "").upper()
+        hits = []
+        for tf in ["5m", "15m", "1h", "4h"]:
+            sides = div_map.get(tf) or set()
+            if target in sides:
+                hits.append(tf)
+        return hits
+
+    def _get_recent_liquidity_sweep_hits(self, side, preferred_tf=None):
+        side = str(side or "").upper()
+        if not self.levels:
+            return []
+        ordered_tfs = []
+        if preferred_tf:
+            ordered_tfs.append(preferred_tf)
+        ordered_tfs.extend(["5m", "15m", "1h", "4h"])
+        hits = []
+        seen = set()
+        for tf in ordered_tfs:
+            if tf in seen:
+                continue
+            seen.add(tf)
+            df = (getattr(self, "latest_data", {}) or {}).get(tf)
+            try:
+                if df is None or df.empty or len(df) < 2:
+                    continue
+            except Exception:
+                continue
+            curr = df.iloc[-1]
+            prev = df.iloc[-2]
+            sweeps = check_liquidity_sweep(
+                float(curr.get("High", 0) or 0),
+                float(curr.get("Low", 0) or 0),
+                self.levels,
+                prev_high=float(prev.get("High", 0) or 0),
+                prev_low=float(prev.get("Low", 0) or 0),
+            )
+            side_sweeps = [sw for sw in sweeps if str(sw.get("side", "")).upper() == side]
+            if side_sweeps:
+                level_names = "/".join(str(sw.get("level", "")).upper() for sw in side_sweeps[:2] if sw.get("level"))
+                hits.append(f"{tf} liquidity sweep" + (f" ({level_names})" if level_names else ""))
+        return hits
+
+    def _get_reversal_override(self, tf, side, evt=None, score=None):
+        if not REVERSAL_OVERRIDE_ENABLED:
+            return False, ""
+
+        proofs = []
+        divergence_hits = self._get_same_side_divergence_hits(side)
+        if divergence_hits:
+            proofs.append(f"RSI divergence on {', '.join(divergence_hits)}")
+
+        sweep_hits = self._get_recent_liquidity_sweep_hits(side, preferred_tf=tf)
+        if sweep_hits:
+            proofs.extend(sweep_hits)
+
+        trigger = str((evt or {}).get("trigger") or "").strip().upper()
+        strategy = str((evt or {}).get("strategy") or "").strip().upper()
+        if trigger == "ONE_H_RECLAIM":
+            proofs.append("reclaim of key level")
+        elif trigger == "HTF_PULLBACK":
+            proofs.append("pullback reclaim")
+        if strategy == "SMART_MONEY_LIQUIDITY":
+            proofs.append("liquidity sweep structure break")
+
+        if score is not None and float(score) >= float(REVERSAL_OVERRIDE_MIN_SCORE):
+            proofs.append(f"score {int(score)}")
+
+        unique_proofs = []
+        for proof in proofs:
+            if proof not in unique_proofs:
+                unique_proofs.append(proof)
+
+        has_strong_score = any(p.startswith("score ") for p in unique_proofs)
+        if has_strong_score and len(unique_proofs) >= int(REVERSAL_OVERRIDE_MIN_PROOFS):
+            return True, ", ".join(unique_proofs)
+        return False, ""
+
     def _get_scalp_window_block_reason(self, tf, side, local_trend, local_trend_src):
         """
         Hard blockers for scalp OPEN/PREPARE visibility.
@@ -3642,11 +3723,19 @@ class PonchBot:
 
         local_side = self._trend_side(local_trend)
         if local_side and side != local_side:
+            divergence_hits = self._get_same_side_divergence_hits(side)
+            sweep_hits = self._get_recent_liquidity_sweep_hits(side, preferred_tf=tf)
+            if divergence_hits or sweep_hits:
+                return ""
             return f"local trend reversal ({local_trend} from {local_trend_src or tf})"
 
         macro_trend, macro_src = self._get_anchor_trend("1h")
         macro_side = self._trend_side(macro_trend)
         if macro_side and side != macro_side:
+            divergence_hits = self._get_same_side_divergence_hits(side)
+            sweep_hits = self._get_recent_liquidity_sweep_hits(side, preferred_tf=tf)
+            if divergence_hits or sweep_hits:
+                return ""
             return f"macro trend reversal ({macro_trend} from {macro_src or '1h'})"
 
         return ""
@@ -5577,6 +5666,9 @@ class PonchBot:
                         evt, df, self.levels, self.macro_trend, self.last_oi, self.last_liqs
                     )
                 side = evt["side"]
+                reversal_override_allowed, reversal_override_note = self._get_reversal_override(
+                    tf, side, evt=evt, score=score
+                )
 
                 divergence_note = self._get_opposite_divergence_note(side)
                 if divergence_note:
@@ -5594,12 +5686,18 @@ class PonchBot:
                 # do not SHORT in bullish local trend, do not LONG in bearish local trend.
                 local_side = self._trend_side(local_trend)
                 if local_side and side != local_side:
-                    self._record_signal_block("local_trend_reversal", now=now)
-                    print(
-                        f"  [SCALP] Blocked {tf} {side}: local trend reversal "
-                        f"({local_trend} from {local_trend_src or tf})"
-                    )
-                    continue
+                    if reversal_override_allowed:
+                        print(
+                            f"  [SCALP] Allowed {tf} {side}: reversal override "
+                            f"({reversal_override_note})"
+                        )
+                    else:
+                        self._record_signal_block("local_trend_reversal", now=now)
+                        print(
+                            f"  [SCALP] Blocked {tf} {side}: local trend reversal "
+                            f"({local_trend} from {local_trend_src or tf})"
+                        )
+                        continue
 
                 # Local trend bias: prefer signals aligned with current TF direction.
                 if local_trend in ("Bullish", "Bearish"):
@@ -5717,9 +5815,15 @@ class PonchBot:
                 if tf == "5m":
                     htf_guard_reason = self._get_5m_higher_tf_guard_reason(side)
                     if htf_guard_reason:
-                        self._record_signal_block("5m_higher_tf_guard", now=now)
-                        print(f"  [SCALP] Blocked {tf} {side}: {htf_guard_reason}")
-                        continue
+                        if reversal_override_allowed:
+                            print(
+                                f"  [SCALP] Allowed {tf} {side}: 5m reversal override "
+                                f"({reversal_override_note})"
+                            )
+                        else:
+                            self._record_signal_block("5m_higher_tf_guard", now=now)
+                            print(f"  [SCALP] Blocked {tf} {side}: {htf_guard_reason}")
+                            continue
 
                 # --- Minimum score gate by timeframe ---
                 min_score_tf = SCALP_MIN_SCORE_BY_TF.get(tf, 0)
@@ -5768,7 +5872,12 @@ class PonchBot:
 
                 if not trend_aligned:
                     if filter_mode == "hard":
-                        if relaxed_filters:
+                        if reversal_override_allowed:
+                            print(
+                                f"  [SCALP] Allowed {tf} {side}: counter-trend override "
+                                f"({reversal_override_note})"
+                            )
+                        elif relaxed_filters:
                             print(
                                 f"  [SCALP] Relaxed override {tf} {side}: "
                                 f"counter-trend allowed in hard mode vs {trend_name}"

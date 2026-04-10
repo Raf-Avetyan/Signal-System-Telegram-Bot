@@ -39,6 +39,9 @@ from config import (
     SCALP_TREND_FILTER_MODE,
     SCALP_TREND_FILTER_MODE_BY_TF,
     SCALP_COUNTERTREND_MIN_SCORE_BY_TF,
+    REVERSAL_OVERRIDE_ENABLED,
+    REVERSAL_OVERRIDE_MIN_SCORE,
+    REVERSAL_OVERRIDE_MIN_PROOFS,
     SCALP_RELAX_MIN_SCORE_DELTA,
     SCALP_RELAX_VOL_MIN_MULT,
     SCALP_RELAX_VOL_MAX_MULT,
@@ -73,6 +76,7 @@ from config import (
     get_adjusted_sessions,
 )
 from data import INTERVAL_MAP, OKX_BASE, fetch_klines
+from levels import check_liquidity_sweep
 from momentum import ScalpTracker, calculate_momentum, classify_momentum_zone, check_htf_pullback_entry, check_one_h_reclaim_entry
 from scoring import calculate_signal_score
 from signals import check_rsi_divergence
@@ -484,6 +488,76 @@ def _has_opposite_divergence(df_slice: pd.DataFrame, side: str, timeframe: str) 
     return any(sig.get("active", True) and sig.get("side") == opposite for sig in div_sigs)
 
 
+def _same_side_divergence_hits_replay(slice_data: dict, side: str, timeframe: str):
+    hits = []
+    for tf in [timeframe, "5m", "15m", "1h", "4h"]:
+        df_slice = (slice_data or {}).get(tf)
+        if df_slice is None or df_slice.empty:
+            continue
+        try:
+            div_sigs = check_rsi_divergence(df_slice, tf)
+        except Exception:
+            continue
+        if any(sig.get("active", True) and sig.get("side") == side for sig in div_sigs):
+            if tf not in hits:
+                hits.append(tf)
+    return hits
+
+
+def _recent_liquidity_sweep_hits_replay(slice_data: dict, side: str, timeframe: str, levels_proxy: dict):
+    if not levels_proxy:
+        return []
+    hits = []
+    for tf in [timeframe, "5m", "15m", "1h", "4h"]:
+        df_slice = (slice_data or {}).get(tf)
+        if df_slice is None or df_slice.empty or len(df_slice) < 2:
+            continue
+        curr = df_slice.iloc[-1]
+        prev = df_slice.iloc[-2]
+        sweeps = check_liquidity_sweep(
+            float(curr.get("High", 0) or 0),
+            float(curr.get("Low", 0) or 0),
+            levels_proxy,
+            prev_high=float(prev.get("High", 0) or 0),
+            prev_low=float(prev.get("Low", 0) or 0),
+        )
+        side_sweeps = [sw for sw in sweeps if str(sw.get("side", "")).upper() == str(side or "").upper()]
+        if side_sweeps and tf not in hits:
+            hits.append(tf)
+    return hits
+
+
+def _get_reversal_override_replay(tf: str, side: str, evt: dict, score: float, slice_data: dict, levels_proxy: dict):
+    if not REVERSAL_OVERRIDE_ENABLED:
+        return False
+    proofs = []
+    divergence_hits = _same_side_divergence_hits_replay(slice_data, side, tf)
+    if divergence_hits:
+        proofs.append(f"RSI divergence on {', '.join(divergence_hits)}")
+    sweep_hits = _recent_liquidity_sweep_hits_replay(slice_data, side, tf, levels_proxy)
+    if sweep_hits:
+        proofs.append(f"liquidity sweep on {', '.join(sweep_hits)}")
+
+    trigger = str((evt or {}).get("trigger") or "").strip().upper()
+    strategy = str((evt or {}).get("strategy") or "").strip().upper()
+    if trigger == "ONE_H_RECLAIM":
+        proofs.append("reclaim of key level")
+    elif trigger == "HTF_PULLBACK":
+        proofs.append("pullback reclaim")
+    if strategy == "SMART_MONEY_LIQUIDITY":
+        proofs.append("liquidity sweep structure break")
+
+    if score >= float(REVERSAL_OVERRIDE_MIN_SCORE):
+        proofs.append(f"score {int(score)}")
+
+    unique_proofs = []
+    for proof in proofs:
+        if proof not in unique_proofs:
+            unique_proofs.append(proof)
+    has_strong_score = any(p.startswith("score ") for p in unique_proofs)
+    return has_strong_score and len(unique_proofs) >= int(REVERSAL_OVERRIDE_MIN_PROOFS)
+
+
 def _get_5m_higher_tf_guard_reason_replay(slice_data: dict, side: str, trend_map: dict, idx):
     if not FIVE_MIN_REQUIRE_15M_PERMISSION:
         return None
@@ -793,6 +867,9 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_
             levels_proxy = _build_proxy_levels(df, i, idx)
             local_trend, _ = _anchor_trend_for_tf(tf, idx, trend_map)
             score, _ = calculate_signal_score(evt, df.loc[:idx], levels_proxy, local_trend or macro_trend, None, 0)
+            reversal_override_allowed = _get_reversal_override_replay(
+                tf, side, evt, score, slice_data, levels_proxy
+            )
             regime_name = _detect_regime_from_df(df.loc[:idx]) if SCALP_REGIME_SWITCHING else "RANGE"
             regime_cfg = SCALP_REGIME_PROFILES.get(regime_name, {})
             score_delta = int(regime_cfg.get("score_delta", 0))
@@ -828,7 +905,7 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_
 
             if tf == "5m":
                 htf_guard_reason = _get_5m_higher_tf_guard_reason_replay(slice_data, side, trend_map, idx)
-                if htf_guard_reason:
+                if htf_guard_reason and not reversal_override_allowed:
                     continue
 
             min_score_tf = SCALP_MIN_SCORE_BY_TF.get(tf, 0)
@@ -857,7 +934,7 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_
 
             # Hard reversal guard: do not SHORT in bullish anchor trend and vice-versa.
             anchor_side = _trend_side(trend_name)
-            if anchor_side and side != anchor_side:
+            if anchor_side and side != anchor_side and not reversal_override_allowed:
                 continue
 
             trend_aligned = (
@@ -873,7 +950,8 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_
 
             if not trend_aligned:
                 if mode == "hard":
-                    continue
+                    if not reversal_override_allowed:
+                        continue
                 if mode == "soft":
                     if score < countertrend_min_score + session_score_boost:
                         continue
