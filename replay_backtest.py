@@ -42,6 +42,24 @@ from config import (
     REVERSAL_OVERRIDE_ENABLED,
     REVERSAL_OVERRIDE_MIN_SCORE,
     REVERSAL_OVERRIDE_MIN_PROOFS,
+    WEEKEND_TRADING_ENABLED,
+    BOS_GUARD_ENABLED,
+    BOS_GUARD_SWING_LOOKBACK,
+    BOS_GUARD_RECENT_BARS,
+    BOS_GUARD_RECLAIM_BARS,
+    STRUCTURE_GUARD_MODE_BY_TF,
+    RSI_PULLBACK_SCALP_ENABLED,
+    RSI_PULLBACK_SCALP_TFS,
+    RSI_PULLBACK_SCALP_OB,
+    RSI_PULLBACK_SCALP_OS,
+    RSI_PULLBACK_SCALP_MIN_FILTERS,
+    RSI_PULLBACK_SCALP_MIN_EMA_ATR_DISTANCE,
+    RSI_PULLBACK_SCALP_MIN_IMPULSE_BODY_ATR,
+    RSI_PULLBACK_SCALP_MIN_DISPLACEMENT_ATR,
+    RSI_PULLBACK_SCALP_MIN_WICK_BODY_RATIO,
+    RSI_PULLBACK_SCALP_TP1_R,
+    RSI_PULLBACK_SCALP_TP2_R,
+    RSI_PULLBACK_SCALP_TP3_R,
     SCALP_RELAX_MIN_SCORE_DELTA,
     SCALP_RELAX_VOL_MIN_MULT,
     SCALP_RELAX_VOL_MAX_MULT,
@@ -527,6 +545,47 @@ def _recent_liquidity_sweep_hits_replay(slice_data: dict, side: str, timeframe: 
     return hits
 
 
+def _key_level_reaction_hits_replay(slice_data: dict, side: str, timeframe: str, levels_proxy: dict):
+    hits = []
+    target_levels = (
+        ["DO", "PDL", "PWL", "PML", "Dump", "DumpMax"]
+        if str(side or "").upper() == "LONG"
+        else ["DO", "PDH", "PWH", "PMH", "Pump", "PumpMax"]
+    )
+    for tf in [timeframe, "5m", "15m", "1h", "4h"]:
+        df_slice = (slice_data or {}).get(tf)
+        if df_slice is None or df_slice.empty:
+            continue
+        curr = df_slice.iloc[-1]
+        close = float(curr.get("Close", 0) or 0)
+        open_ = float(curr.get("Open", close) or close)
+        high = float(curr.get("High", close) or close)
+        low = float(curr.get("Low", close) or close)
+        atr_val = float(curr.get("ATR", 0) or 0)
+        if close <= 0:
+            continue
+        band = max(close * 0.0010, atr_val * 0.35 if atr_val > 0 else 0.0)
+        body = max(1e-9, abs(close - open_))
+        if str(side or "").upper() == "LONG":
+            wick_ok = max(0.0, min(open_, close) - low) / body >= 1.0 or close > open_
+        else:
+            wick_ok = max(0.0, high - max(open_, close)) / body >= 1.0 or close < open_
+        if not wick_ok:
+            continue
+        for level_name in target_levels:
+            level = float((levels_proxy or {}).get(level_name, 0) or 0)
+            if level <= 0:
+                continue
+            if str(side or "").upper() == "LONG":
+                near_level = abs(low - level) <= band and close >= level
+            else:
+                near_level = abs(high - level) <= band and close <= level
+            if near_level:
+                hits.append(f"{tf} key-level reaction ({level_name})")
+                break
+    return hits
+
+
 def _get_reversal_override_replay(tf: str, side: str, evt: dict, score: float, slice_data: dict, levels_proxy: dict):
     if not REVERSAL_OVERRIDE_ENABLED:
         return False
@@ -537,6 +596,9 @@ def _get_reversal_override_replay(tf: str, side: str, evt: dict, score: float, s
     sweep_hits = _recent_liquidity_sweep_hits_replay(slice_data, side, tf, levels_proxy)
     if sweep_hits:
         proofs.append(f"liquidity sweep on {', '.join(sweep_hits)}")
+    level_hits = _key_level_reaction_hits_replay(slice_data, side, tf, levels_proxy)
+    if level_hits:
+        proofs.append(f"key-level reaction on {', '.join(level_hits)}")
 
     trigger = str((evt or {}).get("trigger") or "").strip().upper()
     strategy = str((evt or {}).get("strategy") or "").strip().upper()
@@ -556,6 +618,244 @@ def _get_reversal_override_replay(tf: str, side: str, evt: dict, score: float, s
             unique_proofs.append(proof)
     has_strong_score = any(p.startswith("score ") for p in unique_proofs)
     return has_strong_score and len(unique_proofs) >= int(REVERSAL_OVERRIDE_MIN_PROOFS)
+
+
+def _structure_anchor_tf_replay(tf: str):
+    return "15m" if str(tf) == "5m" else str(tf)
+
+
+def _structure_guard_mode_replay(tf: str):
+    return str((STRUCTURE_GUARD_MODE_BY_TF or {}).get(str(tf), "hard")).strip().lower()
+
+
+def _get_recent_bos_context_replay(slice_data: dict, tf: str):
+    if not BOS_GUARD_ENABLED:
+        return {}
+    anchor_tf = _structure_anchor_tf_replay(tf)
+    df = (slice_data or {}).get(anchor_tf)
+    if df is None or df.empty:
+        return {}
+    swing_lb = int(max(3, BOS_GUARD_SWING_LOOKBACK))
+    recent_bars = int(max(2, BOS_GUARD_RECENT_BARS))
+    reclaim_bars = int(max(1, BOS_GUARD_RECLAIM_BARS))
+    if len(df) < swing_lb + 3:
+        return {}
+
+    found = None
+    start_idx = max(swing_lb, len(df) - recent_bars)
+    for i in range(start_idx, len(df)):
+        prior = df.iloc[i - swing_lb:i]
+        if prior is None or prior.empty:
+            continue
+        prev_high = float(prior["High"].max())
+        prev_low = float(prior["Low"].min())
+        row = df.iloc[i]
+        row_close = float(row.get("Close", 0) or 0)
+        row_high = float(row.get("High", 0) or 0)
+        row_low = float(row.get("Low", 0) or 0)
+        if row_close > prev_high or row_high > prev_high:
+            found = {"side": "LONG", "level": prev_high, "idx": i, "tf": anchor_tf}
+        if row_close < prev_low or row_low < prev_low:
+            found = {"side": "SHORT", "level": prev_low, "idx": i, "tf": anchor_tf}
+
+    if not found:
+        return {}
+
+    bos_idx = int(found["idx"])
+    pre_bos = df.iloc[max(0, bos_idx - swing_lb):bos_idx]
+    bos_bar = df.iloc[bos_idx]
+    latest = df.iloc[-1]
+    latest_close = float(latest.get("Close", 0) or 0)
+    latest_high = float(latest.get("High", latest_close) or latest_close)
+    latest_low = float(latest.get("Low", latest_close) or latest_close)
+    atr_ref = float(df.iloc[bos_idx].get("ATR", 0) or 0)
+    tol = atr_ref * 0.15 if atr_ref > 0 else abs(float(found["level"])) * 0.0004
+    follow = df.iloc[bos_idx:min(len(df), bos_idx + reclaim_bars + 1)]
+    post_bos = df.iloc[min(len(df), bos_idx + 1):]
+    reclaimed = False
+    weak_follow = True
+    lower_high = False
+    lower_low = False
+    higher_high = False
+    higher_low = False
+    continuation_after_reclaim = False
+    bos_reference_high = float(pre_bos["High"].max()) if not pre_bos.empty else float(bos_bar.get("High", latest_high) or latest_high)
+    bos_reference_low = float(pre_bos["Low"].min()) if not pre_bos.empty else float(bos_bar.get("Low", latest_low) or latest_low)
+    if not follow.empty:
+        if found["side"] == "SHORT":
+            min_follow = float(follow["Low"].min())
+            extension = max(0.0, float(found["level"]) - min_follow)
+            weak_follow = atr_ref <= 0 or extension <= atr_ref * 0.8
+            reclaimed = latest_close > float(found["level"]) and weak_follow
+        else:
+            max_follow = float(follow["High"].max())
+            extension = max(0.0, max_follow - float(found["level"]))
+            weak_follow = atr_ref <= 0 or extension <= atr_ref * 0.8
+            reclaimed = latest_close < float(found["level"]) and weak_follow
+    if not post_bos.empty:
+        post_high = float(post_bos["High"].max())
+        post_low = float(post_bos["Low"].min())
+        lower_high = post_high < (bos_reference_high - tol)
+        lower_low = post_low < (float(bos_bar.get("Low", post_low) or post_low) - tol)
+        higher_high = post_high > (bos_reference_high + tol)
+        higher_low = post_low > (float(found["level"]) + tol)
+        if found["side"] == "SHORT":
+            continuation_after_reclaim = reclaimed and higher_high and latest_close > bos_reference_high - tol
+        else:
+            continuation_after_reclaim = reclaimed and lower_low and latest_close < bos_reference_low + tol
+    found["reclaimed"] = reclaimed
+    found["weak_follow"] = weak_follow
+    found["lower_high"] = lower_high
+    found["lower_low"] = lower_low
+    found["higher_high"] = higher_high
+    found["higher_low"] = higher_low
+    found["continuation_after_reclaim"] = continuation_after_reclaim
+    if found["side"] == "SHORT":
+        found["pullback_only"] = bool(reclaimed or (weak_follow and not lower_high and not lower_low) or continuation_after_reclaim)
+        found["reversal_confirmed"] = bool(lower_high and lower_low and not reclaimed)
+    else:
+        found["pullback_only"] = bool(reclaimed or (weak_follow and not higher_high and not higher_low) or continuation_after_reclaim)
+        found["reversal_confirmed"] = bool(higher_high and higher_low and not reclaimed)
+    return found
+
+
+def _get_bos_guard_reason_replay(slice_data: dict, tf: str, side: str):
+    mode = _structure_guard_mode_replay(tf)
+    if mode == "off":
+        return ""
+    ctx = _get_recent_bos_context_replay(slice_data, tf)
+    if not ctx:
+        return ""
+    bos_side = str(ctx.get("side", "")).upper()
+    if not bos_side or bos_side == str(side or "").upper():
+        return ""
+    if ctx.get("reclaimed") or ctx.get("pullback_only") or ctx.get("continuation_after_reclaim"):
+        return ""
+    if mode == "soft" and not ctx.get("reversal_confirmed"):
+        return ""
+    state = "reversal follow-through" if ctx.get("reversal_confirmed") else "active BOS"
+    return f"recent {bos_side.lower()} BOS on {ctx.get('tf', tf)} is still active ({state})"
+
+
+def _get_rsi_pullback_scalp_override_replay(slice_data: dict, tf: str, side: str, levels_proxy: dict):
+    if not RSI_PULLBACK_SCALP_ENABLED:
+        return False
+    if str(tf) not in set(RSI_PULLBACK_SCALP_TFS):
+        return False
+    df = (slice_data or {}).get(tf)
+    if df is None or df.empty or len(df) < 3:
+        return False
+    curr = df.iloc[-1]
+    prev = df.iloc[-2]
+    side = str(side or "").upper()
+    close = float(curr.get("Close", 0) or 0)
+    open_ = float(curr.get("Open", close) or close)
+    high = float(curr.get("High", close) or close)
+    low = float(curr.get("Low", close) or close)
+    prev_close = float(prev.get("Close", close) or close)
+    prev_high = float(prev.get("High", high) or high)
+    prev_low = float(prev.get("Low", low) or low)
+    rsi = float(curr.get("RSI", 50) or 50)
+    atr_val = float(curr.get("ATR", 0) or 0)
+    ema2 = float(curr.get("EMA2", close) or close)
+    if atr_val <= 0:
+        return False
+    bos_ctx = _get_recent_bos_context_replay(slice_data, tf)
+
+    if side == "SHORT":
+        if rsi < float(RSI_PULLBACK_SCALP_OB):
+            return False
+    elif side == "LONG":
+        if rsi > float(RSI_PULLBACK_SCALP_OS):
+            return False
+    else:
+        return False
+
+    body_atr = abs(close - open_) / atr_val
+    displacement_atr = abs(close - prev_close) / atr_val
+    if side == "SHORT":
+        impulse_filter = (
+            (close > open_ and body_atr >= float(RSI_PULLBACK_SCALP_MIN_IMPULSE_BODY_ATR))
+            or displacement_atr >= float(RSI_PULLBACK_SCALP_MIN_DISPLACEMENT_ATR)
+        )
+        ema_filter = close > ema2 and abs(close - ema2) / atr_val >= float(RSI_PULLBACK_SCALP_MIN_EMA_ATR_DISTANCE)
+        upper_wick = max(0.0, high - max(open_, close))
+        body_abs = max(1e-9, abs(close - open_))
+        wick_filter = upper_wick / body_abs >= float(RSI_PULLBACK_SCALP_MIN_WICK_BODY_RATIO)
+        structure_shift = close < prev_low
+    else:
+        impulse_filter = (
+            (close < open_ and body_atr >= float(RSI_PULLBACK_SCALP_MIN_IMPULSE_BODY_ATR))
+            or displacement_atr >= float(RSI_PULLBACK_SCALP_MIN_DISPLACEMENT_ATR)
+        )
+        ema_filter = close < ema2 and abs(close - ema2) / atr_val >= float(RSI_PULLBACK_SCALP_MIN_EMA_ATR_DISTANCE)
+        lower_wick = max(0.0, min(open_, close) - low)
+        body_abs = max(1e-9, abs(close - open_))
+        wick_filter = lower_wick / body_abs >= float(RSI_PULLBACK_SCALP_MIN_WICK_BODY_RATIO)
+        structure_shift = close > prev_high
+
+    sweep_hits = _recent_liquidity_sweep_hits_replay(slice_data, side, tf, levels_proxy)
+    level_hits = _key_level_reaction_hits_replay(slice_data, side, tf, levels_proxy)
+    filters = 0
+    filters += 1 if sweep_hits else 0
+    filters += 1 if level_hits else 0
+    filters += 1 if impulse_filter else 0
+    filters += 1 if ema_filter else 0
+    filters += 1 if wick_filter else 0
+    after_bos_or_impulse = impulse_filter or (bos_ctx and str(bos_ctx.get("side", "")).upper() == side)
+    return structure_shift and after_bos_or_impulse and filters >= int(RSI_PULLBACK_SCALP_MIN_FILTERS)
+
+
+def _get_weekend_scalp_exception_replay(slice_data: dict, tf: str, side: str, levels_proxy: dict):
+    if str(tf) not in set(RSI_PULLBACK_SCALP_TFS):
+        return False
+    df = (slice_data or {}).get(tf)
+    if df is None or df.empty or len(df) < 3:
+        return False
+    curr = df.iloc[-1]
+    prev = df.iloc[-2]
+    side = str(side or "").upper()
+    close = float(curr.get("Close", 0) or 0)
+    open_ = float(curr.get("Open", close) or close)
+    prev_close = float(prev.get("Close", close) or close)
+    rsi = float(curr.get("RSI", 50) or 50)
+    atr_val = float(curr.get("ATR", 0) or 0)
+    if atr_val <= 0:
+        return False
+    if side == "SHORT":
+        extreme_ok = rsi >= float(RSI_PULLBACK_SCALP_OB)
+        impulse_ok = (
+            (close > open_ and abs(close - open_) / atr_val >= float(RSI_PULLBACK_SCALP_MIN_IMPULSE_BODY_ATR))
+            or abs(close - prev_close) / atr_val >= float(RSI_PULLBACK_SCALP_MIN_DISPLACEMENT_ATR)
+        )
+    elif side == "LONG":
+        extreme_ok = rsi <= float(RSI_PULLBACK_SCALP_OS)
+        impulse_ok = (
+            (close < open_ and abs(close - open_) / atr_val >= float(RSI_PULLBACK_SCALP_MIN_IMPULSE_BODY_ATR))
+            or abs(close - prev_close) / atr_val >= float(RSI_PULLBACK_SCALP_MIN_DISPLACEMENT_ATR)
+        )
+    else:
+        return False
+
+    sweep_ok = bool(_recent_liquidity_sweep_hits_replay(slice_data, side, tf, levels_proxy))
+    pullback_ok = _get_rsi_pullback_scalp_override_replay(slice_data, tf, side, levels_proxy)
+    return extreme_ok and impulse_ok and sweep_ok and pullback_ok
+
+
+def _apply_rsi_pullback_fast_targets_replay(evt: dict):
+    entry = float(evt.get("entry", 0) or 0)
+    sl = float(evt.get("sl", 0) or 0)
+    side = str(evt.get("side", "")).upper()
+    risk = abs(entry - sl)
+    if risk <= 0 or side not in {"LONG", "SHORT"}:
+        return evt
+    mult = 1.0 if side == "LONG" else -1.0
+    evt = dict(evt)
+    evt["tp1"] = float(entry + mult * risk * float(RSI_PULLBACK_SCALP_TP1_R))
+    evt["tp2"] = float(entry + mult * risk * float(RSI_PULLBACK_SCALP_TP2_R))
+    evt["tp3"] = float(entry + mult * risk * float(RSI_PULLBACK_SCALP_TP3_R))
+    evt["trigger"] = "RSI_PULLBACK_SCALP"
+    return evt
 
 
 def _get_5m_higher_tf_guard_reason_replay(slice_data: dict, side: str, trend_map: dict, idx):
@@ -870,6 +1170,11 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_
             reversal_override_allowed = _get_reversal_override_replay(
                 tf, side, evt, score, slice_data, levels_proxy
             )
+            rsi_pullback_override = _get_rsi_pullback_scalp_override_replay(slice_data, tf, side, levels_proxy)
+            weekend_exception = _get_weekend_scalp_exception_replay(slice_data, tf, side, levels_proxy)
+            if rsi_pullback_override or weekend_exception:
+                reversal_override_allowed = True
+                evt = _apply_rsi_pullback_fast_targets_replay(evt)
             regime_name = _detect_regime_from_df(df.loc[:idx]) if SCALP_REGIME_SWITCHING else "RANGE"
             regime_cfg = SCALP_REGIME_PROFILES.get(regime_name, {})
             score_delta = int(regime_cfg.get("score_delta", 0))
@@ -877,6 +1182,13 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_
             regime_vol_max_mult = float(regime_cfg.get("vol_max_mult", 1.0))
             tuning_state = _recent_health_from_results(results, SCALP_SELF_TUNE_LOOKBACK) if SCALP_SELF_TUNING_ENABLED else "NEUTRAL"
             tuning_delta = 1 if tuning_state == "TIGHTEN" else (-1 if tuning_state == "LOOSEN" else 0)
+
+            if not WEEKEND_TRADING_ENABLED and idx.weekday() >= 5 and not weekend_exception:
+                continue
+
+            bos_guard_reason = _get_bos_guard_reason_replay(slice_data, tf, side)
+            if bos_guard_reason and not rsi_pullback_override:
+                continue
 
             # Volatility gate
             if VOLATILITY_FILTER_ENABLED and close > 0 and atr > 0:

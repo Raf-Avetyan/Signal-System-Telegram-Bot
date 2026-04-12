@@ -72,7 +72,15 @@ from config import (
     MARKETTWITS_CHANNEL_URL, MARKETTWITS_REFRESH_SEC,
     MARKETTWITS_LOOKBACK_HOURS, MARKETTWITS_BLOCK_AFTER_MIN,
     MARKETTWITS_MIN_BLOCK_SCORE, REVERSAL_OVERRIDE_ENABLED,
-    REVERSAL_OVERRIDE_MIN_SCORE, REVERSAL_OVERRIDE_MIN_PROOFS
+    REVERSAL_OVERRIDE_MIN_SCORE, REVERSAL_OVERRIDE_MIN_PROOFS,
+    WEEKEND_TRADING_ENABLED, BOS_GUARD_ENABLED, BOS_GUARD_SWING_LOOKBACK,
+    BOS_GUARD_RECENT_BARS, BOS_GUARD_RECLAIM_BARS, RSI_PULLBACK_SCALP_ENABLED,
+    RSI_PULLBACK_SCALP_TFS, RSI_PULLBACK_SCALP_OB, RSI_PULLBACK_SCALP_OS,
+    RSI_PULLBACK_SCALP_MIN_FILTERS, RSI_PULLBACK_SCALP_MIN_EMA_ATR_DISTANCE,
+    RSI_PULLBACK_SCALP_MIN_IMPULSE_BODY_ATR, RSI_PULLBACK_SCALP_MIN_DISPLACEMENT_ATR,
+    RSI_PULLBACK_SCALP_MIN_WICK_BODY_RATIO, RSI_PULLBACK_SCALP_TP1_R,
+    RSI_PULLBACK_SCALP_TP2_R, RSI_PULLBACK_SCALP_TP3_R,
+    STRUCTURE_GUARD_MODE_BY_TF
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
@@ -3677,6 +3685,60 @@ class PonchBot:
                 hits.append(f"{tf} liquidity sweep" + (f" ({level_names})" if level_names else ""))
         return hits
 
+    def _get_key_level_reaction_hits(self, side, preferred_tf=None):
+        side = str(side or "").upper()
+        if not self.levels:
+            return []
+        ordered_tfs = []
+        if preferred_tf:
+            ordered_tfs.append(preferred_tf)
+        ordered_tfs.extend(["5m", "15m", "1h", "4h"])
+        hits = []
+        seen = set()
+        target_levels = (
+            ["DO", "PDL", "PWL", "PML", "Dump", "DumpMax"]
+            if side == "LONG"
+            else ["DO", "PDH", "PWH", "PMH", "Pump", "PumpMax"]
+        )
+        for tf in ordered_tfs:
+            if tf in seen:
+                continue
+            seen.add(tf)
+            df = (getattr(self, "latest_data", {}) or {}).get(tf)
+            try:
+                if df is None or df.empty:
+                    continue
+            except Exception:
+                continue
+            curr = df.iloc[-1]
+            close = float(curr.get("Close", 0) or 0)
+            open_ = float(curr.get("Open", close) or close)
+            high = float(curr.get("High", close) or close)
+            low = float(curr.get("Low", close) or close)
+            atr_val = float(curr.get("ATR", 0) or 0)
+            if close <= 0:
+                continue
+            band = max(close * 0.0010, atr_val * 0.35 if atr_val > 0 else 0.0)
+            body = max(1e-9, abs(close - open_))
+            if side == "LONG":
+                wick_ok = max(0.0, min(open_, close) - low) / body >= 1.0 or close > open_
+            else:
+                wick_ok = max(0.0, high - max(open_, close)) / body >= 1.0 or close < open_
+            if not wick_ok:
+                continue
+            for level_name in target_levels:
+                level = float(self.levels.get(level_name, 0) or 0)
+                if level <= 0:
+                    continue
+                if side == "LONG":
+                    near_level = abs(low - level) <= band and close >= level
+                else:
+                    near_level = abs(high - level) <= band and close <= level
+                if near_level:
+                    hits.append(f"{tf} key-level reaction ({level_name})")
+                    break
+        return hits
+
     def _get_reversal_override(self, tf, side, evt=None, score=None):
         if not REVERSAL_OVERRIDE_ENABLED:
             return False, ""
@@ -3689,6 +3751,9 @@ class PonchBot:
         sweep_hits = self._get_recent_liquidity_sweep_hits(side, preferred_tf=tf)
         if sweep_hits:
             proofs.extend(sweep_hits)
+        level_hits = self._get_key_level_reaction_hits(side, preferred_tf=tf)
+        if level_hits:
+            proofs.extend(level_hits)
 
         trigger = str((evt or {}).get("trigger") or "").strip().upper()
         strategy = str((evt or {}).get("strategy") or "").strip().upper()
@@ -3712,14 +3777,291 @@ class PonchBot:
             return True, ", ".join(unique_proofs)
         return False, ""
 
-    def _get_scalp_window_block_reason(self, tf, side, local_trend, local_trend_src):
+    def _get_structure_anchor_tf(self, tf):
+        return "15m" if str(tf) == "5m" else str(tf)
+
+    def _get_structure_guard_mode(self, tf):
+        return str((STRUCTURE_GUARD_MODE_BY_TF or {}).get(str(tf), "hard")).strip().lower()
+
+    def _get_recent_bos_context(self, tf):
+        if not BOS_GUARD_ENABLED:
+            return {}
+        anchor_tf = self._get_structure_anchor_tf(tf)
+        df = (getattr(self, "latest_data", {}) or {}).get(anchor_tf)
+        try:
+            if df is None or df.empty:
+                return {}
+        except Exception:
+            return {}
+
+        swing_lb = int(max(3, BOS_GUARD_SWING_LOOKBACK))
+        recent_bars = int(max(2, BOS_GUARD_RECENT_BARS))
+        reclaim_bars = int(max(1, BOS_GUARD_RECLAIM_BARS))
+        if len(df) < swing_lb + 3:
+            return {}
+
+        found = None
+        start_idx = max(swing_lb, len(df) - recent_bars)
+        for i in range(start_idx, len(df)):
+            prior = df.iloc[i - swing_lb:i]
+            if prior is None or prior.empty:
+                continue
+            prev_high = float(prior["High"].max())
+            prev_low = float(prior["Low"].min())
+            row = df.iloc[i]
+            row_close = float(row.get("Close", 0) or 0)
+            row_high = float(row.get("High", 0) or 0)
+            row_low = float(row.get("Low", 0) or 0)
+            if row_close > prev_high or row_high > prev_high:
+                found = {"side": "LONG", "level": prev_high, "idx": i, "tf": anchor_tf}
+            if row_close < prev_low or row_low < prev_low:
+                found = {"side": "SHORT", "level": prev_low, "idx": i, "tf": anchor_tf}
+
+        if not found:
+            return {}
+
+        bos_idx = int(found["idx"])
+        pre_bos = df.iloc[max(0, bos_idx - swing_lb):bos_idx]
+        bos_bar = df.iloc[bos_idx]
+        latest = df.iloc[-1]
+        latest_close = float(latest.get("Close", 0) or 0)
+        latest_high = float(latest.get("High", latest_close) or latest_close)
+        latest_low = float(latest.get("Low", latest_close) or latest_close)
+        atr_ref = float(df.iloc[bos_idx].get("ATR", 0) or 0)
+        tol = atr_ref * 0.15 if atr_ref > 0 else abs(float(found["level"])) * 0.0004
+        follow = df.iloc[bos_idx:min(len(df), bos_idx + reclaim_bars + 1)]
+        post_bos = df.iloc[min(len(df), bos_idx + 1):]
+        reclaimed = False
+        weak_follow = True
+        lower_high = False
+        lower_low = False
+        higher_high = False
+        higher_low = False
+        continuation_after_reclaim = False
+        bos_reference_high = float(pre_bos["High"].max()) if not pre_bos.empty else float(bos_bar.get("High", latest_high) or latest_high)
+        bos_reference_low = float(pre_bos["Low"].min()) if not pre_bos.empty else float(bos_bar.get("Low", latest_low) or latest_low)
+        if not follow.empty:
+            if found["side"] == "SHORT":
+                min_follow = float(follow["Low"].min())
+                extension = max(0.0, float(found["level"]) - min_follow)
+                weak_follow = atr_ref <= 0 or extension <= atr_ref * 0.8
+                reclaimed = latest_close > float(found["level"]) and weak_follow
+            else:
+                max_follow = float(follow["High"].max())
+                extension = max(0.0, max_follow - float(found["level"]))
+                weak_follow = atr_ref <= 0 or extension <= atr_ref * 0.8
+                reclaimed = latest_close < float(found["level"]) and weak_follow
+
+        if not post_bos.empty:
+            post_high = float(post_bos["High"].max())
+            post_low = float(post_bos["Low"].min())
+            lower_high = post_high < (bos_reference_high - tol)
+            lower_low = post_low < (float(bos_bar.get("Low", post_low) or post_low) - tol)
+            higher_high = post_high > (bos_reference_high + tol)
+            higher_low = post_low > (float(found["level"]) + tol)
+            if found["side"] == "SHORT":
+                continuation_after_reclaim = reclaimed and higher_high and latest_close > bos_reference_high - tol
+            else:
+                continuation_after_reclaim = reclaimed and lower_low and latest_close < bos_reference_low + tol
+
+        found["reclaimed"] = reclaimed
+        found["weak_follow"] = weak_follow
+        found["lower_high"] = lower_high
+        found["lower_low"] = lower_low
+        found["higher_high"] = higher_high
+        found["higher_low"] = higher_low
+        found["continuation_after_reclaim"] = continuation_after_reclaim
+        if found["side"] == "SHORT":
+            found["pullback_only"] = bool(reclaimed or (weak_follow and not lower_high and not lower_low) or continuation_after_reclaim)
+            found["reversal_confirmed"] = bool(lower_high and lower_low and not reclaimed)
+        else:
+            found["pullback_only"] = bool(reclaimed or (weak_follow and not higher_high and not higher_low) or continuation_after_reclaim)
+            found["reversal_confirmed"] = bool(higher_high and higher_low and not reclaimed)
+        return found
+
+    def _get_bos_guard_reason(self, tf, side):
+        mode = self._get_structure_guard_mode(tf)
+        if mode == "off":
+            return ""
+        ctx = self._get_recent_bos_context(tf)
+        if not ctx:
+            return ""
+        bos_side = str(ctx.get("side", "")).upper()
+        if not bos_side or bos_side == str(side or "").upper():
+            return ""
+        if ctx.get("reclaimed") or ctx.get("pullback_only") or ctx.get("continuation_after_reclaim"):
+            return ""
+        if mode == "soft" and not ctx.get("reversal_confirmed"):
+            return ""
+        state = "reversal follow-through" if ctx.get("reversal_confirmed") else "active BOS"
+        return f"recent {bos_side.lower()} BOS on {ctx.get('tf', tf)} is still active ({state})"
+
+    def _get_rsi_pullback_scalp_override(self, tf, side):
+        if not RSI_PULLBACK_SCALP_ENABLED:
+            return False, ""
+        if str(tf) not in set(RSI_PULLBACK_SCALP_TFS):
+            return False, ""
+
+        df = (getattr(self, "latest_data", {}) or {}).get(tf)
+        try:
+            if df is None or df.empty or len(df) < 3:
+                return False, ""
+        except Exception:
+            return False, ""
+
+        curr = df.iloc[-1]
+        prev = df.iloc[-2]
+        side = str(side or "").upper()
+        close = float(curr.get("Close", 0) or 0)
+        open_ = float(curr.get("Open", close) or close)
+        high = float(curr.get("High", close) or close)
+        low = float(curr.get("Low", close) or close)
+        prev_close = float(prev.get("Close", close) or close)
+        prev_high = float(prev.get("High", high) or high)
+        prev_low = float(prev.get("Low", low) or low)
+        rsi = float(curr.get("RSI", 50) or 50)
+        atr_val = float(curr.get("ATR", 0) or 0)
+        ema2 = float(curr.get("EMA2", close) or close)
+
+        if atr_val <= 0:
+            return False, ""
+
+        bos_ctx = self._get_recent_bos_context(tf)
+
+        if side == "SHORT":
+            if rsi < float(RSI_PULLBACK_SCALP_OB):
+                return False, ""
+        elif side == "LONG":
+            if rsi > float(RSI_PULLBACK_SCALP_OS):
+                return False, ""
+        else:
+            return False, ""
+
+        body_atr = abs(close - open_) / atr_val
+        displacement_atr = abs(close - prev_close) / atr_val
+        if side == "SHORT":
+            impulse_filter = (
+                (close > open_ and body_atr >= float(RSI_PULLBACK_SCALP_MIN_IMPULSE_BODY_ATR))
+                or displacement_atr >= float(RSI_PULLBACK_SCALP_MIN_DISPLACEMENT_ATR)
+            )
+            ema_filter = close > ema2 and abs(close - ema2) / atr_val >= float(RSI_PULLBACK_SCALP_MIN_EMA_ATR_DISTANCE)
+            upper_wick = max(0.0, high - max(open_, close))
+            body_abs = max(1e-9, abs(close - open_))
+            wick_filter = upper_wick / body_abs >= float(RSI_PULLBACK_SCALP_MIN_WICK_BODY_RATIO)
+            structure_shift = close < prev_low
+        else:
+            impulse_filter = (
+                (close < open_ and body_atr >= float(RSI_PULLBACK_SCALP_MIN_IMPULSE_BODY_ATR))
+                or displacement_atr >= float(RSI_PULLBACK_SCALP_MIN_DISPLACEMENT_ATR)
+            )
+            ema_filter = close < ema2 and abs(close - ema2) / atr_val >= float(RSI_PULLBACK_SCALP_MIN_EMA_ATR_DISTANCE)
+            lower_wick = max(0.0, min(open_, close) - low)
+            body_abs = max(1e-9, abs(close - open_))
+            wick_filter = lower_wick / body_abs >= float(RSI_PULLBACK_SCALP_MIN_WICK_BODY_RATIO)
+            structure_shift = close > prev_high
+
+        sweep_filters = self._get_recent_liquidity_sweep_hits(side, preferred_tf=tf)
+        level_reaction_filters = self._get_key_level_reaction_hits(side, preferred_tf=tf)
+        filters = []
+        if sweep_filters:
+            filters.append("liquidity sweep")
+        if level_reaction_filters:
+            filters.append("key-level reaction")
+        if impulse_filter:
+            filters.append("impulse/displacement")
+        if ema_filter:
+            filters.append("EMA stretch")
+        if wick_filter:
+            filters.append("wick rejection")
+
+        after_bos_or_impulse = impulse_filter or (bos_ctx and str(bos_ctx.get("side", "")).upper() == side)
+
+        if not structure_shift:
+            return False, ""
+        if not after_bos_or_impulse:
+            return False, ""
+        if len(filters) < int(RSI_PULLBACK_SCALP_MIN_FILTERS):
+            return False, ""
+
+        return True, f"extreme RSI scalp ({', '.join(filters[:3])})"
+
+    def _get_weekend_scalp_exception(self, tf, side):
+        if str(tf) not in set(RSI_PULLBACK_SCALP_TFS):
+            return False, ""
+        df = (getattr(self, "latest_data", {}) or {}).get(tf)
+        try:
+            if df is None or df.empty or len(df) < 3:
+                return False, ""
+        except Exception:
+            return False, ""
+
+        curr = df.iloc[-1]
+        prev = df.iloc[-2]
+        side = str(side or "").upper()
+        close = float(curr.get("Close", 0) or 0)
+        open_ = float(curr.get("Open", close) or close)
+        prev_close = float(prev.get("Close", close) or close)
+        rsi = float(curr.get("RSI", 50) or 50)
+        atr_val = float(curr.get("ATR", 0) or 0)
+        if atr_val <= 0:
+            return False, ""
+
+        if side == "SHORT":
+            extreme_ok = rsi >= float(RSI_PULLBACK_SCALP_OB)
+            impulse_ok = (
+                (close > open_ and abs(close - open_) / atr_val >= float(RSI_PULLBACK_SCALP_MIN_IMPULSE_BODY_ATR))
+                or abs(close - prev_close) / atr_val >= float(RSI_PULLBACK_SCALP_MIN_DISPLACEMENT_ATR)
+            )
+        elif side == "LONG":
+            extreme_ok = rsi <= float(RSI_PULLBACK_SCALP_OS)
+            impulse_ok = (
+                (close < open_ and abs(close - open_) / atr_val >= float(RSI_PULLBACK_SCALP_MIN_IMPULSE_BODY_ATR))
+                or abs(close - prev_close) / atr_val >= float(RSI_PULLBACK_SCALP_MIN_DISPLACEMENT_ATR)
+            )
+        else:
+            return False, ""
+
+        sweep_ok = bool(self._get_recent_liquidity_sweep_hits(side, preferred_tf=tf))
+        pullback_ok, pullback_note = self._get_rsi_pullback_scalp_override(tf, side)
+        if extreme_ok and impulse_ok and sweep_ok and pullback_ok:
+            return True, f"weekend extreme scalp ({pullback_note})"
+        return False, ""
+
+    def _apply_rsi_pullback_fast_targets(self, evt):
+        if not evt:
+            return evt
+        entry = float(evt.get("entry", 0) or 0)
+        sl = float(evt.get("sl", 0) or 0)
+        side = str(evt.get("side", "")).upper()
+        risk = abs(entry - sl)
+        if risk <= 0 or side not in {"LONG", "SHORT"}:
+            return evt
+        mult = 1.0 if side == "LONG" else -1.0
+        evt["tp1"] = float(entry + mult * risk * float(RSI_PULLBACK_SCALP_TP1_R))
+        evt["tp2"] = float(entry + mult * risk * float(RSI_PULLBACK_SCALP_TP2_R))
+        evt["tp3"] = float(entry + mult * risk * float(RSI_PULLBACK_SCALP_TP3_R))
+        evt["trigger"] = "RSI_PULLBACK_SCALP"
+        evt["trigger_label"] = "RSI Pullback Scalp"
+        evt["fast_scalp_exit"] = True
+        return evt
+
+    def _get_scalp_window_block_reason(self, tf, side, local_trend, local_trend_src, now=None):
         """
         Hard blockers for scalp OPEN/PREPARE visibility.
         We only suppress early alerts when the side is already invalid on hard structure.
         """
+        if not WEEKEND_TRADING_ENABLED:
+            check_now = now or datetime.now(timezone.utc)
+            if check_now.weekday() >= 5:
+                return "weekend trading disabled"
+
         divergence_note = self._get_opposite_divergence_note(side)
         if divergence_note:
             return divergence_note
+
+        bos_guard = self._get_bos_guard_reason(tf, side)
+        if bos_guard:
+            return bos_guard
 
         local_side = self._trend_side(local_trend)
         if local_side and side != local_side:
@@ -5623,7 +5965,7 @@ class PonchBot:
             self.sent_signals.add(evt_key)
 
             if evt["type"] == "OPEN":
-                block_reason = self._get_scalp_window_block_reason(tf, evt["side"], local_trend, local_trend_src)
+                block_reason = self._get_scalp_window_block_reason(tf, evt["side"], local_trend, local_trend_src, now=now)
                 if block_reason:
                     self._record_signal_suppressed("open_window_guard", now=now)
                     print(f"  [SCALP] Suppressed Open [{tf}] {evt['side']}: {block_reason}")
@@ -5645,7 +5987,7 @@ class PonchBot:
                     print(f"  [TG] Sent Scalp Open [{tf}] {evt['side']}")
 
             elif evt["type"] == "PREPARE":
-                block_reason = self._get_scalp_window_block_reason(tf, evt["side"], local_trend, local_trend_src)
+                block_reason = self._get_scalp_window_block_reason(tf, evt["side"], local_trend, local_trend_src, now=now)
                 if block_reason:
                     self._record_signal_suppressed("prepare_window_guard", now=now)
                     print(f"  [SCALP] Suppressed Prepare [{tf}] {evt['side']}: {block_reason}")
@@ -5669,11 +6011,34 @@ class PonchBot:
                 reversal_override_allowed, reversal_override_note = self._get_reversal_override(
                     tf, side, evt=evt, score=score
                 )
+                rsi_pullback_override, rsi_pullback_note = self._get_rsi_pullback_scalp_override(tf, side)
+                weekend_exception_allowed, weekend_exception_note = self._get_weekend_scalp_exception(tf, side)
+                if weekend_exception_allowed:
+                    rsi_pullback_override = True
+                    rsi_pullback_note = weekend_exception_note
+                if rsi_pullback_override:
+                    reversal_override_allowed = True
+                    reversal_override_note = rsi_pullback_note
+                    evt = self._apply_rsi_pullback_fast_targets(evt)
+                    trigger_label = str(evt.get("trigger_label") or evt.get("trigger") or trigger_label)
+                    if "RSI Pullback Scalp" not in reasons:
+                        reasons.append("RSI Pullback Scalp")
+
+                if not WEEKEND_TRADING_ENABLED and now.weekday() >= 5 and not weekend_exception_allowed:
+                    self._record_signal_block("weekend_block", now=now)
+                    print(f"  [SCALP] Blocked {tf} {side}: weekend trading disabled")
+                    continue
 
                 divergence_note = self._get_opposite_divergence_note(side)
                 if divergence_note:
                     self._record_signal_block("opposite_divergence", now=now)
                     print(f"  [SCALP] Blocked {tf} {side}: {divergence_note}")
+                    continue
+
+                bos_guard_reason = self._get_bos_guard_reason(tf, side)
+                if bos_guard_reason and not rsi_pullback_override:
+                    self._record_signal_block("bos_guard", now=now)
+                    print(f"  [SCALP] Blocked {tf} {side}: {bos_guard_reason}")
                     continue
 
                 impulse_blocked, impulse_note = self._is_unstable_impulse(self.latest_data or {}, side)
