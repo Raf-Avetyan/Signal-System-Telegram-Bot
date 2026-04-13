@@ -8,7 +8,7 @@ Persists data to signals_log.json for restart survival.
 import json
 import os
 from datetime import datetime, timezone, timedelta
-from config import BREAKEVEN_WIN_MIN_TP, BREAKEVEN_MOVE_AFTER_TP, BREAKEVEN_FEE_BUFFER_PCT, BITUNIX_TP_SPLITS
+from config import BREAKEVEN_WIN_MIN_TP, BREAKEVEN_MOVE_AFTER_TP, BREAKEVEN_FEE_BUFFER_PCT, BITUNIX_TP_SPLITS, get_tp_splits_for_tf
 
 LOG_FILE = os.path.join(os.path.dirname(__file__), "signals_log.json")
 
@@ -90,7 +90,10 @@ class SignalTracker:
                     while len(qtys) < 3:
                         qtys.append(0.0)
                     return [q / total for q in qtys[:3]]
-            base = [max(0.0, float(x or 0)) for x in BITUNIX_TP_SPLITS[:3]]
+            strategy_name = str(sig.get("strategy") or (sig.get("meta") or {}).get("strategy") or "")
+            tf_name = str(sig.get("tf") or "")
+            base_splits = get_tp_splits_for_tf(tf_name, strategy_name)
+            base = [max(0.0, float(x or 0)) for x in base_splits[:3]]
             while len(base) < 3:
                 base.append(0.0)
             total = sum(base) or 1.0

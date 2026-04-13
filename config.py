@@ -29,6 +29,7 @@ BITUNIX_MAX_RISK_USD = float(os.getenv("BITUNIX_MAX_RISK_USD", "25"))
 BITUNIX_RISK_CAP_PCT = float(os.getenv("BITUNIX_RISK_CAP_PCT", "0.01"))
 BITUNIX_MIN_NOTIONAL_USD = float(os.getenv("BITUNIX_MIN_NOTIONAL_USD", "25"))
 BITUNIX_TP_SPLITS = (0.30, 0.40, 0.30)
+TIMEFRAME_TP_SPLITS = {}
 BITUNIX_TPSL_TRIGGER_TYPE = os.getenv("BITUNIX_TPSL_TRIGGER_TYPE", "MARK_PRICE").strip().upper()
 BITUNIX_MIN_BASE_QTY = float(os.getenv("BITUNIX_MIN_BASE_QTY", "0.0001"))
 BITUNIX_QTY_STEP = float(os.getenv("BITUNIX_QTY_STEP", "0.0001"))
@@ -74,7 +75,7 @@ MOMENTUM_SMOOTH   = 3     # Smoothing EMA for momentum (Fast)
 MOMENTUM_OB       = 66    # Overbought threshold
 MOMENTUM_OS       = 34    # Oversold threshold
 TIMEFRAME_MOMENTUM_THRESHOLDS = {
-    "5m": {"ob": 66, "os": 34},
+    "5m": {"ob": 70, "os": 30},
     "15m": {"ob": 62, "os": 38},
     "1h": {"ob": 66, "os": 34},
     "4h": {"ob": 64, "os": 36},
@@ -121,7 +122,7 @@ BITUNIX_LIQUIDATION_MAX_LEVERAGE_BY_TF = {
 
 # Smart Money Liquidity
 SMART_MONEY_ENABLED = True
-SMART_MONEY_EXECUTION_TFS = ["5m", "15m"]
+SMART_MONEY_EXECUTION_TFS = ["15m"]
 SMART_MONEY_RISK_PCT = 1.0
 SMART_MONEY_MAX_TRADES_PER_DAY = 3
 SMART_MONEY_ALLOWED_SESSIONS = ["LONDON", "NY"]
@@ -140,9 +141,17 @@ SMART_MONEY_TP_SPLITS = (
     float(os.getenv("SMART_MONEY_TP2_SPLIT", "0.25")),
     float(os.getenv("SMART_MONEY_TP3_SPLIT", "0.60")),
 )
+
+def get_tp_splits_for_tf(timeframe, strategy_name=""):
+    strategy = str(strategy_name or "").strip().upper()
+    if strategy == "SMART_MONEY_LIQUIDITY":
+        return SMART_MONEY_TP_SPLITS
+    tf = str(timeframe or "").strip().lower()
+    return TIMEFRAME_TP_SPLITS.get(tf, BITUNIX_TP_SPLITS)
 SMART_MONEY_BOS_SWING_LOOKBACK = 4
 SMART_MONEY_POST_SWEEP_CONFIRM_BARS = 8
 SMART_MONEY_MAX_EXECUTION_CANDLE_RISK_RATIO_BY_TF = {
+    "5m": 1.00,
     "15m": 1.30,
 }
 
@@ -161,7 +170,7 @@ MAX_SIGNAL_SIZE_PCT = float(os.getenv("MAX_SIGNAL_SIZE_PCT", "10.0"))
 # SHORT confirm when RSI < MOMENTUM_OB - buffer
 SCALP_CONFIRM_RSI_BUFFER = 2
 TIMEFRAME_CONFIRM_RSI_BUFFER = {
-    "5m": 2,
+    "5m": 3,
     "15m": 0,
     "1h": 0,
     "4h": 0,
@@ -210,6 +219,14 @@ ONE_H_RECLAIM_LOOKBACK = 10
 ONE_H_RECLAIM_RSI_LONG_MAX = 44
 ONE_H_RECLAIM_RSI_SHORT_MIN = 56
 ONE_H_RECLAIM_RSI_CONFIRM = 50
+LATE_CONFIRM_MAX_EMA2_ATR_DISTANCE_BY_TF = {
+    "1h": 0.60,
+    "4h": 0.80,
+}
+LATE_CONFIRM_MAX_BODY_ATR_BY_TF = {
+    "1h": 1.00,
+    "4h": 1.20,
+}
 
 # Min seconds between repeated OPEN alerts for same timeframe+side.
 # Helps reduce alert spam when RSI repeatedly tags OB/OS.
@@ -271,6 +288,17 @@ SCALP_MIN_SCORE_BY_TF = {
     "15m": 3,
     "1h": 2,
     "4h": 1,
+}
+SCALP_HARD_MIN_SCORE_BY_TF = {
+    "5m": 4,
+    "15m": 2,
+    "1h": 2,
+    "4h": 3,
+}
+SCALP_MOMENTUM_EXIT_MIN_SCORE_BY_TF = {
+    "5m": 4,
+    "1h": 2,
+    "4h": 3,
 }
 SCALP_ALLOWED_SESSIONS_BY_TF = {
     "5m": ["LONDON", "NY"],

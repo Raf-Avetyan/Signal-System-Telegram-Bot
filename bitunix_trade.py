@@ -30,12 +30,11 @@ from config import (
     BITUNIX_REQUIRED_MARGIN_MODE,
     BITUNIX_RISK_CAP_PCT,
     BITUNIX_TPSL_TRIGGER_TYPE,
-    BITUNIX_TP_SPLITS,
     BITUNIX_TRADING_ENABLED,
     BITUNIX_TRADING_MODE,
     BREAKEVEN_FEE_BUFFER_PCT,
-    SMART_MONEY_TP_SPLITS,
     SYMBOL,
+    get_tp_splits_for_tf,
 )
 
 
@@ -1259,7 +1258,7 @@ class TradeExecutor:
             or (signal.get("meta") or {}).get("strategy")
             or ""
         ).upper()
-        tp_splits = SMART_MONEY_TP_SPLITS if strategy_name == "SMART_MONEY_LIQUIDITY" else BITUNIX_TP_SPLITS
+        tp_splits = get_tp_splits_for_tf(tf, strategy_name)
         tp_qtys, tp_split_warning = self._split_qty(
             qty,
             min_base_qty=min_base_qty,
@@ -2060,7 +2059,7 @@ class TradeExecutor:
                 f"TP legs skipped: total qty {total:.8f} is below Bitunix min leg {min_leg:.8f}."
             )
 
-        a, b, c = splits or BITUNIX_TP_SPLITS
+        a, b, c = splits or get_tp_splits_for_tf(None, "")
         q1 = cls._round_qty_down(total * a, step)
         q2 = cls._round_qty_down(total * b, step)
         q3 = cls._round_qty_down(max(0.0, total - q1 - q2), step)

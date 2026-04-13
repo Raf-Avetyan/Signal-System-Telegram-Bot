@@ -36,6 +36,8 @@ from config import (
     SCALP_LOSS_COOLDOWN_SEC,
     SCALP_LOSS_STREAK_LIMIT,
     SCALP_MIN_SCORE_BY_TF,
+    SCALP_HARD_MIN_SCORE_BY_TF,
+    SCALP_MOMENTUM_EXIT_MIN_SCORE_BY_TF,
     SCALP_TREND_FILTER_MODE,
     SCALP_TREND_FILTER_MODE_BY_TF,
     SCALP_COUNTERTREND_MIN_SCORE_BY_TF,
@@ -60,6 +62,8 @@ from config import (
     RSI_PULLBACK_SCALP_TP1_R,
     RSI_PULLBACK_SCALP_TP2_R,
     RSI_PULLBACK_SCALP_TP3_R,
+    LATE_CONFIRM_MAX_EMA2_ATR_DISTANCE_BY_TF,
+    LATE_CONFIRM_MAX_BODY_ATR_BY_TF,
     SCALP_RELAX_MIN_SCORE_DELTA,
     SCALP_RELAX_VOL_MIN_MULT,
     SCALP_RELAX_VOL_MAX_MULT,
@@ -84,6 +88,7 @@ from config import (
     SMART_MONEY_EXECUTION_TFS,
     SMART_MONEY_TP_SPLITS,
     TIMEFRAME_PROFILES,
+    get_tp_splits_for_tf,
     SESSION_SCALP_MODE,
     SIGNAL_TIMEFRAMES,
     SYMBOL,
@@ -196,7 +201,8 @@ def _tp_fracs_from_trade(tr: dict):
             while len(qtys) < 3:
                 qtys.append(0.0)
             return [q / total for q in qtys[:3]]
-    base = [max(0.0, float(x or 0)) for x in BITUNIX_TP_SPLITS[:3]]
+    base_splits = get_tp_splits_for_tf(tr.get("tf"), tr.get("strategy"))
+    base = [max(0.0, float(x or 0)) for x in base_splits[:3]]
     while len(base) < 3:
         base.append(0.0)
     total = sum(base) or 1.0
@@ -321,7 +327,7 @@ def _simulate_replay_tp_plan(entry: float, sl: float, size_pct: float, tf: str, 
     if qty < float(BITUNIX_MIN_BASE_QTY):
         qty = float(BITUNIX_MIN_BASE_QTY) if affordable_qty >= float(BITUNIX_MIN_BASE_QTY) else 0.0
     qty = _round_qty_down_replay(qty, float(BITUNIX_QTY_STEP))
-    splits = SMART_MONEY_TP_SPLITS if str(strategy_name or "").upper() == "SMART_MONEY_LIQUIDITY" else BITUNIX_TP_SPLITS
+    splits = get_tp_splits_for_tf(tf, strategy_name)
     return _split_qty_replay(qty, splits)
 
 
@@ -735,6 +741,37 @@ def _get_bos_guard_reason_replay(slice_data: dict, tf: str, side: str):
         return ""
     state = "reversal follow-through" if ctx.get("reversal_confirmed") else "active BOS"
     return f"recent {bos_side.lower()} BOS on {ctx.get('tf', tf)} is still active ({state})"
+
+
+def _get_late_confirm_reason_replay(tf: str, side: str, df_slice: pd.DataFrame):
+    tf_name = str(tf or "").lower()
+    max_stretch = LATE_CONFIRM_MAX_EMA2_ATR_DISTANCE_BY_TF.get(tf_name)
+    max_body = LATE_CONFIRM_MAX_BODY_ATR_BY_TF.get(tf_name)
+    if max_stretch is None and max_body is None:
+        return ""
+    try:
+        if df_slice is None or df_slice.empty:
+            return ""
+        curr = df_slice.iloc[-1]
+        close = float(curr.get("Close", 0) or 0)
+        open_ = float(curr.get("Open", close) or close)
+        atr_val = float(curr.get("ATR", 0) or 0)
+        ema2 = float(curr.get("EMA2", 0) or 0)
+        if close <= 0 or atr_val <= 0:
+            return ""
+        side = str(side or "").upper()
+        if max_stretch is not None and ema2 > 0:
+            stretch = ((close - ema2) / atr_val) if side == "LONG" else ((ema2 - close) / atr_val)
+            if stretch > float(max_stretch):
+                return f"late chase: {stretch:.2f} ATR from EMA2"
+        if max_body is not None:
+            body_atr = abs(close - open_) / atr_val
+            directional = (side == "LONG" and close > open_) or (side == "SHORT" and close < open_)
+            if directional and body_atr > float(max_body):
+                return f"late chase: candle body {body_atr:.2f} ATR"
+    except Exception:
+        return ""
+    return ""
 
 
 def _get_rsi_pullback_scalp_override_replay(slice_data: dict, tf: str, side: str, levels_proxy: dict):
@@ -1167,6 +1204,7 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_
             levels_proxy = _build_proxy_levels(df, i, idx)
             local_trend, _ = _anchor_trend_for_tf(tf, idx, trend_map)
             score, _ = calculate_signal_score(evt, df.loc[:idx], levels_proxy, local_trend or macro_trend, None, 0)
+            core_score = int(score)
             reversal_override_allowed = _get_reversal_override_replay(
                 tf, side, evt, score, slice_data, levels_proxy
             )
@@ -1188,6 +1226,10 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_
 
             bos_guard_reason = _get_bos_guard_reason_replay(slice_data, tf, side)
             if bos_guard_reason and not rsi_pullback_override:
+                continue
+
+            late_confirm_reason = _get_late_confirm_reason_replay(tf, side, df.loc[:idx])
+            if late_confirm_reason:
                 continue
 
             # Volatility gate
@@ -1224,6 +1266,15 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_
             if relaxed:
                 min_score_tf = max(0, int(min_score_tf) - int(SCALP_RELAX_MIN_SCORE_DELTA))
             min_score_tf = max(0, int(min_score_tf) + score_delta + tuning_delta)
+            hard_min_score_tf = int(SCALP_HARD_MIN_SCORE_BY_TF.get(tf, 0))
+            min_score_tf = max(min_score_tf, hard_min_score_tf)
+            momentum_exit_min = int(SCALP_MOMENTUM_EXIT_MIN_SCORE_BY_TF.get(tf, 0))
+            trigger_label = str(evt.get("trigger_label") or evt.get("trigger") or "Momentum Exit")
+            trigger_is_momentum_exit = str(trigger_label).strip().lower() == "momentum exit"
+            if trigger_is_momentum_exit:
+                min_score_tf = max(min_score_tf, momentum_exit_min)
+                if core_score < momentum_exit_min:
+                    continue
             if score < min_score_tf:
                 continue
 

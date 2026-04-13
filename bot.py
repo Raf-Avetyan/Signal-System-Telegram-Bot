@@ -31,6 +31,7 @@ from config import (
     SESSION_SCALP_MODE, ORDERFLOW_SAFETY_ENABLED,
     ORDERFLOW_ANOMALY_SCORE_MIN, ORDERFLOW_OI_PCT_ANOMALY,
     ORDERFLOW_LIQ_ANOMALY_USD, SCALP_MIN_SCORE_BY_TF,
+    SCALP_HARD_MIN_SCORE_BY_TF, SCALP_MOMENTUM_EXIT_MIN_SCORE_BY_TF,
     SCALP_ALLOWED_SESSIONS_BY_TF, SCALP_RELAXED_FILTERS,
     SCALP_TREND_FILTER_MODE_BY_TF, SCALP_COUNTERTREND_MIN_SCORE_BY_TF,
     SCALP_RELAX_MIN_SCORE_DELTA, SCALP_RELAX_VOL_MIN_MULT,
@@ -80,7 +81,8 @@ from config import (
     RSI_PULLBACK_SCALP_MIN_IMPULSE_BODY_ATR, RSI_PULLBACK_SCALP_MIN_DISPLACEMENT_ATR,
     RSI_PULLBACK_SCALP_MIN_WICK_BODY_RATIO, RSI_PULLBACK_SCALP_TP1_R,
     RSI_PULLBACK_SCALP_TP2_R, RSI_PULLBACK_SCALP_TP3_R,
-    STRUCTURE_GUARD_MODE_BY_TF
+    STRUCTURE_GUARD_MODE_BY_TF, LATE_CONFIRM_MAX_EMA2_ATR_DISTANCE_BY_TF,
+    LATE_CONFIRM_MAX_BODY_ATR_BY_TF
 )
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
@@ -4045,6 +4047,36 @@ class PonchBot:
         evt["fast_scalp_exit"] = True
         return evt
 
+    def _get_late_confirm_reason(self, tf, side, df):
+        tf_name = str(tf or "").lower()
+        max_stretch = LATE_CONFIRM_MAX_EMA2_ATR_DISTANCE_BY_TF.get(tf_name)
+        max_body = LATE_CONFIRM_MAX_BODY_ATR_BY_TF.get(tf_name)
+        if max_stretch is None and max_body is None:
+            return ""
+        try:
+            if df is None or df.empty:
+                return ""
+            curr = df.iloc[-1]
+            close = float(curr.get("Close", 0) or 0)
+            open_ = float(curr.get("Open", close) or close)
+            atr_val = float(curr.get("ATR", 0) or 0)
+            ema2 = float(curr.get("EMA2", 0) or 0)
+            if close <= 0 or atr_val <= 0:
+                return ""
+            side = str(side or "").upper()
+            if max_stretch is not None and ema2 > 0:
+                stretch = ((close - ema2) / atr_val) if side == "LONG" else ((ema2 - close) / atr_val)
+                if stretch > float(max_stretch):
+                    return f"late chase: {stretch:.2f} ATR from EMA2"
+            if max_body is not None:
+                body_atr = abs(close - open_) / atr_val
+                directional = (side == "LONG" and close > open_) or (side == "SHORT" and close < open_)
+                if directional and body_atr > float(max_body):
+                    return f"late chase: candle body {body_atr:.2f} ATR"
+        except Exception:
+            return ""
+        return ""
+
     def _get_scalp_window_block_reason(self, tf, side, local_trend, local_trend_src, now=None):
         """
         Hard blockers for scalp OPEN/PREPARE visibility.
@@ -6007,6 +6039,7 @@ class PonchBot:
                     score, reasons = calculate_signal_score(
                         evt, df, self.levels, self.macro_trend, self.last_oi, self.last_liqs
                     )
+                core_score = int(score)
                 side = evt["side"]
                 reversal_override_allowed, reversal_override_note = self._get_reversal_override(
                     tf, side, evt=evt, score=score
@@ -6045,6 +6078,12 @@ class PonchBot:
                 if impulse_blocked:
                     self._record_signal_block("unstable_impulse", now=now)
                     print(f"  [SCALP] Blocked {tf} {side}: {impulse_note}")
+                    continue
+
+                late_confirm_reason = self._get_late_confirm_reason(tf, side, df)
+                if late_confirm_reason:
+                    self._record_signal_block("late_confirm", now=now)
+                    print(f"  [SCALP] Blocked {tf} {side}: {late_confirm_reason}")
                     continue
 
                 # Hard local-trend reversal guard (hierarchical source):
@@ -6195,6 +6234,19 @@ class PonchBot:
                 if relaxed_filters:
                     min_score_tf = max(0, int(min_score_tf) - int(SCALP_RELAX_MIN_SCORE_DELTA))
                 min_score_tf = max(0, int(min_score_tf) + score_delta + tuning_delta)
+                hard_min_score_tf = int(SCALP_HARD_MIN_SCORE_BY_TF.get(tf, 0))
+                min_score_tf = max(min_score_tf, hard_min_score_tf)
+                momentum_exit_min = int(SCALP_MOMENTUM_EXIT_MIN_SCORE_BY_TF.get(tf, 0))
+                trigger_is_momentum_exit = str(trigger_label).strip().lower() == "momentum exit"
+                if trigger_is_momentum_exit:
+                    min_score_tf = max(min_score_tf, momentum_exit_min)
+                    if core_score < momentum_exit_min:
+                        self._record_signal_block("momentum_exit_core_score", now=now)
+                        print(
+                            f"  [SCALP] Blocked {tf} {side}: core score {core_score}<{momentum_exit_min} "
+                            f"for Momentum Exit"
+                        )
+                        continue
                 if score < min_score_tf:
                     self._record_signal_block("score_gate", now=now)
                     print(

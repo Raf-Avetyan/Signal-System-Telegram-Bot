@@ -4,6 +4,57 @@ import pandas as pd
 import numpy as np
 from config import SYMBOL
 
+def _normalize_score(raw_score: float, raw_min: float = -2.0, raw_max: float = 12.0) -> int:
+    """Map a sparse raw confluence score into a more human-readable 1-10 scale."""
+    clipped = max(raw_min, min(raw_max, float(raw_score)))
+    scaled = 1.0 + ((clipped - raw_min) / max(1e-9, (raw_max - raw_min))) * 9.0
+    return int(max(1, min(10, round(scaled))))
+
+
+def _reason_confluence_bonus(signal_data) -> tuple[int, list[str]]:
+    """Count structural trigger/reason quality that the old score ignored."""
+    bonus = 0
+    bonus_labels = []
+    trigger = str(signal_data.get("trigger_label") or signal_data.get("trigger") or "").strip().lower()
+    strategy = str(signal_data.get("strategy") or "").strip().upper()
+    reasons = [str(x).strip().lower() for x in (signal_data.get("reasons") or []) if str(x).strip()]
+
+    if strategy == "SMART_MONEY_LIQUIDITY":
+        bonus += 4
+        bonus_labels.append("Smart Money Model")
+    elif trigger == "smart money liquidity":
+        bonus += 4
+        bonus_labels.append("Smart Money Model")
+    elif trigger in {"htf_pullback", "one_h_reclaim", "rsi pullback scalp"}:
+        bonus += 3
+        bonus_labels.append(trigger.replace("_", " ").title())
+    elif trigger == "momentum exit":
+        bonus += 1
+        bonus_labels.append("Momentum Trigger")
+
+    pattern_map = [
+        (("liquidity", "sweep", "stop hunt"), "Liquidity Sweep"),
+        (("fvg", "fair value gap"), "FVG"),
+        (("order block", " ob", "ob "), "Order Block"),
+        (("discount", "premium"), "Dealing Range"),
+        (("displacement", "impulse"), "Displacement"),
+        (("bos", "choch", "structure"), "Structure Shift"),
+        (("divergence",), "RSI Divergence"),
+        (("reclaim", "pullback"), "Reclaim/Pullback"),
+    ]
+    matched = []
+    joined = " | ".join(reasons)
+    for patterns, label in pattern_map:
+        if any(p in joined for p in patterns):
+            matched.append(label)
+    matched = matched[:3]
+    if matched:
+        bonus += len(matched)
+        bonus_labels.extend(matched)
+
+    return bonus, bonus_labels
+
+
 def calculate_signal_score(signal_data, df_tf, levels, trend, oi_data=None, liq_usd=0):
     """
     Calculate a 1-10 Signal Strength Score based on multiple confluences.
@@ -99,8 +150,15 @@ def calculate_signal_score(signal_data, df_tf, levels, trend, oi_data=None, liq_
         score -= 2
         reasons.append("Counter-trend")
 
+    # 7. Structural / trigger confluence bonuses
+    extra_bonus, extra_labels = _reason_confluence_bonus(signal_data)
+    if extra_bonus:
+        score += extra_bonus
+        for label in extra_labels:
+            if label not in reasons:
+                reasons.append(label)
+
     # Final score processing
-    # Cap at 10, min at 1
-    final_score = max(1, min(10, score))
+    final_score = _normalize_score(score)
     
     return final_score, reasons
