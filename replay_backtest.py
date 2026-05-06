@@ -166,9 +166,9 @@ def _resolve_trade_event(tr: dict, high: float, low: float, candle_ts: str):
     # Breakeven close while stop is parked at entry.
     stop_at_entry = abs(float(tr.get("sl", tr["entry"])) - breakeven_price) < 1e-9
     trigger_hit = (
-        (breakeven_trigger == 1 and tr.get("tp1_hit"))
-        or (breakeven_trigger == 2 and tr.get("tp2_hit"))
-        or (breakeven_trigger == 3 and tr.get("tp3_hit"))
+            (breakeven_trigger == 1 and tr.get("tp1_hit"))
+            or (breakeven_trigger == 2 and tr.get("tp2_hit"))
+            or (breakeven_trigger == 3 and tr.get("tp3_hit"))
     )
     if trigger_hit and stop_at_entry:
         entry_hit = (low <= breakeven_price) if is_long else (high >= breakeven_price)
@@ -317,10 +317,10 @@ def _simulate_replay_tp_plan(entry: float, sl: float, size_pct: float, tf: str, 
     affordable_qty = (affordable_notional / float(entry)) if float(entry) > 0 else 0.0
     qty = min(risk_qty, affordable_qty) if affordable_qty > 0 else 0.0
     if (
-        qty > 0
-        and balance_available >= float(BITUNIX_MIN_NOTIONAL_USD)
-        and affordable_notional >= float(BITUNIX_MIN_NOTIONAL_USD)
-        and qty * float(entry) < float(BITUNIX_MIN_NOTIONAL_USD)
+            qty > 0
+            and balance_available >= float(BITUNIX_MIN_NOTIONAL_USD)
+            and affordable_notional >= float(BITUNIX_MIN_NOTIONAL_USD)
+            and qty * float(entry) < float(BITUNIX_MIN_NOTIONAL_USD)
     ):
         qty = min(float(BITUNIX_MIN_NOTIONAL_USD) / float(entry), affordable_qty)
     qty = _round_qty_down_replay(qty, float(BITUNIX_QTY_STEP))
@@ -812,8 +812,8 @@ def _get_rsi_pullback_scalp_override_replay(slice_data: dict, tf: str, side: str
     displacement_atr = abs(close - prev_close) / atr_val
     if side == "SHORT":
         impulse_filter = (
-            (close > open_ and body_atr >= float(RSI_PULLBACK_SCALP_MIN_IMPULSE_BODY_ATR))
-            or displacement_atr >= float(RSI_PULLBACK_SCALP_MIN_DISPLACEMENT_ATR)
+                (close > open_ and body_atr >= float(RSI_PULLBACK_SCALP_MIN_IMPULSE_BODY_ATR))
+                or displacement_atr >= float(RSI_PULLBACK_SCALP_MIN_DISPLACEMENT_ATR)
         )
         ema_filter = close > ema2 and abs(close - ema2) / atr_val >= float(RSI_PULLBACK_SCALP_MIN_EMA_ATR_DISTANCE)
         upper_wick = max(0.0, high - max(open_, close))
@@ -822,8 +822,8 @@ def _get_rsi_pullback_scalp_override_replay(slice_data: dict, tf: str, side: str
         structure_shift = close < prev_low
     else:
         impulse_filter = (
-            (close < open_ and body_atr >= float(RSI_PULLBACK_SCALP_MIN_IMPULSE_BODY_ATR))
-            or displacement_atr >= float(RSI_PULLBACK_SCALP_MIN_DISPLACEMENT_ATR)
+                (close < open_ and body_atr >= float(RSI_PULLBACK_SCALP_MIN_IMPULSE_BODY_ATR))
+                or displacement_atr >= float(RSI_PULLBACK_SCALP_MIN_DISPLACEMENT_ATR)
         )
         ema_filter = close < ema2 and abs(close - ema2) / atr_val >= float(RSI_PULLBACK_SCALP_MIN_EMA_ATR_DISTANCE)
         lower_wick = max(0.0, min(open_, close) - low)
@@ -862,14 +862,14 @@ def _get_weekend_scalp_exception_replay(slice_data: dict, tf: str, side: str, le
     if side == "SHORT":
         extreme_ok = rsi >= float(RSI_PULLBACK_SCALP_OB)
         impulse_ok = (
-            (close > open_ and abs(close - open_) / atr_val >= float(RSI_PULLBACK_SCALP_MIN_IMPULSE_BODY_ATR))
-            or abs(close - prev_close) / atr_val >= float(RSI_PULLBACK_SCALP_MIN_DISPLACEMENT_ATR)
+                (close > open_ and abs(close - open_) / atr_val >= float(RSI_PULLBACK_SCALP_MIN_IMPULSE_BODY_ATR))
+                or abs(close - prev_close) / atr_val >= float(RSI_PULLBACK_SCALP_MIN_DISPLACEMENT_ATR)
         )
     elif side == "LONG":
         extreme_ok = rsi <= float(RSI_PULLBACK_SCALP_OS)
         impulse_ok = (
-            (close < open_ and abs(close - open_) / atr_val >= float(RSI_PULLBACK_SCALP_MIN_IMPULSE_BODY_ATR))
-            or abs(close - prev_close) / atr_val >= float(RSI_PULLBACK_SCALP_MIN_DISPLACEMENT_ATR)
+                (close < open_ and abs(close - open_) / atr_val >= float(RSI_PULLBACK_SCALP_MIN_IMPULSE_BODY_ATR))
+                or abs(close - prev_close) / atr_val >= float(RSI_PULLBACK_SCALP_MIN_DISPLACEMENT_ATR)
         )
     else:
         return False
@@ -1301,9 +1301,9 @@ def simulate_timeframe(tf: str, days: int, macro_trend_series: pd.Series, trend_
                 continue
 
             trend_aligned = (
-                trend_name == "Ranging"
-                or (side == "LONG" and trend_name in bullish)
-                or (side == "SHORT" and trend_name in bearish)
+                    trend_name == "Ranging"
+                    or (side == "LONG" and trend_name in bullish)
+                    or (side == "SHORT" and trend_name in bearish)
             )
             mode = str(SCALP_TREND_FILTER_MODE_BY_TF.get(tf, SCALP_TREND_FILTER_MODE)).strip().lower()
             countertrend_min_score = int(SCALP_COUNTERTREND_MIN_SCORE_BY_TF.get(tf, SCALP_COUNTERTREND_MIN_SCORE))
@@ -1564,9 +1564,9 @@ def _merge_backtest_rows(base_row: dict, extra_row: dict):
     avg_r = 0.0
     if trades:
         avg_r = (
-            float(base_row.get("avg_r", 0.0)) * int(base_row.get("trades", 0))
-            + float(extra_row.get("avg_r", 0.0)) * int(extra_row.get("trades", 0))
-        ) / trades
+                        float(base_row.get("avg_r", 0.0)) * int(base_row.get("trades", 0))
+                        + float(extra_row.get("avg_r", 0.0)) * int(extra_row.get("trades", 0))
+                ) / trades
     closed = wins + losses
     win_rate = (wins / closed * 100.0) if closed else 0.0
     hit_rate = (wins / trades * 100.0) if trades else 0.0

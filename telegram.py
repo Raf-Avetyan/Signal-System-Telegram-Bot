@@ -1,13 +1,24 @@
 ﻿import os
 import json
 import requests
-from config import BOT_TOKEN, SYMBOL, CHAT_ID, PRIVATE_EXEC_CHAT_ID
+from config import BOT_TOKEN, SYMBOL, CHAT_ID, PRIVATE_EXEC_CHAT_ID, SIGNAL_CHAT_ID, SIGNAL_MESSAGE_THREAD_ID
 
 API_URL_MSG   = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 API_URL_PHOTO = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
 API_URL_EDIT_MEDIA = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageMedia"
 API_URL_EDIT_TEXT  = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
 API_URL_UPDATES    = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+API_URL_COMMANDS   = f"https://api.telegram.org/bot{BOT_TOKEN}/setMyCommands"
+API_URL_DELETE     = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage"
+API_URL_CHAT_MEMBER = f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMember"
+
+
+def _default_thread_id_for_chat(chat_id):
+    target_chat = str(chat_id or "").strip()
+    signal_chat = str(SIGNAL_CHAT_ID or "").strip()
+    if target_chat and signal_chat and target_chat == signal_chat and int(SIGNAL_MESSAGE_THREAD_ID or 0) > 0:
+        return int(SIGNAL_MESSAGE_THREAD_ID)
+    return None
 
 
 def get_updates(offset=None):
@@ -23,7 +34,7 @@ def get_updates(offset=None):
         return None
 
 
-def send(text, parse_mode=None, chat_id=None, reply_markup=None, reply_to_message_id=None):
+def send(text, parse_mode=None, chat_id=None, reply_markup=None, reply_to_message_id=None, message_thread_id=None):
     """Send a message via Telegram Bot API."""
     target_chat = chat_id if chat_id else CHAT_ID
     try:
@@ -37,6 +48,10 @@ def send(text, parse_mode=None, chat_id=None, reply_markup=None, reply_to_messag
             payload["reply_markup"] = reply_markup
         if reply_to_message_id:
             payload["reply_to_message_id"] = reply_to_message_id
+        if message_thread_id is None:
+            message_thread_id = _default_thread_id_for_chat(target_chat)
+        if message_thread_id:
+            payload["message_thread_id"] = message_thread_id
             
         resp = requests.post(API_URL_MSG, data=payload)
         if not resp.ok:
@@ -46,6 +61,86 @@ def send(text, parse_mode=None, chat_id=None, reply_markup=None, reply_to_messag
     except Exception as e:
         print(f"[TG ERROR] {e}")
         return None
+
+
+def delete_message(chat_id, message_id):
+    """Delete a Telegram message."""
+    try:
+        resp = requests.post(
+            API_URL_DELETE,
+            data={"chat_id": chat_id, "message_id": message_id},
+            timeout=15,
+        )
+        if not resp.ok:
+            print(f"[TG ERROR] deleteMessage {resp.status_code}: {resp.text}")
+            return False
+        payload = resp.json()
+        return bool(payload.get("ok"))
+    except Exception as e:
+        print(f"[TG ERROR] deleteMessage failed: {e}")
+        return False
+
+
+def get_chat_member(chat_id, user_id):
+    """Fetch Telegram chat member info."""
+    try:
+        resp = requests.get(
+            API_URL_CHAT_MEMBER,
+            params={"chat_id": chat_id, "user_id": user_id},
+            timeout=15,
+        )
+        if not resp.ok:
+            print(f"[TG ERROR] getChatMember {resp.status_code}: {resp.text}")
+            return None
+        payload = resp.json()
+        if not payload.get("ok"):
+            print(f"[TG ERROR] getChatMember failed: {payload}")
+            return None
+        return payload.get("result") or None
+    except Exception as e:
+        print(f"[TG ERROR] getChatMember exception: {e}")
+        return None
+
+
+def set_bot_commands(commands=None):
+    """Register visible Telegram slash commands for this bot."""
+    if not BOT_TOKEN:
+        return False
+
+    if commands is None:
+        commands = [
+            {"command": "scenarios", "description": "Show BTC scenarios"},
+            {"command": "analytics", "description": "Show signal analytics"},
+        ]
+
+    scopes = [
+        {"type": "default"},
+        {"type": "all_chat_administrators"},
+        {"type": "all_group_chats"},
+        {"type": "all_private_chats"},
+    ]
+    scoped_chat_id = SIGNAL_CHAT_ID or CHAT_ID
+    if scoped_chat_id:
+        scopes.extend([
+            {"type": "chat", "chat_id": str(scoped_chat_id)},
+            {"type": "chat_administrators", "chat_id": str(scoped_chat_id)},
+        ])
+
+    ok = True
+    for scope in scopes:
+        try:
+            payload = {
+                "commands": json.dumps(commands),
+                "scope": json.dumps(scope),
+            }
+            resp = requests.post(API_URL_COMMANDS, data=payload, timeout=15)
+            if not resp.ok:
+                print(f"[TG ERROR] setMyCommands {scope['type']}: {resp.status_code} {resp.text}")
+                ok = False
+        except Exception as e:
+            print(f"[TG ERROR] setMyCommands {scope['type']} failed: {e}")
+            ok = False
+    return ok
 
 
 def send_execution_notice(title, lines=None, chat_id=None, icon="🔐"):
@@ -157,6 +252,9 @@ def send_photo(photo_path, caption=None, chat_id=None):
         with open(photo_path, 'rb') as f:
             files = {'photo': f}
             payload = {'chat_id': target_chat}
+            default_thread_id = _default_thread_id_for_chat(target_chat)
+            if default_thread_id:
+                payload["message_thread_id"] = default_thread_id
             if caption:
                 payload['caption'] = caption
                 payload['parse_mode'] = 'HTML'

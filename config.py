@@ -8,6 +8,13 @@ load_dotenv()
 BOT_TOKEN      = os.getenv("BOT_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
 PRIVATE_EXEC_CHAT_ID = os.getenv("PRIVATE_EXEC_CHAT_ID", "").strip()
+SIGNAL_CHAT_ID = os.getenv("SIGNAL_CHAT_ID", "-1003808353847").strip()
+SIGNAL_MESSAGE_THREAD_ID = int(os.getenv("SIGNAL_MESSAGE_THREAD_ID", "2"))
+SIGNAL_BLOCKED_THREAD_IDS = tuple(
+    int(part.strip())
+    for part in os.getenv("SIGNAL_BLOCKED_THREAD_IDS", "1").split(",")
+    if part.strip()
+)
 EXECUTION_UPDATES_PRIVATE_ONLY = os.getenv("EXECUTION_UPDATES_PRIVATE_ONLY", "true").strip().lower() == "true"
 PRIVATE_EXEC_AI_CONTROL_ENABLED = os.getenv("PRIVATE_EXEC_AI_CONTROL_ENABLED", "true").strip().lower() == "true"
 PRIVATE_EXEC_CONFIRM_TIMEOUT_SEC = int(os.getenv("PRIVATE_EXEC_CONFIRM_TIMEOUT_SEC", "180"))

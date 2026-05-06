@@ -21,6 +21,7 @@ from config import (
     VOLUME_AVG_PERIOD, APPROACH_THRESHOLD, APPROACH_COOLDOWN,
     APPROACH_LEVELS, SESSIONS, get_adjusted_sessions, ALERT_BATCH_WINDOW,
     OI_CHANGE_THRESHOLD, LIQ_SQUEEZE_THRESHOLD, LIQ_ALERT_COOLDOWN, CHAT_ID,
+    SIGNAL_CHAT_ID, SIGNAL_MESSAGE_THREAD_ID, SIGNAL_BLOCKED_THREAD_IDS,
     FAST_MOVE_THRESHOLD, FAST_MOVE_WINDOW, FAST_MOVE_COOLDOWN,
     BITUNIX_REG_LINK, INVITE_LINK, COMMAND_POLL_INTERVAL,
     SCALP_TREND_FILTER_MODE, SCALP_COUNTERTREND_MIN_SCORE,
@@ -103,6 +104,7 @@ from bitunix import verify_bitunix_user
 from bitunix_trade import TradeExecutor, new_signal_id
 from liquidity_map import detect_liquidity_event, detect_liquidity_candidates
 from smart_money import detect_smart_money_entry
+from market_report import build_btc_market_report
 import telegram as tg
 
 
@@ -242,6 +244,7 @@ class PonchBot:
 
         # Mute state
         self.muted_until = None
+        self.chat_member_status_cache = {}
 
     def queue_alert(self, alert_dict, callback=None, args=None, chat_id=None):
         """Queue alert for batching."""
@@ -263,7 +266,105 @@ class PonchBot:
         return PRIVATE_EXEC_CHAT_ID or CHAT_ID
 
     def _signal_chat_id(self):
-        return CHAT_ID
+        return SIGNAL_CHAT_ID or CHAT_ID
+
+    def _signal_thread_id(self):
+        try:
+            return int(SIGNAL_MESSAGE_THREAD_ID or 0)
+        except Exception:
+            return 0
+
+    def _normalized_signal_thread_id(self, chat_id, message_thread_id):
+        signal_chat = str(self._signal_chat_id() or "").strip()
+        current_chat = str(chat_id or "").strip()
+        if signal_chat and current_chat == signal_chat:
+            try:
+                thread_val = int(message_thread_id or 0)
+            except Exception:
+                thread_val = 0
+            # Telegram forum "General" topic may arrive without message_thread_id.
+            if thread_val <= 0:
+                return 1
+            return thread_val
+        try:
+            return int(message_thread_id or 0)
+        except Exception:
+            return 0
+
+    def _is_signal_command_topic(self, chat_id, message_thread_id):
+        signal_chat = str(self._signal_chat_id() or "").strip()
+        current_chat = str(chat_id or "").strip()
+        signal_thread = int(self._signal_thread_id() or 0)
+        current_thread = self._normalized_signal_thread_id(chat_id, message_thread_id)
+        return bool(signal_chat and current_chat == signal_chat and signal_thread > 0 and current_thread == signal_thread)
+
+    def _is_blocked_signal_topic(self, chat_id, message_thread_id):
+        signal_chat = str(self._signal_chat_id() or "").strip()
+        current_chat = str(chat_id or "").strip()
+        current_thread = self._normalized_signal_thread_id(chat_id, message_thread_id)
+        blocked_threads = {int(x) for x in (SIGNAL_BLOCKED_THREAD_IDS or ()) if int(x) > 0}
+        return bool(signal_chat and current_chat == signal_chat and current_thread in blocked_threads)
+
+    def _should_delete_signal_chat_message(self, chat_id, message_thread_id):
+        signal_chat = str(self._signal_chat_id() or "").strip()
+        current_chat = str(chat_id or "").strip()
+        current_thread = self._normalized_signal_thread_id(chat_id, message_thread_id)
+        blocked_threads = {int(x) for x in (SIGNAL_BLOCKED_THREAD_IDS or ()) if int(x) > 0}
+        if not signal_chat or current_chat != signal_chat or not blocked_threads:
+            return False
+        return current_thread in blocked_threads
+
+    def _is_chat_admin_user(self, chat_id, user_id):
+        try:
+            cache_key = (str(chat_id or "").strip(), str(user_id or "").strip())
+            now_ts = time.time()
+            cached = (self.chat_member_status_cache or {}).get(cache_key)
+            if cached and (now_ts - float(cached.get("ts", 0) or 0)) < 60:
+                return bool(cached.get("is_admin"))
+
+            member = tg.get_chat_member(chat_id, user_id)
+            status = str((member or {}).get("status") or "").strip().lower()
+            is_admin = status in {"administrator", "creator"}
+            self.chat_member_status_cache[cache_key] = {"ts": now_ts, "is_admin": is_admin}
+            return is_admin
+        except Exception:
+            return False
+
+    def _moderate_signal_group_message(self, message):
+        chat_obj = message.get("chat") or {}
+        chat_id = chat_obj.get("id")
+        message_id = message.get("message_id")
+        message_thread_id = message.get("message_thread_id")
+        from_obj = message.get("from") or {}
+        sender_chat = message.get("sender_chat") or {}
+        sender_is_bot = bool(from_obj.get("is_bot"))
+        sender_user_id = from_obj.get("id")
+        normalized_thread = self._normalized_signal_thread_id(chat_id, message_thread_id)
+
+        if not self._should_delete_signal_chat_message(chat_id, message_thread_id):
+            return False
+        if not message_id or sender_is_bot:
+            return False
+        if sender_chat:
+            print(
+                f"[MOD] signal-group moderation skip anonymous-admin chat={chat_id} "
+                f"raw_thread={message_thread_id} normalized_thread={normalized_thread} message_id={message_id}"
+            )
+            return False
+        if sender_user_id and self._is_chat_admin_user(chat_id, sender_user_id):
+            print(
+                f"[MOD] signal-group moderation skip admin chat={chat_id} "
+                f"raw_thread={message_thread_id} normalized_thread={normalized_thread} "
+                f"message_id={message_id} user_id={sender_user_id}"
+            )
+            return False
+
+        deleted = tg.delete_message(chat_id, message_id)
+        print(
+            f"[MOD] signal-group moderation chat={chat_id} raw_thread={message_thread_id} "
+            f"normalized_thread={normalized_thread} message_id={message_id} deleted={deleted}"
+        )
+        return True
 
     def _execution_updates_private_only(self):
         return bool(EXECUTION_UPDATES_PRIVATE_ONLY and self._execution_chat_id())
@@ -1998,6 +2099,21 @@ class PonchBot:
         if not PRIVATE_EXEC_AI_CONTROL_ENABLED or not self._is_private_exec_chat((message.get("chat") or {}).get("id")):
             return False
         text = str(message.get("text") or message.get("caption") or "").strip()
+        cmd = text.lower().split()[0] if text else ""
+        cmd_base = cmd.split("@", 1)[0]
+        if cmd_base == "/scenarios":
+            if not self._is_signal_command_topic((message.get("chat") or {}).get("id"), message.get("message_thread_id")):
+                self._send_signal_thread_only_notice(
+                    chat_id=(message.get("chat") or {}).get("id"),
+                    reply_to_message_id=message.get("message_id"),
+                    message_thread_id=message.get("message_thread_id"),
+                )
+                return True
+            return self._handle_btc_market_command(
+                chat_id=(message.get("chat") or {}).get("id"),
+                reply_to_message_id=message.get("message_id"),
+                message_thread_id=message.get("message_thread_id"),
+            )
         if (message.get("photo") or (message.get("document") or {}).get("mime_type")) and not text:
             return self._handle_private_exec_image_message(message)
         if message.get("photo") or str((message.get("document") or {}).get("mime_type") or "").lower().startswith("image/"):
@@ -4172,6 +4288,7 @@ class PonchBot:
         print(f"  Chat: {CHAT_ID}")
         print(f"{'='*50}")
 
+        tg.set_bot_commands()
         tg.send_startup()
         print("[OK] Startup message sent to Telegram\n")
 
@@ -5336,6 +5453,92 @@ class PonchBot:
         
         print(f"[TG] Daily levels report {'skipped' if self.is_booting else 'sent'}")
 
+    def _send_text_chunks(self, chat_id, text, reply_to_message_id=None, message_thread_id=None, max_chars=3200):
+        raw = str(text or "").strip()
+        if not raw or not chat_id:
+            return
+
+        parts = [p.strip() for p in re.split(r"\n\s*\n", raw) if str(p).strip()]
+        if not parts:
+            parts = [raw]
+
+        chunks = []
+        current = ""
+        for part in parts:
+            candidate = part if not current else f"{current}\n\n{part}"
+            if len(candidate) <= max_chars:
+                current = candidate
+                continue
+            if current:
+                chunks.append(current)
+                current = ""
+            if len(part) <= max_chars:
+                current = part
+                continue
+            lines = [ln.rstrip() for ln in part.splitlines()]
+            line_chunk = ""
+            for line in lines:
+                candidate_line = line if not line_chunk else f"{line_chunk}\n{line}"
+                if len(candidate_line) <= max_chars:
+                    line_chunk = candidate_line
+                    continue
+                if line_chunk:
+                    chunks.append(line_chunk)
+                    line_chunk = ""
+                if len(line) <= max_chars:
+                    line_chunk = line
+                else:
+                    for idx in range(0, len(line), max_chars):
+                        chunks.append(line[idx:idx + max_chars])
+            if line_chunk:
+                current = line_chunk
+        if current:
+            chunks.append(current)
+
+        for idx, chunk in enumerate(chunks):
+            formatted = self._format_private_answer_for_telegram(chunk)
+            if not formatted:
+                continue
+            tg.send(
+                formatted,
+                chat_id=chat_id,
+                parse_mode="HTML",
+                reply_to_message_id=reply_to_message_id if idx == 0 else None,
+                message_thread_id=message_thread_id,
+            )
+
+    def _send_signal_thread_only_notice(self, chat_id, reply_to_message_id=None, message_thread_id=None):
+        target_thread = int(self._signal_thread_id() or 0)
+        if not chat_id or target_thread <= 0:
+            return
+        tg.send(
+            f"Use this command only in topic thread {target_thread}.",
+            chat_id=chat_id,
+            reply_to_message_id=reply_to_message_id,
+            message_thread_id=message_thread_id,
+        )
+
+    def _handle_btc_market_command(self, chat_id, reply_to_message_id=None, message_thread_id=None):
+        if not chat_id:
+            return False
+        try:
+            report = build_btc_market_report(symbol=SYMBOL)
+            self._send_text_chunks(
+                chat_id,
+                report,
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=message_thread_id,
+            )
+        except Exception as e:
+            tg.send(
+                f"BTC analysis failed: {html.escape(str(e))}",
+                chat_id=chat_id,
+                parse_mode="HTML",
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=message_thread_id,
+            )
+        return True
+
     def _process_commands(self):
         """Fetch and handle incoming Telegram messages."""
         updates = tg.get_updates(offset=self.last_update_id + 1)
@@ -5346,7 +5549,19 @@ class PonchBot:
             self.last_update_id = up["update_id"]
             
             message = up.get("message") or up.get("channel_post")
-            if not message or "text" not in message:
+            if not message:
+                continue
+
+            chat_obj = message.get("chat") or {}
+            chat_id = chat_obj.get("id")
+            message_id = message.get("message_id")
+            message_thread_id = message.get("message_thread_id")
+
+            if self._moderate_signal_group_message(message):
+                self._save_state()
+                continue
+
+            if "text" not in message:
                 continue
 
             if self._handle_private_exec_message(message):
@@ -5354,9 +5569,27 @@ class PonchBot:
                 continue
 
             user_id = (message.get("from") or {}).get("id") or (message.get("chat") or {}).get("id")
+            chat_id = chat_id or user_id
+            reply_to_message_id = message_id
             text = message["text"].strip()
+            cmd = text.lower().split()[0] if text else ""
+            cmd_base = cmd.split("@", 1)[0]
             
-            if text == "/start":
+            if cmd_base == "/scenarios":
+                if not self._is_signal_command_topic(chat_id, message_thread_id):
+                    self._send_signal_thread_only_notice(
+                        chat_id=chat_id,
+                        reply_to_message_id=reply_to_message_id,
+                        message_thread_id=message_thread_id,
+                    )
+                    self._save_state()
+                    continue
+                self._handle_btc_market_command(
+                    chat_id=chat_id,
+                    reply_to_message_id=reply_to_message_id,
+                    message_thread_id=message_thread_id,
+                )
+            elif text == "/start":
                 welcome_msg = (
                     f"<b>How to Join:</b>\n\n"
                     f"1. Sign up on Bitunix to start trading:\n"
@@ -5365,7 +5598,15 @@ class PonchBot:
                     f"3. Once verified, you'll receive an invite link to join."
                 )
                 tg.send(welcome_msg, parse_mode="HTML", chat_id=user_id)
-            elif text.startswith("/analytics"):
+            elif cmd_base == "/analytics":
+                if not self._is_signal_command_topic(chat_id, message_thread_id):
+                    self._send_signal_thread_only_notice(
+                        chat_id=chat_id,
+                        reply_to_message_id=reply_to_message_id,
+                        message_thread_id=message_thread_id,
+                    )
+                    self._save_state()
+                    continue
                 try:
                     days = 30
                     parts = text.split()
@@ -5432,9 +5673,20 @@ class PonchBot:
                     )
                     if strategy_rows:
                         msg += "\n<pre>" + "\n".join(strategy_rows) + "</pre>"
-                    tg.send(msg, parse_mode="HTML", chat_id=user_id)
+                    tg.send(
+                        msg,
+                        parse_mode="HTML",
+                        chat_id=chat_id,
+                        reply_to_message_id=reply_to_message_id,
+                        message_thread_id=message_thread_id,
+                    )
                 except Exception as e:
-                    tg.send(f"Analytics failed: {e}", chat_id=user_id)
+                    tg.send(
+                        f"Analytics failed: {e}",
+                        chat_id=chat_id,
+                        reply_to_message_id=reply_to_message_id,
+                        message_thread_id=message_thread_id,
+                    )
 
             elif text.isdigit():
                 # User sent their UID

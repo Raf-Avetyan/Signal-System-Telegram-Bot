@@ -1258,7 +1258,7 @@ class TradeExecutor:
             or (signal.get("meta") or {}).get("strategy")
             or ""
         ).upper()
-        tp_splits = get_tp_splits_for_tf(tf, strategy_name)
+        tp_splits = get_tp_splits_for_tf(tf_name, strategy_name)
         tp_qtys, tp_split_warning = self._split_qty(
             qty,
             min_base_qty=min_base_qty,
