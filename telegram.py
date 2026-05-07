@@ -1,7 +1,7 @@
 ﻿import os
 import json
 import requests
-from config import BOT_TOKEN, SYMBOL, CHAT_ID, PRIVATE_EXEC_CHAT_ID, SIGNAL_CHAT_ID, SIGNAL_MESSAGE_THREAD_ID
+from config import BOT_TOKEN, SYMBOL, CHAT_ID, PRIVATE_EXEC_CHAT_ID, SIGNAL_CHAT_ID, SIGNAL_TRADING_THREAD_ID
 
 API_URL_MSG   = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 API_URL_PHOTO = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
@@ -13,11 +13,15 @@ API_URL_DELETE     = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage"
 API_URL_CHAT_MEMBER = f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMember"
 
 
+def _default_public_chat_id():
+    return SIGNAL_CHAT_ID or None
+
+
 def _default_thread_id_for_chat(chat_id):
     target_chat = str(chat_id or "").strip()
     signal_chat = str(SIGNAL_CHAT_ID or "").strip()
-    if target_chat and signal_chat and target_chat == signal_chat and int(SIGNAL_MESSAGE_THREAD_ID or 0) > 0:
-        return int(SIGNAL_MESSAGE_THREAD_ID)
+    if target_chat and signal_chat and target_chat == signal_chat and int(SIGNAL_TRADING_THREAD_ID or 0) > 0:
+        return int(SIGNAL_TRADING_THREAD_ID)
     return None
 
 
@@ -36,7 +40,7 @@ def get_updates(offset=None):
 
 def send(text, parse_mode=None, chat_id=None, reply_markup=None, reply_to_message_id=None, message_thread_id=None):
     """Send a message via Telegram Bot API."""
-    target_chat = chat_id if chat_id else CHAT_ID
+    target_chat = chat_id if chat_id else _default_public_chat_id()
     try:
         payload = {
             "chat_id": target_chat,
@@ -119,7 +123,7 @@ def set_bot_commands(commands=None):
         {"type": "all_group_chats"},
         {"type": "all_private_chats"},
     ]
-    scoped_chat_id = SIGNAL_CHAT_ID or CHAT_ID
+    scoped_chat_id = SIGNAL_CHAT_ID or PRIVATE_EXEC_CHAT_ID or CHAT_ID
     if scoped_chat_id:
         scopes.extend([
             {"type": "chat", "chat_id": str(scoped_chat_id)},
@@ -145,7 +149,7 @@ def set_bot_commands(commands=None):
 
 def send_execution_notice(title, lines=None, chat_id=None, icon="🔐"):
     """Send a private execution/update notice to the execution channel."""
-    target_chat = chat_id if chat_id else (PRIVATE_EXEC_CHAT_ID or CHAT_ID)
+    target_chat = chat_id if chat_id else (PRIVATE_EXEC_CHAT_ID or SIGNAL_CHAT_ID or None)
     body = ""
     if lines:
         clean_lines = [str(line) for line in lines if str(line).strip()]
@@ -224,7 +228,7 @@ def send_profit_sl_alert(chat_id, message_id, tf):
 
 def edit_message_text(message_id, text, chat_id=None, parse_mode="HTML"):
     """Edit an existing text message."""
-    target_chat = chat_id if chat_id else CHAT_ID
+    target_chat = chat_id if chat_id else _default_public_chat_id()
     try:
         payload = {
             "chat_id": target_chat,
@@ -245,16 +249,17 @@ def edit_message_text(message_id, text, chat_id=None, parse_mode="HTML"):
         return None
 
 
-def send_photo(photo_path, caption=None, chat_id=None):
+def send_photo(photo_path, caption=None, chat_id=None, message_thread_id=None):
     """Send a photo via Telegram Bot API."""
-    target_chat = chat_id if chat_id else CHAT_ID
+    target_chat = chat_id if chat_id else _default_public_chat_id()
     try:
         with open(photo_path, 'rb') as f:
             files = {'photo': f}
             payload = {'chat_id': target_chat}
-            default_thread_id = _default_thread_id_for_chat(target_chat)
-            if default_thread_id:
-                payload["message_thread_id"] = default_thread_id
+            if message_thread_id is None:
+                message_thread_id = _default_thread_id_for_chat(target_chat)
+            if message_thread_id:
+                payload["message_thread_id"] = message_thread_id
             if caption:
                 payload['caption'] = caption
                 payload['parse_mode'] = 'HTML'
@@ -271,7 +276,7 @@ def send_photo(photo_path, caption=None, chat_id=None):
 
 def edit_message_media(message_id, photo_path, caption=None, chat_id=None):
     """Edit the photo of an existing message."""
-    target_chat = chat_id if chat_id else CHAT_ID
+    target_chat = chat_id if chat_id else _default_public_chat_id()
     try:
         with open(photo_path, 'rb') as f:
             media = {
@@ -565,17 +570,17 @@ def get_signal_html(signal_type, side, timeframe, entry, sl, tp1, tp2, tp3,
 def send_scalp_confirmed(timeframe, side, entry, sl, tp1, tp2, tp3,
                          strength, size, score=None, trend=None, reasons=None, chat_id=None,
                          tp_liq_prob=None, tp_liq_usd=None, tp_liq_target=None,
-                         trigger_label=None, initial_sl=None):
+                         trigger_label=None, initial_sl=None, message_thread_id=None):
     """⚡️/🚀 SCALP ENTRY CONFIRMED"""
     html = get_signal_html("SCALP", side, timeframe, entry, sl, tp1, tp2, tp3,
                            score=score, trend=trend, reasons=reasons, size=size,
                            tp_liq_prob=tp_liq_prob, tp_liq_usd=tp_liq_usd, tp_liq_target=tp_liq_target,
                            trigger_label=trigger_label, initial_sl=sl)
-    return send(html, parse_mode="HTML", chat_id=chat_id)
+    return send(html, parse_mode="HTML", chat_id=chat_id, message_thread_id=message_thread_id)
 
 
 def send_strong(side, total_points, confirmations, indicators_list, price=None, sl=None, tp1=None, tp2=None, tp3=None, size=None, chat_id=None,
-                tp_liq_prob=None, tp_liq_usd=None, tp_liq_target=None):
+                tp_liq_prob=None, tp_liq_usd=None, tp_liq_target=None, message_thread_id=None):
     """✅ STRONG CONFLUENCE"""
     tfs = sorted(list(set(ind.get('tf', 'N/A') for ind in indicators_list)))
     tf_summary = ", ".join(tfs)
@@ -583,11 +588,11 @@ def send_strong(side, total_points, confirmations, indicators_list, price=None, 
     html = get_signal_html("STRONG", side, tf_summary, price, sl, tp1, tp2, tp3,
                            indicators=indicators_list, size=size,
                            tp_liq_prob=tp_liq_prob, tp_liq_usd=tp_liq_usd, tp_liq_target=tp_liq_target)
-    return send(html, parse_mode="HTML", chat_id=chat_id)
+    return send(html, parse_mode="HTML", chat_id=chat_id, message_thread_id=message_thread_id)
 
 
 def send_extreme(side, total_points, confirmations, indicators_list, price=None, sl=None, tp1=None, tp2=None, tp3=None, size=None, chat_id=None,
-                 tp_liq_prob=None, tp_liq_usd=None, tp_liq_target=None):
+                 tp_liq_prob=None, tp_liq_usd=None, tp_liq_target=None, message_thread_id=None):
     """🔥 EXTREME CONFLUENCE"""
     tfs = sorted(list(set(ind.get('tf', 'N/A') for ind in indicators_list)))
     tf_summary = ", ".join(tfs)
@@ -595,7 +600,7 @@ def send_extreme(side, total_points, confirmations, indicators_list, price=None,
     html = get_signal_html("EXTREME", side, tf_summary, price, sl, tp1, tp2, tp3,
                            indicators=indicators_list, size=size,
                            tp_liq_prob=tp_liq_prob, tp_liq_usd=tp_liq_usd, tp_liq_target=tp_liq_target)
-    return send(html, parse_mode="HTML", chat_id=chat_id)
+    return send(html, parse_mode="HTML", chat_id=chat_id, message_thread_id=message_thread_id)
 
 
 def update_signal_message(chat_id, msg_id, sig_data):
@@ -705,7 +710,7 @@ def get_daily_levels_html(date_str, daily_open, resistance, resistance_pct,
 
 def send_daily_levels(date_str, daily_open, resistance, resistance_pct,
                       support, support_pct, volatility, volatility_pct,
-                      critical_high, critical_low, indicators=None, chart_path=None, chat_id=None):
+                      critical_high, critical_low, indicators=None, chart_path=None, chat_id=None, message_thread_id=None):
     """
     📊 DAILY LEVELS
     """
@@ -716,17 +721,17 @@ def send_daily_levels(date_str, daily_open, resistance, resistance_pct,
     )
     
     if chart_path:
-        resp = send_photo(chart_path, caption=msg, chat_id=chat_id)
+        resp = send_photo(chart_path, caption=msg, chat_id=chat_id, message_thread_id=message_thread_id)
         return {"response": resp, "html": msg}
     else:
-        resp = send(msg, parse_mode="HTML", chat_id=chat_id)
+        resp = send(msg, parse_mode="HTML", chat_id=chat_id, message_thread_id=message_thread_id)
         return {"response": resp, "html": msg}
         
 # в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
 # PERFORMANCE SUMMARY
 # в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
 
-def send_performance_summary(stats, chat_id=None):
+def send_performance_summary(stats, chat_id=None, message_thread_id=None):
     """Send daily signal performance recap."""
     if not stats or stats["total"] == 0:
         return
@@ -771,7 +776,7 @@ def send_performance_summary(stats, chat_id=None):
         f"Total Signals: {stats['total']}\n"
         f"<pre>{formatted_stats}</pre>"
     )
-    send(msg, parse_mode="HTML", chat_id=chat_id)
+    send(msg, parse_mode="HTML", chat_id=chat_id, message_thread_id=message_thread_id)
 
 
 # в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
@@ -909,19 +914,19 @@ def get_session_open_html(session_name, open_price, current_price=None, history=
         msg += f"\n\n{history}"
     return msg
 
-def send_session_open(session_name, open_price, current_price=None, history=None, high=None, low=None, chart_path=None, chat_id=None):
+def send_session_open(session_name, open_price, current_price=None, history=None, high=None, low=None, chart_path=None, chat_id=None, message_thread_id=None):
     """Send alert when a session opens or bot starts mid-session."""
     msg = get_session_open_html(session_name, open_price, current_price, history, high, low)
         
     if chart_path and os.path.exists(chart_path):
-        resp = send_photo(chart_path, caption=msg, chat_id=chat_id)
+        resp = send_photo(chart_path, caption=msg, chat_id=chat_id, message_thread_id=message_thread_id)
         return {"response": resp, "html": msg}
     else:
-        send(msg, parse_mode="HTML", chat_id=chat_id)
+        send(msg, parse_mode="HTML", chat_id=chat_id, message_thread_id=message_thread_id)
         return None
 
 
-def send_session_summary(session_name, price_open, price_close, signals_count, levels_tested, history=None, high=None, low=None, chart_path=None, chat_id=None):
+def send_session_summary(session_name, price_open, price_close, signals_count, levels_tested, history=None, high=None, low=None, chart_path=None, chat_id=None, message_thread_id=None):
     """Send session recap at session close."""
     change = price_close - price_open
     change_pct = (change / price_open) * 100 if price_open else 0
@@ -948,9 +953,9 @@ def send_session_summary(session_name, price_open, price_close, signals_count, l
         msg += f"\n\n{history}"
         
     if chart_path and os.path.exists(chart_path):
-        return send_photo(chart_path, caption=msg, chat_id=chat_id)
+        return send_photo(chart_path, caption=msg, chat_id=chat_id, message_thread_id=message_thread_id)
     else:
-        send(msg, parse_mode="HTML", chat_id=chat_id)
+        send(msg, parse_mode="HTML", chat_id=chat_id, message_thread_id=message_thread_id)
         return None
 
 
@@ -986,7 +991,7 @@ def send_batched_alerts(alerts, chat_id=None):
 
     send(msg, parse_mode="HTML", chat_id=chat_id)
 
-def send_performance_summary(stats, chat_id=None):
+def send_performance_summary(stats, chat_id=None, message_thread_id=None):
     """📣 DAILY PERFORMANCE SUMMARY (Public)"""
     score_emoji = "🏆" if stats["win_rate"] >= 70 else "📈"
     
@@ -1004,7 +1009,7 @@ def send_performance_summary(stats, chat_id=None):
         f"\n"
         f"<pre>{code_part}</pre>"
     )
-    send(msg, parse_mode="HTML", chat_id=chat_id)
+    send(msg, parse_mode="HTML", chat_id=chat_id, message_thread_id=message_thread_id)
 
 # в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
 # STARTUP / DEBUG

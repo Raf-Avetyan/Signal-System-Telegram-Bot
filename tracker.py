@@ -8,7 +8,15 @@ Persists data to signals_log.json for restart survival.
 import json
 import os
 from datetime import datetime, timezone, timedelta
-from config import BREAKEVEN_WIN_MIN_TP, BREAKEVEN_MOVE_AFTER_TP, BREAKEVEN_FEE_BUFFER_PCT, BITUNIX_TP_SPLITS, get_tp_splits_for_tf
+from config import (
+    BREAKEVEN_WIN_MIN_TP,
+    BREAKEVEN_MOVE_AFTER_TP,
+    BREAKEVEN_FEE_BUFFER_PCT,
+    BITUNIX_TP_SPLITS,
+    get_tp_splits_for_tf,
+    SIGNAL_CHAT_ID,
+    PRIVATE_EXEC_CHAT_ID,
+)
 
 LOG_FILE = os.path.join(os.path.dirname(__file__), "signals_log.json")
 
@@ -18,6 +26,8 @@ class SignalTracker:
 
     def __init__(self):
         self.signals = self._load()
+        if self._normalize_loaded_signal_chats():
+            self._save()
         self._new_this_tick: set = set()  # indices of signals logged this tick
 
     def _load(self):
@@ -37,6 +47,26 @@ class SignalTracker:
                 json.dump(self.signals, f, indent=2)
         except Exception as e:
             print(f"[TRACKER ERROR] Save failed: {e}")
+
+    def _normalize_loaded_signal_chats(self):
+        """Drop legacy public chat targets so old channels never receive updates again."""
+        allowed_chats = {
+            str(SIGNAL_CHAT_ID or "").strip(),
+            str(PRIVATE_EXEC_CHAT_ID or "").strip(),
+        }
+        allowed_chats.discard("")
+        changed = False
+        for sig in self.signals:
+            chat_id = str(sig.get("chat_id") or "").strip()
+            if not chat_id or chat_id in allowed_chats:
+                continue
+            meta = sig.get("meta") or {}
+            meta["legacy_chat_id"] = chat_id
+            sig["meta"] = meta
+            sig["chat_id"] = None
+            sig["msg_id"] = None
+            changed = True
+        return changed
 
     def persist(self):
         """Public wrapper to force-save tracker state immediately."""

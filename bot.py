@@ -21,7 +21,9 @@ from config import (
     VOLUME_AVG_PERIOD, APPROACH_THRESHOLD, APPROACH_COOLDOWN,
     APPROACH_LEVELS, SESSIONS, get_adjusted_sessions, ALERT_BATCH_WINDOW,
     OI_CHANGE_THRESHOLD, LIQ_SQUEEZE_THRESHOLD, LIQ_ALERT_COOLDOWN, CHAT_ID,
-    SIGNAL_CHAT_ID, SIGNAL_MESSAGE_THREAD_ID, SIGNAL_BLOCKED_THREAD_IDS,
+    SIGNAL_CHAT_ID, SIGNAL_TRADING_THREAD_ID, SIGNAL_GENERAL_THREAD_ID,
+    SIGNAL_SESSIONS_THREAD_ID, SIGNAL_ACTIVE_TRADES_THREAD_ID,
+    SIGNAL_SCENARIOS_THREAD_ID, SIGNAL_BLOCKED_THREAD_IDS,
     FAST_MOVE_THRESHOLD, FAST_MOVE_WINDOW, FAST_MOVE_COOLDOWN,
     BITUNIX_REG_LINK, INVITE_LINK, COMMAND_POLL_INTERVAL,
     SCALP_TREND_FILTER_MODE, SCALP_COUNTERTREND_MIN_SCORE,
@@ -263,14 +265,38 @@ class PonchBot:
             self.batch_timer_start = time.time()
 
     def _execution_chat_id(self):
-        return PRIVATE_EXEC_CHAT_ID or CHAT_ID
+        return PRIVATE_EXEC_CHAT_ID or None
 
     def _signal_chat_id(self):
-        return SIGNAL_CHAT_ID or CHAT_ID
+        return SIGNAL_CHAT_ID or None
 
-    def _signal_thread_id(self):
+    def _trading_signal_thread_id(self):
         try:
-            return int(SIGNAL_MESSAGE_THREAD_ID or 0)
+            return int(SIGNAL_TRADING_THREAD_ID or 0)
+        except Exception:
+            return 0
+
+    def _general_thread_id(self):
+        try:
+            return int(SIGNAL_GENERAL_THREAD_ID or 0)
+        except Exception:
+            return 0
+
+    def _sessions_thread_id(self):
+        try:
+            return int(SIGNAL_SESSIONS_THREAD_ID or 0)
+        except Exception:
+            return 0
+
+    def _active_trades_thread_id(self):
+        try:
+            return int(SIGNAL_ACTIVE_TRADES_THREAD_ID or 0)
+        except Exception:
+            return 0
+
+    def _scenarios_thread_id(self):
+        try:
+            return int(SIGNAL_SCENARIOS_THREAD_ID or 0)
         except Exception:
             return 0
 
@@ -291,12 +317,21 @@ class PonchBot:
         except Exception:
             return 0
 
-    def _is_signal_command_topic(self, chat_id, message_thread_id):
+    def _is_specific_signal_topic(self, chat_id, message_thread_id, target_thread_id):
         signal_chat = str(self._signal_chat_id() or "").strip()
         current_chat = str(chat_id or "").strip()
-        signal_thread = int(self._signal_thread_id() or 0)
         current_thread = self._normalized_signal_thread_id(chat_id, message_thread_id)
-        return bool(signal_chat and current_chat == signal_chat and signal_thread > 0 and current_thread == signal_thread)
+        target_thread = int(target_thread_id or 0)
+        return bool(signal_chat and current_chat == signal_chat and target_thread > 0 and current_thread == target_thread)
+
+    def _is_scenarios_topic(self, chat_id, message_thread_id):
+        return self._is_specific_signal_topic(chat_id, message_thread_id, self._scenarios_thread_id())
+
+    def _is_analytics_topic(self, chat_id, message_thread_id):
+        return self._is_specific_signal_topic(chat_id, message_thread_id, self._general_thread_id())
+
+    def _is_signal_command_topic(self, chat_id, message_thread_id):
+        return self._is_specific_signal_topic(chat_id, message_thread_id, self._trading_signal_thread_id())
 
     def _is_blocked_signal_topic(self, chat_id, message_thread_id):
         signal_chat = str(self._signal_chat_id() or "").strip()
@@ -336,27 +371,12 @@ class PonchBot:
         message_id = message.get("message_id")
         message_thread_id = message.get("message_thread_id")
         from_obj = message.get("from") or {}
-        sender_chat = message.get("sender_chat") or {}
         sender_is_bot = bool(from_obj.get("is_bot"))
-        sender_user_id = from_obj.get("id")
         normalized_thread = self._normalized_signal_thread_id(chat_id, message_thread_id)
 
         if not self._should_delete_signal_chat_message(chat_id, message_thread_id):
             return False
         if not message_id or sender_is_bot:
-            return False
-        if sender_chat:
-            print(
-                f"[MOD] signal-group moderation skip anonymous-admin chat={chat_id} "
-                f"raw_thread={message_thread_id} normalized_thread={normalized_thread} message_id={message_id}"
-            )
-            return False
-        if sender_user_id and self._is_chat_admin_user(chat_id, sender_user_id):
-            print(
-                f"[MOD] signal-group moderation skip admin chat={chat_id} "
-                f"raw_thread={message_thread_id} normalized_thread={normalized_thread} "
-                f"message_id={message_id} user_id={sender_user_id}"
-            )
             return False
 
         deleted = tg.delete_message(chat_id, message_id)
@@ -366,8 +386,38 @@ class PonchBot:
         )
         return True
 
+    def _silence_restricted_command(self, message):
+        chat_obj = message.get("chat") or {}
+        chat_id = chat_obj.get("id")
+        message_id = message.get("message_id")
+        chat_type = str(chat_obj.get("type") or "").strip().lower()
+        if chat_id and message_id and chat_type in {"group", "supergroup"}:
+            tg.delete_message(chat_id, message_id)
+        return True
+
+    def _handle_restricted_topic_command(self, message):
+        text = str(message.get("text") or message.get("caption") or "").strip()
+        if not text.startswith("/"):
+            return False
+        cmd = text.lower().split()[0] if text else ""
+        cmd_base = cmd.split("@", 1)[0]
+        chat_id = (message.get("chat") or {}).get("id")
+        message_thread_id = message.get("message_thread_id")
+
+        if cmd_base == "/scenarios" and not self._is_scenarios_topic(chat_id, message_thread_id):
+            return self._silence_restricted_command(message)
+        if cmd_base == "/analytics" and not self._is_analytics_topic(chat_id, message_thread_id):
+            return self._silence_restricted_command(message)
+        return False
+
     def _execution_updates_private_only(self):
         return bool(EXECUTION_UPDATES_PRIVATE_ONLY and self._execution_chat_id())
+
+    def _current_public_signal_chat(self):
+        return str(self._signal_chat_id() or "").strip()
+
+    def _is_current_public_signal(self, sig):
+        return str((sig or {}).get("chat_id") or "").strip() == self._current_public_signal_chat()
 
     def _hedge_mode_enabled(self):
         return str(BITUNIX_POSITION_MODE or "").strip().upper() == "HEDGE"
@@ -2102,18 +2152,15 @@ class PonchBot:
         cmd = text.lower().split()[0] if text else ""
         cmd_base = cmd.split("@", 1)[0]
         if cmd_base == "/scenarios":
-            if not self._is_signal_command_topic((message.get("chat") or {}).get("id"), message.get("message_thread_id")):
-                self._send_signal_thread_only_notice(
-                    chat_id=(message.get("chat") or {}).get("id"),
-                    reply_to_message_id=message.get("message_id"),
-                    message_thread_id=message.get("message_thread_id"),
-                )
+            if not self._is_scenarios_topic((message.get("chat") or {}).get("id"), message.get("message_thread_id")):
                 return True
             return self._handle_btc_market_command(
                 chat_id=(message.get("chat") or {}).get("id"),
                 reply_to_message_id=message.get("message_id"),
                 message_thread_id=message.get("message_thread_id"),
             )
+        if cmd_base == "/analytics":
+            return True
         if (message.get("photo") or (message.get("document") or {}).get("mime_type")) and not text:
             return self._handle_private_exec_image_message(message)
         if message.get("photo") or str((message.get("document") or {}).get("mime_type") or "").lower().startswith("image/"):
@@ -3663,7 +3710,7 @@ class PonchBot:
         lines.append("</pre>")
         msg = "\n".join(lines)
         if not self.is_booting:
-            tg.send(msg, parse_mode="HTML", chat_id=CHAT_ID)
+            tg.send(msg, parse_mode="HTML", chat_id=self._signal_chat_id())
         self._save_state()
 
     def _estimate_tp_liquidity(self, side, entry, tp1, tp2, tp3):
@@ -4667,7 +4714,7 @@ class PonchBot:
                 if abs(move_pct) >= FAST_MOVE_THRESHOLD:
                     if current_time - self.last_market_alert > FAST_MOVE_COOLDOWN:
                         if not self.is_booting:
-                            tg.send_market_alert(move_pct * 100, FAST_MOVE_WINDOW, past_p, curr_p, chat_id=CHAT_ID)
+                            tg.send_market_alert(move_pct * 100, FAST_MOVE_WINDOW, past_p, curr_p, chat_id=self._signal_chat_id())
                         self.last_market_alert = current_time
                         self._save_state()
                         print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Market Alert: {move_pct*100:.1f}%")
@@ -4692,7 +4739,7 @@ class PonchBot:
                     if current_time - self.last_funding_alert > FUNDING_COOLDOWN:
                         direction = "POSITIVE" if rate > 0 else "NEGATIVE"
                         if not self.is_booting:
-                            tg.send_funding_alert(rate, direction, chat_id=CHAT_ID)
+                            tg.send_funding_alert(rate, direction, chat_id=self._signal_chat_id())
                         self.last_funding_alert = current_time
                         print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Funding Alert: {direction} {rate:.4f}")
 
@@ -4882,7 +4929,8 @@ class PonchBot:
                             tp_liq_prob=tp_liq["prob"] if tp_liq else None,
                             tp_liq_usd=tp_liq["size_usd"] if tp_liq else None,
                             tp_liq_target=tp_liq["target"] if tp_liq else None,
-                            chat_id=self._signal_chat_id()
+                            chat_id=self._signal_chat_id(),
+                            message_thread_id=self._active_trades_thread_id(),
                         )
                         msg_id = resp.get("result", {}).get("message_id") if resp else None
                         self.tracker.log_signal(
@@ -4923,7 +4971,8 @@ class PonchBot:
                             tp_liq_prob=tp_liq["prob"] if tp_liq else None,
                             tp_liq_usd=tp_liq["size_usd"] if tp_liq else None,
                             tp_liq_target=tp_liq["target"] if tp_liq else None,
-                            chat_id=self._signal_chat_id()
+                            chat_id=self._signal_chat_id(),
+                            message_thread_id=self._active_trades_thread_id(),
                         )
                         msg_id = resp.get("result", {}).get("message_id") if resp else None
                         self.tracker.log_signal(
@@ -5007,15 +5056,16 @@ class PonchBot:
                     str(sig.get("chat_id") or "") == str(self._execution_chat_id() or "")
                     and not self._has_real_exchange_execution(sig)
                 )
+                current_public_signal = self._is_current_public_signal(sig)
 
-                if sig.get("msg_id") and sig.get("chat_id") and not private_exec_paper_signal:
-                    tg.update_signal_message(sig["chat_id"], sig["msg_id"], sig)
+                if sig.get("msg_id") and current_public_signal and not private_exec_paper_signal:
+                    tg.update_signal_message(self._signal_chat_id(), sig["msg_id"], sig)
 
                 # Public reply alerts keep the original public behavior.
-                if sig.get("msg_id") and sig.get("chat_id") and not private_exec_paper_signal and not suppress_intermediate_notice:
+                if sig.get("msg_id") and current_public_signal and not private_exec_paper_signal and not suppress_intermediate_notice:
                     if evt_type == "TP1":
                         tg.send_tp1_hit_congrats(
-                            sig["chat_id"],
+                            self._signal_chat_id(),
                             sig["msg_id"],
                             sig.get("tf", "Unknown"),
                             side=sig.get("side"),
@@ -5028,7 +5078,7 @@ class PonchBot:
                         )
                     elif evt_type == "TP2":
                         tg.send_tp2_hit_congrats(
-                            sig["chat_id"],
+                            self._signal_chat_id(),
                             sig["msg_id"],
                             sig.get("tf", "Unknown"),
                             side=sig.get("side"),
@@ -5041,11 +5091,11 @@ class PonchBot:
                             single_full=self._is_single_full_tp_execution(sig),
                         )
                     elif evt_type == "TP3":
-                        tg.send_tp3_hit_congrats(sig["chat_id"], sig["msg_id"], sig.get("tf", "Unknown"))
+                        tg.send_tp3_hit_congrats(self._signal_chat_id(), sig["msg_id"], sig.get("tf", "Unknown"))
                     elif evt_type == "ENTRY_CLOSE":
-                        tg.send_breakeven_alert(sig["chat_id"], sig["msg_id"], sig.get("tf", "Unknown"))
+                        tg.send_breakeven_alert(self._signal_chat_id(), sig["msg_id"], sig.get("tf", "Unknown"))
                     elif evt_type == "PROFIT_SL":
-                        tg.send_profit_sl_alert(sig["chat_id"], sig["msg_id"], sig.get("tf", "Unknown"))
+                        tg.send_profit_sl_alert(self._signal_chat_id(), sig["msg_id"], sig.get("tf", "Unknown"))
 
                 exec_chat = self._execution_chat_id()
                 exec_msg_id = ((sig.get("execution") or {}).get("exec_msg_id"))
@@ -5067,7 +5117,7 @@ class PonchBot:
             if self.last_liqs >= LIQ_SQUEEZE_THRESHOLD:
                 if current_time - self.last_liq_alert_time > LIQ_ALERT_COOLDOWN:
                     if not self.is_booting:
-                        tg.send_squeeze_alert(self.last_liqs, latest_price, chat_id=CHAT_ID)
+                        tg.send_squeeze_alert(self.last_liqs, latest_price, chat_id=self._signal_chat_id())
                     self.last_liq_alert_time = current_time
                     print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Liquidation Squeeze: ${self.last_liqs/1e6:.1f}M")
 
@@ -5091,7 +5141,7 @@ class PonchBot:
                         if sig_key not in self.sent_signals:
                             self.sent_signals.add(sig_key)
                             if not self.is_booting:
-                                tg.send_oi_divergence(price_chg*100, oi_chg*100, note, chat_id=CHAT_ID)
+                                tg.send_oi_divergence(price_chg*100, oi_chg*100, note, chat_id=self._signal_chat_id())
                             self._save_state()
                             print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} OI Divergence: {note}")
 
@@ -5162,7 +5212,8 @@ class PonchBot:
                             high=self.session_data[session_id]["high"],
                             low=self.session_data[session_id]["low"],
                             chart_path=chart_path,
-                            chat_id=CHAT_ID
+                            chat_id=self._signal_chat_id(),
+                            message_thread_id=self._sessions_thread_id(),
                         )
                         
                         if resp and "response" in resp:
@@ -5212,7 +5263,19 @@ class PonchBot:
                             chart_path = self._generate_current_chart(f"session_close_{s_name}.png")
 
                             if not self.is_booting:
-                                tg.send_session_summary(s_name, open_p, latest_price, stats["total"], levels, history=history_text, high=s_high, low=s_low, chart_path=chart_path, chat_id=CHAT_ID)
+                                tg.send_session_summary(
+                                    s_name,
+                                    open_p,
+                                    latest_price,
+                                    stats["total"],
+                                    levels,
+                                    history=history_text,
+                                    high=s_high,
+                                    low=s_low,
+                                    chart_path=chart_path,
+                                    chat_id=self._signal_chat_id(),
+                                    message_thread_id=self._sessions_thread_id(),
+                                )
                             
                             # Save to history for NEXT sessions
                             change = latest_price - open_p
@@ -5289,7 +5352,7 @@ class PonchBot:
                             low=s_data.get("low")
                         )
                         if not self.is_booting:
-                            res = tg.edit_message_media(info["msg_id"], chart_path, caption=new_html, chat_id=CHAT_ID)
+                            res = tg.edit_message_media(info["msg_id"], chart_path, caption=new_html, chat_id=self._signal_chat_id())
                             if res == "DELETED":
                                 del self.session_msg_ids[s_id]
                                 self._save_state()
@@ -5335,7 +5398,7 @@ class PonchBot:
                             indicators=new_inds
                         )
                         if not self.is_booting:
-                            tg.edit_message_media(d_msg_id, chart_path, caption=new_html, chat_id=CHAT_ID)
+                            tg.edit_message_media(d_msg_id, chart_path, caption=new_html, chat_id=self._signal_chat_id())
                         else:
                             print(f"  [TG] Skipped editing daily report (booting)")
 
@@ -5430,7 +5493,7 @@ class PonchBot:
                 critical_low=self.levels.get("DumpMax", 0),
                 indicators=indicators,
                 chart_path=chart_path,
-                chat_id=CHAT_ID
+                chat_id=self._signal_chat_id()
             )
         else:
             print(f"  [TG] Skipped sending daily levels report (booting)")
@@ -5507,17 +5570,6 @@ class PonchBot:
                 message_thread_id=message_thread_id,
             )
 
-    def _send_signal_thread_only_notice(self, chat_id, reply_to_message_id=None, message_thread_id=None):
-        target_thread = int(self._signal_thread_id() or 0)
-        if not chat_id or target_thread <= 0:
-            return
-        tg.send(
-            f"Use this command only in topic thread {target_thread}.",
-            chat_id=chat_id,
-            reply_to_message_id=reply_to_message_id,
-            message_thread_id=message_thread_id,
-        )
-
     def _handle_btc_market_command(self, chat_id, reply_to_message_id=None, message_thread_id=None):
         if not chat_id:
             return False
@@ -5561,6 +5613,10 @@ class PonchBot:
                 self._save_state()
                 continue
 
+            if self._handle_restricted_topic_command(message):
+                self._save_state()
+                continue
+
             if "text" not in message:
                 continue
 
@@ -5576,12 +5632,8 @@ class PonchBot:
             cmd_base = cmd.split("@", 1)[0]
             
             if cmd_base == "/scenarios":
-                if not self._is_signal_command_topic(chat_id, message_thread_id):
-                    self._send_signal_thread_only_notice(
-                        chat_id=chat_id,
-                        reply_to_message_id=reply_to_message_id,
-                        message_thread_id=message_thread_id,
-                    )
+                if not self._is_scenarios_topic(chat_id, message_thread_id):
+                    self._silence_restricted_command(message)
                     self._save_state()
                     continue
                 self._handle_btc_market_command(
@@ -5599,12 +5651,8 @@ class PonchBot:
                 )
                 tg.send(welcome_msg, parse_mode="HTML", chat_id=user_id)
             elif cmd_base == "/analytics":
-                if not self._is_signal_command_topic(chat_id, message_thread_id):
-                    self._send_signal_thread_only_notice(
-                        chat_id=chat_id,
-                        reply_to_message_id=reply_to_message_id,
-                        message_thread_id=message_thread_id,
-                    )
+                if not self._is_analytics_topic(chat_id, message_thread_id):
+                    self._silence_restricted_command(message)
                     self._save_state()
                     continue
                 try:
@@ -5721,7 +5769,11 @@ class PonchBot:
             stats = self.tracker.get_daily_summary(window_end)
             if stats:
                 if not self.is_booting:
-                    tg.send_performance_summary(stats, chat_id=CHAT_ID)
+                    tg.send_performance_summary(
+                        stats,
+                        chat_id=self._signal_chat_id(),
+                        message_thread_id=self._general_thread_id(),
+                    )
                 else:
                     print(f"  [TG] Skipped sending performance summary (booting)")
             else:
@@ -6037,7 +6089,7 @@ class PonchBot:
                         },
                         callback=tg.send_volume_spike,
                         args=(tf, current_vol, avg_vol, current_vol/avg_vol, close),
-                        chat_id=CHAT_ID
+                        chat_id=self._signal_chat_id()
                     )
                     print(f"  [SIG] Volume Spike [{tf}] {current_vol/avg_vol:.1f}x avg vol")
 
@@ -6090,7 +6142,7 @@ class PonchBot:
                             },
                             callback=tg.send_approaching_level,
                             args=(lvl_name, lvl_price, close, closest_dist * 100),
-                            chat_id=CHAT_ID
+                            chat_id=self._signal_chat_id()
                         )
                         self.approach_alerts[lvl_name] = current_time
                         self._save_state()
@@ -6115,7 +6167,7 @@ class PonchBot:
                     self._save_state()
                     
                     if not self.is_booting:
-                        tg.send_liquidity_sweep(**sw, chat_id=CHAT_ID)
+                        tg.send_liquidity_sweep(**sw, chat_id=self._signal_chat_id())
                     
                     print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Liquidity Sweep: {sw['level']} ({sw['side']})")
 
@@ -6144,7 +6196,7 @@ class PonchBot:
                     self.sent_signals.add(sig_key)
                     
                     if not self.is_booting:
-                        tg.send_volatility_touch(**vt, chat_id=CHAT_ID)
+                        tg.send_volatility_touch(**vt, chat_id=self._signal_chat_id())
                         self._save_state()
                     
                     print(f"  [TG] {'Skipped' if self.is_booting else 'Sent'} Vol Zone Touch: {vt['level']} ({vt['side']})")
@@ -6644,7 +6696,8 @@ class PonchBot:
                         tp_liq_usd=tp_liq["size_usd"] if tp_liq else None,
                         tp_liq_target=tp_liq["target"] if tp_liq else None,
                         trigger_label=trigger_label,
-                        chat_id=self._signal_chat_id()
+                        chat_id=self._signal_chat_id(),
+                        message_thread_id=self._active_trades_thread_id(),
                     )
                 msg_id = resp.get("result", {}).get("message_id") if resp else None
                 self._save_state()
@@ -6705,39 +6758,58 @@ class PonchBot:
 if __name__ == "__main__":
     import sys
     import os
+    import time
 
-    lock_file = "bot.lock"
-    
-    # Strict singleton check with PID awareness
+    lock_file = os.path.join(os.path.dirname(__file__), "bot.lock")
+
+    def _pid_is_running(pid):
+        try:
+            pid = int(pid)
+        except Exception:
+            return False
+        if pid <= 0:
+            return False
+        if os.name == "nt":
+            try:
+                import ctypes
+                PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                handle = ctypes.windll.kernel32.OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION,
+                    False,
+                    pid,
+                )
+                if not handle:
+                    return False
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            except Exception:
+                return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except Exception:
+            return False
+
     if os.path.exists(lock_file):
-        import time
         try:
             with open(lock_file, "r") as f:
                 old_pid = int(f.read().strip())
-            
-            # Check if that PID is actually running (Unix/Linux check)
-            try:
-                os.kill(old_pid, 0)
-                is_running = True
-            except (OSError, ProcessLookupError, ValueError):
-                is_running = False
 
-            # If it's running AND it's a recent update (heartbeat)
-            if is_running and (time.time() - os.path.getmtime(lock_file) < 60):
+            if _pid_is_running(old_pid) and (time.time() - os.path.getmtime(lock_file) < 60):
                 print(f"\n[FATAL] Another instance (PID {old_pid}) is already running.")
                 sys.exit(1)
             else:
-                # Process is dead OR lock is stale
                 os.remove(lock_file)
         except Exception:
-            # Fallback if file is corrupted or OS doesn't support os.kill
             if time.time() - os.getmtime(lock_file) < 60:
                 print(f"\n[FATAL] Stale lock detected, but it's too fresh. Exiting.")
                 sys.exit(1)
             else:
-                try: os.remove(lock_file)
-                except: pass
-            
+                try:
+                    os.remove(lock_file)
+                except Exception:
+                    pass
+
     with open(lock_file, "w") as f:
         f.write(str(os.getpid()))
 
@@ -6756,6 +6828,3 @@ if __name__ == "__main__":
     finally:
         if os.path.exists(lock_file):
             os.remove(lock_file)
-
-
-

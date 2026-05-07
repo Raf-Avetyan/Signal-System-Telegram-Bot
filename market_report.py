@@ -38,6 +38,10 @@ def _pct(current, reference):
     return ((current_val / reference_val) - 1.0) * 100.0
 
 
+def _fmt_price(value):
+    return f"{_safe_float(value):,.2f}"
+
+
 def _bias_value(bias_text):
     bias = str(bias_text or "").strip().lower()
     if "trending bullish" in bias:
@@ -49,10 +53,6 @@ def _bias_value(bias_text):
     if bias == "bearish":
         return -1.0
     return 0.0
-
-
-def _fmt_price(value):
-    return f"{_safe_float(value):,.2f}"
 
 
 def _cluster_levels(items, tolerance_pct=0.35):
@@ -141,9 +141,7 @@ def _fetch_bitunix_ticker(symbol=SYMBOL):
     client = BitunixFuturesClient()
     raw = client.get_tickers(symbol)
     rows = raw.get("data") or []
-    if not rows:
-        return {}
-    return rows[0] or {}
+    return rows[0] if rows else {}
 
 
 def _fetch_bitunix_funding(symbol=SYMBOL):
@@ -156,12 +154,8 @@ def _fetch_bitunix_depth(symbol=SYMBOL, limit="50"):
     client = BitunixFuturesClient()
     raw = client.get_depth(symbol, str(limit))
     payload = raw.get("data") or {}
-    bids = []
-    asks = []
-    for price, size in payload.get("bids", []) or []:
-        bids.append([_safe_float(price), _safe_float(size)])
-    for price, size in payload.get("asks", []) or []:
-        asks.append([_safe_float(price), _safe_float(size)])
+    bids = [[_safe_float(px), _safe_float(sz)] for px, sz in (payload.get("bids") or [])]
+    asks = [[_safe_float(px), _safe_float(sz)] for px, sz in (payload.get("asks") or [])]
     return {"bids": bids, "asks": asks}
 
 
@@ -235,7 +229,6 @@ def _tf_summary(tf, df):
         bias = "Ranging"
 
     channel_events = check_channel_signals(enriched)
-    channel_signal = channel_events[0] if channel_events else None
     return {
         "tf": tf,
         "df": enriched,
@@ -249,7 +242,7 @@ def _tf_summary(tf, df):
         "bias": bias,
         "range_high": recent_high,
         "range_low": recent_low,
-        "channel_signal": channel_signal,
+        "channel_signal": channel_events[0] if channel_events else None,
         "active_pullback": check_htf_pullback_entry(enriched, tf),
         "active_reclaim": check_one_h_reclaim_entry(enriched, tf),
     }
@@ -419,56 +412,28 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_rate):
             }
         )
 
-    if nearest_support:
-        breakdown = _safe_float(nearest_support.get("price"))
-        entry = breakdown - max(current_price * 0.0012, atr_1h * 0.18)
-        stop = breakdown + max(current_price * 0.0020, atr_1h * 0.55)
-        risk = max(stop - entry, atr_1h * 0.55)
-        probability = 47.0 + max(0.0, -overall_bias_score) * 1.4
-        if tf_15m.get("bias") in {"Bearish", "Trending Bearish"}:
-            probability += 3.0
-        if tf_1h.get("bias") in {"Bearish", "Trending Bearish"}:
-            probability += 4.0
-        if book_pressure == "bearish":
-            probability += 2.0
-        probability = max(34.0, min(76.0, probability))
-        risk_style, risk_pct = _scenario_risk(probability, trend_aligned=overall_bias_score <= 0)
-        scenarios.append(
-            {
-                "title": "SHORT breakdown",
-                "side": "SHORT",
-                "probability": probability,
-                "entry_low": entry,
-                "entry_high": entry,
-                "stop": stop,
-                "tp1": min(_safe_float((next_support or {}).get("price"), entry - risk * 1.2), entry - risk * 1.2),
-                "tp2": entry - risk * 2.2,
-                "tp3": entry - risk * 3.2,
-                "risk_style": risk_style,
-                "risk_pct": risk_pct,
-                "trigger": f"Take only after a close below {_format_cluster(nearest_support)} and failed reclaim.",
-                "note": "Use this only if support is clearly lost. Fast reclaim means skip.",
-            }
-        )
-
-    return sorted(scenarios, key=lambda row: row.get("probability", 0), reverse=True)[:2]
+    scenarios = sorted(scenarios, key=lambda row: row.get("probability", 0), reverse=True)
+    return scenarios[:2]
 
 
 def _scenario_html(idx, scenario):
     side = str(scenario.get("side") or "").upper()
-    icon = "🟢" if side == "LONG" else "🔴"
+    icon = "\U0001F7E2" if side == "LONG" else "\U0001F534"
+    title = str(scenario.get("title") or "Setup")
     if abs(_safe_float(scenario.get("entry_high")) - _safe_float(scenario.get("entry_low"))) > 1e-9:
         entry_text = f"{_fmt_price(scenario.get('entry_low'))} - {_fmt_price(scenario.get('entry_high'))}"
     else:
         entry_text = _fmt_price(scenario.get("entry_low"))
     return (
-        f"{icon} <b>{idx}. {scenario.get('title').upper()}</b>\n"
-        f"<blockquote>🎯 Entry: <b>{entry_text}</b>\n"
-        f"🛑 SL: {_fmt_price(scenario.get('stop'))}\n"
-        f"💰 TP: {_fmt_price(scenario.get('tp1'))} / {_fmt_price(scenario.get('tp2'))} / {_fmt_price(scenario.get('tp3'))}\n"
-        f"📊 Chance: {float(scenario.get('probability') or 0):.0f}% | Risk: {float(scenario.get('risk_pct') or 0):.2f}%\n\n</blockquote>"
+        f"{icon} <b>{idx}. {title}</b>\n"
+        f"<blockquote>"
+        f"Entry: {entry_text}\n"
+        f"SL: {_fmt_price(scenario.get('stop'))}\n"
+        f"TP: {_fmt_price(scenario.get('tp1'))} / {_fmt_price(scenario.get('tp2'))} / {_fmt_price(scenario.get('tp3'))}"
+        f"</blockquote>\n"
+        f"Chance: <b>{float(scenario.get('probability') or 0):.0f}%</b> | Risk: <b>{float(scenario.get('risk_pct') or 0):.2f}%</b>\n"
         f"<blockquote>{scenario.get('trigger')}</blockquote>\n"
-        f"<blockquote>{scenario.get('note')}</blockquote>"
+        f"{scenario.get('note')}"
     )
 
 
@@ -515,13 +480,38 @@ def build_btc_market_report(symbol=SYMBOL):
     else:
         patience_zone = _fmt_price(top.get("entry_low"))
 
-    blocks = [f"🧭 <b>BTC SCENARIOS</b>\n💵 Price: {_fmt_price(current_price)}", _scenario_html(1, scenarios[0])]
+    bias_1h = str((tf_map.get("1h") or {}).get("bias") or "n/a")
+    bias_4h = str((tf_map.get("4h") or {}).get("bias") or "n/a")
+    daily_change = _safe_float((tf_map.get("1d") or {}).get("period_change_pct"))
+    weekly_change = _safe_float((tf_map.get("1w") or {}).get("period_change_pct"))
+    support_clusters, resistance_clusters = _nearest_levels(levels, current_price, tf_map)
+    key_support = _format_cluster(support_clusters[0]) if support_clusters else "n/a"
+    key_resistance = _format_cluster(resistance_clusters[0]) if resistance_clusters else "n/a"
+    preferred_side = str(top.get("side") or "").upper() or "WAIT"
+
+    blocks = [
+        f"\U0001F4CD <b>BTC Scenarios</b>\nPrice: {_fmt_price(current_price)}",
+        (
+            "<blockquote>"
+            f"Funding: {funding_rate_raw:+.6f}%\n"
+            f"Flow: {book_ctx.get('pressure', 'balanced')}\n"
+            f"1H bias: {bias_1h}\n"
+            f"4H bias: {bias_4h}\n"
+            f"1D move: {daily_change:+.2f}%\n"
+            f"1W move: {weekly_change:+.2f}%\n"
+            f"Key support: {key_support}\n"
+            f"Key resistance: {key_resistance}\n"
+            f"Preferred side: {preferred_side}"
+            "</blockquote>"
+        ),
+        _scenario_html(1, scenarios[0]),
+    ]
     if len(scenarios) > 1:
         blocks.append(_scenario_html(2, scenarios[1]))
     blocks.append(
         "<blockquote>"
-        f"Best wait zone: {patience_zone}. "
-        "If BTC stays in the middle with no sweep or reclaim, skip."
+        f"Best wait zone: {patience_zone}\n"
+        "If BTC stays in the middle with no sweep, rejection, or reclaim, skip."
         "</blockquote>"
     )
     return "\n\n".join(blocks)
