@@ -409,7 +409,7 @@ class PonchBot:
         chat_id = (message.get("chat") or {}).get("id")
         message_thread_id = message.get("message_thread_id")
 
-        if cmd_base in {"/scenarios", "/shortplans"} and not self._is_scenarios_topic(chat_id, message_thread_id):
+        if cmd_base in {"/scenarios", "/intraday"} and not self._is_scenarios_topic(chat_id, message_thread_id):
             return self._silence_restricted_command(message)
         if cmd_base == "/analytics" and not self._is_analytics_topic(chat_id, message_thread_id):
             return self._silence_restricted_command(message)
@@ -2197,14 +2197,14 @@ class PonchBot:
         text = str(message.get("text") or message.get("caption") or "").strip()
         cmd = text.lower().split()[0] if text else ""
         cmd_base = cmd.split("@", 1)[0]
-        if cmd_base in {"/scenarios", "/shortplans"}:
+        if cmd_base in {"/scenarios", "/intraday"}:
             if not self._is_scenarios_topic((message.get("chat") or {}).get("id"), message.get("message_thread_id")):
                 return True
             return self._handle_btc_market_command(
                 chat_id=(message.get("chat") or {}).get("id"),
                 reply_to_message_id=message.get("message_id"),
                 message_thread_id=message.get("message_thread_id"),
-                mode="short_term" if cmd_base == "/shortplans" else "swing",
+                mode="short_term" if cmd_base == "/intraday" else "swing",
             )
         if cmd_base == "/analytics":
             return True
@@ -5766,7 +5766,7 @@ class PonchBot:
             cmd = text.lower().split()[0] if text else ""
             cmd_base = cmd.split("@", 1)[0]
             
-            if cmd_base in {"/scenarios", "/shortplans"}:
+            if cmd_base in {"/scenarios", "/intraday"}:
                 if not self._is_scenarios_topic(chat_id, message_thread_id):
                     self._silence_restricted_command(message)
                     self._save_state()
@@ -5775,7 +5775,7 @@ class PonchBot:
                     chat_id=chat_id,
                     reply_to_message_id=reply_to_message_id,
                     message_thread_id=message_thread_id,
-                    mode="short_term" if cmd_base == "/shortplans" else "swing",
+                    mode="short_term" if cmd_base == "/intraday" else "swing",
                 )
             elif text == "/start":
                 welcome_msg = (
