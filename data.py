@@ -447,36 +447,54 @@ def fetch_open_interest(symbol=SYMBOL):
     return None
 
 
-def fetch_liquidations(symbol=SYMBOL):
+def fetch_liquidation_orders(symbol=SYMBOL, limit=100):
     """
-    Fetch recent liquidation history for the instrument.
-    Aggregates the total USD value of liquidations in the last block.
+    Fetch recent liquidation orders for the instrument.
+    Returns a normalized list with side, bankruptcy price, size, and USD value.
     """
     okx_symbol = symbol.replace("USDT", "-USDT-SWAP")
     url = f"{OKX_BASE}/api/v5/public/liquidation-orders"
-    # instType=SWAP, mgnMode=cross/isolated
     params = {
         "instType": "SWAP",
         "instId": okx_symbol,
         "state": "filled",
-        "limit": 50
+        "limit": min(max(int(limit), 1), 100),
     }
 
     try:
         resp = requests.get(url, params=params, timeout=10)
         data = resp.json()
         if data.get("code") == "0" and data.get("data"):
-            total_usd = 0
+            rows = []
             for order in data["data"]:
-                # posSide: long/short
-                sz = float(order.get("sz", 0))
-                price = float(order.get("bkPx", 0)) # Bankruptcy price
-                total_usd += sz * price
-            return total_usd
-    except Exception as e:
-        # print(f"[DEBUG] No recent liquidations found or error: {e}")
+                side = str(order.get("posSide") or "").strip().lower()
+                size = float(order.get("sz", 0) or 0)
+                price = float(order.get("bkPx", 0) or 0)
+                usd_value = size * price
+                if price <= 0 or usd_value <= 0:
+                    continue
+                rows.append(
+                    {
+                        "side": side,
+                        "price": price,
+                        "size": size,
+                        "usd_value": usd_value,
+                        "ts": str(order.get("ts") or ""),
+                    }
+                )
+            return rows
+    except Exception:
         pass
-    return 0
+    return []
+
+
+def fetch_liquidations(symbol=SYMBOL):
+    """
+    Fetch recent liquidation history for the instrument.
+    Aggregates the total USD value of liquidations in the last block.
+    """
+    rows = fetch_liquidation_orders(symbol=symbol, limit=50)
+    return sum(float(row.get("usd_value", 0) or 0) for row in rows)
 
 
 def fetch_order_book(symbol=SYMBOL, depth=400):

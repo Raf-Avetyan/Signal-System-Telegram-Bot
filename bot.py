@@ -146,6 +146,7 @@ class PonchBot:
         state = self._load_state()
         self.daily_report_msg_id = state.get("daily_report_msg_id")
         self.session_msg_ids     = state.get("session_msg_ids", {})
+        self.session_thread_message_ids = state.get("session_thread_message_ids", [])
         self.confirmations.from_dict(state.get("confirmations", {})) # Restore confirmation state
         self.session_data        = state.get("session_data", {})
         self.last_levels_date    = state.get("last_levels_date")
@@ -156,6 +157,7 @@ class PonchBot:
         self.last_market_alert   = state.get("last_market_alert", 0)
         self.last_summary_date   = state.get("last_summary_date")      # New: Track summary schedule
         self.last_daily_report_date = state.get("last_daily_report_date")
+        self.last_session_thread_cleanup_date = state.get("last_session_thread_cleanup_date")
         self.last_exec_snapshot_date = state.get("last_exec_snapshot_date")
         self.pending_exec_action = state.get("pending_exec_action")
         self.last_exec_suggested_action = state.get("last_exec_suggested_action")
@@ -328,7 +330,7 @@ class PonchBot:
         return self._is_specific_signal_topic(chat_id, message_thread_id, self._scenarios_thread_id())
 
     def _is_analytics_topic(self, chat_id, message_thread_id):
-        return self._is_specific_signal_topic(chat_id, message_thread_id, self._general_thread_id())
+        return self._is_specific_signal_topic(chat_id, message_thread_id, self._trading_signal_thread_id())
 
     def _is_signal_command_topic(self, chat_id, message_thread_id):
         return self._is_specific_signal_topic(chat_id, message_thread_id, self._trading_signal_thread_id())
@@ -4572,6 +4574,7 @@ class PonchBot:
             payload = {
                 "daily_report_msg_id": self.daily_report_msg_id,
                 "session_msg_ids": self.session_msg_ids,
+                "session_thread_message_ids": self.session_thread_message_ids,
                 "confirmations": self.confirmations.to_dict(),
                 "session_data": serializable_sessions,
                 "last_levels_date": self.last_levels_date,
@@ -4582,6 +4585,7 @@ class PonchBot:
                 "last_market_alert": self.last_market_alert,
                 "last_summary_date": self.last_summary_date,
                 "last_daily_report_date": self.last_daily_report_date,
+                "last_session_thread_cleanup_date": self.last_session_thread_cleanup_date,
                 "last_exec_snapshot_date": self.last_exec_snapshot_date,
                 "pending_exec_action": self.pending_exec_action,
                 "last_exec_suggested_action": self.last_exec_suggested_action,
@@ -4648,6 +4652,45 @@ class PonchBot:
         except Exception as e:
             print(f"[CHARTING] Failed to generate session chart: {e}")
         return None
+
+    def _track_session_thread_message_id(self, msg_id):
+        try:
+            msg_id = int(msg_id or 0)
+        except Exception:
+            return
+        if msg_id <= 0:
+            return
+        existing = {int(x) for x in (self.session_thread_message_ids or []) if str(x).strip().isdigit()}
+        if msg_id in existing:
+            return
+        self.session_thread_message_ids.append(msg_id)
+
+    def _cleanup_sessions_thread_messages(self, today=None):
+        target_chat = self._signal_chat_id()
+        if not target_chat:
+            self.session_thread_message_ids = []
+            if today:
+                self.last_session_thread_cleanup_date = today
+            return
+
+        cleaned = []
+        for raw_id in list(self.session_thread_message_ids or []):
+            try:
+                msg_id = int(raw_id)
+            except Exception:
+                continue
+            if msg_id <= 0:
+                continue
+            deleted = tg.delete_message(target_chat, msg_id)
+            cleaned.append((msg_id, deleted))
+
+        if cleaned:
+            ok_count = sum(1 for _, deleted in cleaned if deleted)
+            print(f"[SESSION] Daily cleanup removed {ok_count}/{len(cleaned)} session-thread messages.")
+
+        self.session_thread_message_ids = []
+        if today:
+            self.last_session_thread_cleanup_date = today
 
     def _tick(self):
         """One iteration of the main loop."""
@@ -5220,6 +5263,7 @@ class PonchBot:
                             msg_data = resp["response"]
                             if msg_data and "result" in msg_data:
                                 msg_id = msg_data["result"]["message_id"]
+                                self._track_session_thread_message_id(msg_id)
                                 # Now we store metadata so we can REGENERATE the text later
                                 self.session_msg_ids[session_id] = {
                                     "msg_id": msg_id,
@@ -5263,7 +5307,7 @@ class PonchBot:
                             chart_path = self._generate_current_chart(f"session_close_{s_name}.png")
 
                             if not self.is_booting:
-                                tg.send_session_summary(
+                                summary_resp = tg.send_session_summary(
                                     s_name,
                                     open_p,
                                     latest_price,
@@ -5276,6 +5320,8 @@ class PonchBot:
                                     chat_id=self._signal_chat_id(),
                                     message_thread_id=self._sessions_thread_id(),
                                 )
+                                if summary_resp and "result" in summary_resp:
+                                    self._track_session_thread_message_id(summary_resp["result"].get("message_id"))
                             
                             # Save to history for NEXT sessions
                             change = latest_price - open_p
@@ -5414,6 +5460,8 @@ class PonchBot:
             print(f"\n[SYSTEM] New day detected ({today}). Resetting data...")
             
             # 1. Reset everything for the new day
+            if self.last_session_thread_cleanup_date != today:
+                self._cleanup_sessions_thread_messages(today=today)
             self.daily_report_msg_id = None 
             self._update_levels()
             
@@ -5421,6 +5469,7 @@ class PonchBot:
             self.sent_signals.clear()  # Reset duplicate tracking
             self.session_history.clear() # Reset session history for new day
             self.session_msg_ids.clear() # Reset message IDs for new day
+            self.session_thread_message_ids.clear()
             self.session_data.clear()   # Actually clear old sessions data
             self.sent_sessions.clear()   # Reset session recap tracking
             self.approach_alerts.clear() # Reset level approach tracking
@@ -5662,65 +5711,38 @@ class PonchBot:
                         days = max(1, min(180, int(parts[1])))
                     stats = self.tracker.get_analytics(days=days)
                     totals = stats["totals"]
-                    by_type = stats.get("by_signal_type", {})
+                    best_tf = stats.get("best_timeframe")
+                    best_strategy = stats.get("best_strategy")
 
-                    def fmt_type_line(name):
-                        b = by_type.get(name, {})
-                        generated = int(b.get("generated", 0))
-                        closed = int(b.get("trades", 0))
-                        wr = float(b.get("win_rate", 0.0))
-                        hit = float(b.get("hit_rate", 0.0))
-                        avg_r = float(b.get("avg_r", 0.0))
-                        return (
-                            f"{name:<7} g={generated:<3} c={closed:<3} "
-                            f"wr={wr:>5.1f}% hit={hit:>5.1f}% avgR={avg_r:+.2f}"
-                        )
-
-                    def fmt_named_line(label, item):
+                    def fmt_best(item):
                         if not item:
-                            return f"{label}: n/a"
+                            return "n/a"
                         return (
-                            f"{label}: {item['name']} | wr={float(item.get('win_rate', 0.0)):.1f}% "
-                            f"avgR={float(item.get('avg_r', 0.0)):+.2f} trades={int(item.get('trades', 0) or 0)}"
-                        )
-
-                    by_strategy = stats.get("by_strategy", {})
-                    strategy_rows = []
-                    for name, bucket in sorted(
-                        by_strategy.items(),
-                        key=lambda item: (-float(item[1].get("win_rate", 0.0)), -int(item[1].get("trades", 0) or 0), item[0])
-                    )[:4]:
-                        strategy_rows.append(
-                            f"{name:<22.22} wr={float(bucket.get('win_rate', 0.0)):>5.1f}% "
-                            f"tr={int(bucket.get('trades', 0) or 0):<3} avgR={float(bucket.get('avg_r', 0.0)):+.2f}"
+                            f"{item['name']} | wr {float(item.get('win_rate', 0.0)):.1f}%"
+                            f" | {int(item.get('trades', 0) or 0)} trades"
                         )
 
                     msg = (
-                        f"<b>SIGNAL ANALYTICS ({days}d)</b>\n\n"
+                        f"📊 <b>Signal Analytics</b>\n"
+                        f"<blockquote>{days} day performance snapshot</blockquote>\n\n"
+                        f"<blockquote>"
+                        f"Win rate: {totals['win_rate']:.1f}%\n"
+                        f"Avg R: {totals['avg_r']:+.2f}\n"
+                        f"Expectancy: {totals['expectancy_r']:+.2f}R"
+                        f"</blockquote>\n\n"
                         f"<pre>"
-                        f"Generated:   {totals['generated']}\n"
-                        f"Closed:      {totals['trades']}\n"
-                        f"Open:        {totals['open']}\n"
-                        f"Wins:        {totals['wins']}\n"
-                        f"Losses:      {totals['losses']}\n"
-                        f"Breakeven:   {totals['breakeven']}\n"
-                        f"Win Rate:    {totals['win_rate']:.1f}%\n"
-                        f"Hit Rate:    {totals['hit_rate']:.1f}%\n"
-                        f"Avg R:       {totals['avg_r']:.2f}\n"
-                        f"Expectancy:  {totals['expectancy_r']:.2f}R\n"
-                        f"------------------------------\n"
-                        f"{fmt_type_line('SCALP')}\n"
-                        f"{fmt_type_line('STRONG')}\n"
-                        f"{fmt_type_line('EXTREME')}\n"
-                        f"------------------------------\n"
-                        f"{fmt_named_line('Best TF', stats.get('best_timeframe'))}\n"
-                        f"{fmt_named_line('Worst TF', stats.get('worst_timeframe'))}\n"
-                        f"{fmt_named_line('Best Mod', stats.get('best_strategy'))}\n"
-                        f"{fmt_named_line('Worst Mod', stats.get('worst_strategy'))}"
-                        f"</pre>"
+                        f"Generated  {totals['generated']}\n"
+                        f"Closed     {totals['trades']}\n"
+                        f"Open       {totals['open']}\n"
+                        f"Wins       {totals['wins']}\n"
+                        f"Losses     {totals['losses']}\n"
+                        f"Breakeven  {totals['breakeven']}"
+                        f"</pre>\n\n"
+                        f"🏆 <b>Best TF</b>\n"
+                        f"<blockquote>{fmt_best(best_tf)}</blockquote>\n\n"
+                        f"🧠 <b>Best Model</b>\n"
+                        f"<blockquote>{fmt_best(best_strategy)}</blockquote>"
                     )
-                    if strategy_rows:
-                        msg += "\n<pre>" + "\n".join(strategy_rows) + "</pre>"
                     tg.send(
                         msg,
                         parse_mode="HTML",
