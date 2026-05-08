@@ -162,6 +162,9 @@ class PonchBot:
         self.last_exec_snapshot_date = state.get("last_exec_snapshot_date")
         self.last_liquidation_map_date = state.get("last_liquidation_map_date")
         self.last_education_post_date = state.get("last_education_post_date")
+        self.last_education_post_slot = state.get("last_education_post_slot")
+        if not self.last_education_post_slot and self.last_education_post_date:
+            self.last_education_post_slot = f"{self.last_education_post_date} 08"
         self.education_post_index = int(state.get("education_post_index", 0) or 0)
         self.pending_exec_action = state.get("pending_exec_action")
         self.last_exec_suggested_action = state.get("last_exec_suggested_action")
@@ -5268,6 +5271,7 @@ class PonchBot:
                 "last_exec_snapshot_date": self.last_exec_snapshot_date,
                 "last_liquidation_map_date": self.last_liquidation_map_date,
                 "last_education_post_date": self.last_education_post_date,
+                "last_education_post_slot": self.last_education_post_slot,
                 "education_post_index": self.education_post_index,
                 "pending_exec_action": self.pending_exec_action,
                 "last_exec_suggested_action": self.last_exec_suggested_action,
@@ -5403,9 +5407,13 @@ class PonchBot:
                 self._send_liquidation_map_post()
                 self.last_liquidation_map_date = today_str
                 self._save_state()
-            if self.last_education_post_date != today_str:
+
+        if now.minute == 0 and now.hour in {8, 12, 16}:
+            slot_key = now.strftime("%d.%m.%Y %H")
+            if self.last_education_post_slot != slot_key:
                 self._send_member_education_post()
-                self.last_education_post_date = today_str
+                self.last_education_post_slot = slot_key
+                self.last_education_post_date = now.strftime("%d.%m.%Y")
                 self._save_state()
 
         # 2. Fetch Global context
