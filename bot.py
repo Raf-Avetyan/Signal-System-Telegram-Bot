@@ -302,6 +302,9 @@ class PonchBot:
         except Exception:
             return 0
 
+    def _important_thread_id(self):
+        return 0
+
     def _normalized_signal_thread_id(self, chat_id, message_thread_id):
         signal_chat = str(self._signal_chat_id() or "").strip()
         current_chat = str(chat_id or "").strip()
@@ -406,7 +409,7 @@ class PonchBot:
         chat_id = (message.get("chat") or {}).get("id")
         message_thread_id = message.get("message_thread_id")
 
-        if cmd_base == "/scenarios" and not self._is_scenarios_topic(chat_id, message_thread_id):
+        if cmd_base in {"/scenarios", "/shortplans"} and not self._is_scenarios_topic(chat_id, message_thread_id):
             return self._silence_restricted_command(message)
         if cmd_base == "/analytics" and not self._is_analytics_topic(chat_id, message_thread_id):
             return self._silence_restricted_command(message)
@@ -420,6 +423,47 @@ class PonchBot:
 
     def _is_current_public_signal(self, sig):
         return str((sig or {}).get("chat_id") or "").strip() == self._current_public_signal_chat()
+
+    def _track_active_trade_message(self, sig, message_id):
+        try:
+            msg_id = int(message_id or 0)
+        except Exception:
+            return
+        if msg_id <= 0 or not sig:
+            return
+        existing = []
+        for raw in list(sig.get("active_thread_message_ids") or []):
+            try:
+                existing.append(int(raw))
+            except Exception:
+                continue
+        if msg_id not in existing:
+            existing.append(msg_id)
+        sig["active_thread_message_ids"] = existing
+
+    def _cleanup_active_trade_messages(self, sig):
+        if not sig:
+            return
+        target_chat = self._signal_chat_id()
+        if not target_chat:
+            sig["active_thread_message_ids"] = []
+            return
+        cleaned = False
+        seen = set()
+        for raw_id in list(sig.get("active_thread_message_ids") or []):
+            try:
+                msg_id = int(raw_id)
+            except Exception:
+                continue
+            if msg_id <= 0 or msg_id in seen:
+                continue
+            seen.add(msg_id)
+            tg.delete_message(target_chat, msg_id)
+            cleaned = True
+        sig["active_thread_message_ids"] = []
+        sig["msg_id"] = None
+        if cleaned:
+            self._save_state()
 
     def _hedge_mode_enabled(self):
         return str(BITUNIX_POSITION_MODE or "").strip().upper() == "HEDGE"
@@ -2153,13 +2197,14 @@ class PonchBot:
         text = str(message.get("text") or message.get("caption") or "").strip()
         cmd = text.lower().split()[0] if text else ""
         cmd_base = cmd.split("@", 1)[0]
-        if cmd_base == "/scenarios":
+        if cmd_base in {"/scenarios", "/shortplans"}:
             if not self._is_scenarios_topic((message.get("chat") or {}).get("id"), message.get("message_thread_id")):
                 return True
             return self._handle_btc_market_command(
                 chat_id=(message.get("chat") or {}).get("id"),
                 reply_to_message_id=message.get("message_id"),
                 message_thread_id=message.get("message_thread_id"),
+                mode="short_term" if cmd_base == "/shortplans" else "swing",
             )
         if cmd_base == "/analytics":
             return True
@@ -4961,6 +5006,20 @@ class PonchBot:
                         )
                         tp_liq = self._estimate_tp_liquidity(side, latest_price, tp1_c, tp2_c, tp3_c)
                         signal_id = new_signal_id()
+                        trading_resp = tg.send_strong(
+                            side=ce["side"],
+                            total_points=ce["points"],
+                            confirmations=ce["confirmations"],
+                            indicators_list=ce["indicators"],
+                            price=latest_price,
+                            sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
+                            size=strong_size,
+                            tp_liq_prob=tp_liq["prob"] if tp_liq else None,
+                            tp_liq_usd=tp_liq["size_usd"] if tp_liq else None,
+                            tp_liq_target=tp_liq["target"] if tp_liq else None,
+                            chat_id=self._signal_chat_id(),
+                            message_thread_id=self._trading_signal_thread_id(),
+                        )
                         resp = tg.send_strong(
                             side=ce["side"],
                             total_points=ce["points"],
@@ -4991,6 +5050,8 @@ class PonchBot:
                         )
                         self.tracker.signals[-1]["signal_id"] = signal_id
                         self.tracker.signals[-1]["signal_size_pct"] = strong_size
+                        self.tracker.signals[-1]["trading_signal_msg_id"] = trading_resp.get("result", {}).get("message_id") if trading_resp else None
+                        self._track_active_trade_message(self.tracker.signals[-1], msg_id)
                         self._record_signal_sent("STRONG", now=now)
                         self._execute_exchange_trade(self.tracker.signals[-1])
                         self._save_state()
@@ -5003,6 +5064,20 @@ class PonchBot:
                         )
                         tp_liq = self._estimate_tp_liquidity(side, latest_price, tp1_c, tp2_c, tp3_c)
                         signal_id = new_signal_id()
+                        trading_resp = tg.send_extreme(
+                            side=ce["side"],
+                            total_points=ce["points"],
+                            confirmations=ce["confirmations"],
+                            indicators_list=ce["indicators"],
+                            price=latest_price,
+                            sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
+                            size=extreme_size,
+                            tp_liq_prob=tp_liq["prob"] if tp_liq else None,
+                            tp_liq_usd=tp_liq["size_usd"] if tp_liq else None,
+                            tp_liq_target=tp_liq["target"] if tp_liq else None,
+                            chat_id=self._signal_chat_id(),
+                            message_thread_id=self._trading_signal_thread_id(),
+                        )
                         resp = tg.send_extreme(
                             side=ce["side"],
                             total_points=ce["points"],
@@ -5033,6 +5108,8 @@ class PonchBot:
                         )
                         self.tracker.signals[-1]["signal_id"] = signal_id
                         self.tracker.signals[-1]["signal_size_pct"] = extreme_size
+                        self.tracker.signals[-1]["trading_signal_msg_id"] = trading_resp.get("result", {}).get("message_id") if trading_resp else None
+                        self._track_active_trade_message(self.tracker.signals[-1], msg_id)
                         self._record_signal_sent("EXTREME", now=now)
                         self._execute_exchange_trade(self.tracker.signals[-1])
                         self._save_state()
@@ -5107,7 +5184,7 @@ class PonchBot:
                 # Public reply alerts keep the original public behavior.
                 if sig.get("msg_id") and current_public_signal and not private_exec_paper_signal and not suppress_intermediate_notice:
                     if evt_type == "TP1":
-                        tg.send_tp1_hit_congrats(
+                        resp = tg.send_tp1_hit_congrats(
                             self._signal_chat_id(),
                             sig["msg_id"],
                             sig.get("tf", "Unknown"),
@@ -5119,8 +5196,9 @@ class PonchBot:
                             tp2=sig.get("tp2"),
                             size=(sig.get("meta", {}) or {}).get("size")
                         )
+                        self._track_active_trade_message(sig, (resp or {}).get("result", {}).get("message_id"))
                     elif evt_type == "TP2":
-                        tg.send_tp2_hit_congrats(
+                        resp = tg.send_tp2_hit_congrats(
                             self._signal_chat_id(),
                             sig["msg_id"],
                             sig.get("tf", "Unknown"),
@@ -5133,12 +5211,16 @@ class PonchBot:
                             size=(sig.get("meta", {}) or {}).get("size"),
                             single_full=self._is_single_full_tp_execution(sig),
                         )
+                        self._track_active_trade_message(sig, (resp or {}).get("result", {}).get("message_id"))
                     elif evt_type == "TP3":
-                        tg.send_tp3_hit_congrats(self._signal_chat_id(), sig["msg_id"], sig.get("tf", "Unknown"))
+                        resp = tg.send_tp3_hit_congrats(self._signal_chat_id(), sig["msg_id"], sig.get("tf", "Unknown"))
+                        self._track_active_trade_message(sig, (resp or {}).get("result", {}).get("message_id"))
                     elif evt_type == "ENTRY_CLOSE":
-                        tg.send_breakeven_alert(self._signal_chat_id(), sig["msg_id"], sig.get("tf", "Unknown"))
+                        resp = tg.send_breakeven_alert(self._signal_chat_id(), sig["msg_id"], sig.get("tf", "Unknown"))
+                        self._track_active_trade_message(sig, (resp or {}).get("result", {}).get("message_id"))
                     elif evt_type == "PROFIT_SL":
-                        tg.send_profit_sl_alert(self._signal_chat_id(), sig["msg_id"], sig.get("tf", "Unknown"))
+                        resp = tg.send_profit_sl_alert(self._signal_chat_id(), sig["msg_id"], sig.get("tf", "Unknown"))
+                        self._track_active_trade_message(sig, (resp or {}).get("result", {}).get("message_id"))
 
                 exec_chat = self._execution_chat_id()
                 exec_msg_id = ((sig.get("execution") or {}).get("exec_msg_id"))
@@ -5152,6 +5234,9 @@ class PonchBot:
 
                 if risk_state_changed:
                     self._save_state()
+
+                if evt_type in terminal_event_types and current_public_signal and not private_exec_paper_signal:
+                    self._cleanup_active_trade_messages(sig)
 
                 if evt_type in ("TP1", "TP2", "TP3", "ENTRY_CLOSE", "PROFIT_SL", "SL") and not suppress_intermediate_notice:
                     self._sync_exchange_trade_event(sig, evt_type)
@@ -5542,7 +5627,8 @@ class PonchBot:
                 critical_low=self.levels.get("DumpMax", 0),
                 indicators=indicators,
                 chart_path=chart_path,
-                chat_id=self._signal_chat_id()
+                chat_id=self._signal_chat_id(),
+                message_thread_id=self._important_thread_id(),
             )
         else:
             print(f"  [TG] Skipped sending daily levels report (booting)")
@@ -5619,11 +5705,11 @@ class PonchBot:
                 message_thread_id=message_thread_id,
             )
 
-    def _handle_btc_market_command(self, chat_id, reply_to_message_id=None, message_thread_id=None):
+    def _handle_btc_market_command(self, chat_id, reply_to_message_id=None, message_thread_id=None, mode="swing"):
         if not chat_id:
             return False
         try:
-            report = build_btc_market_report(symbol=SYMBOL)
+            report = build_btc_market_report(symbol=SYMBOL, mode=mode)
             self._send_text_chunks(
                 chat_id,
                 report,
@@ -5680,7 +5766,7 @@ class PonchBot:
             cmd = text.lower().split()[0] if text else ""
             cmd_base = cmd.split("@", 1)[0]
             
-            if cmd_base == "/scenarios":
+            if cmd_base in {"/scenarios", "/shortplans"}:
                 if not self._is_scenarios_topic(chat_id, message_thread_id):
                     self._silence_restricted_command(message)
                     self._save_state()
@@ -5689,6 +5775,7 @@ class PonchBot:
                     chat_id=chat_id,
                     reply_to_message_id=reply_to_message_id,
                     message_thread_id=message_thread_id,
+                    mode="short_term" if cmd_base == "/shortplans" else "swing",
                 )
             elif text == "/start":
                 welcome_msg = (
@@ -6699,8 +6786,29 @@ class PonchBot:
                 tp_liq = self._estimate_tp_liquidity(evt["side"], evt["entry"], evt["tp1"], evt["tp2"], evt["tp3"])
                 signal_id = new_signal_id()
 
+                trading_resp = None
                 resp = None
                 if not self.is_booting:
+                    trading_resp = tg.send_scalp_confirmed(
+                        timeframe=tf,
+                        side=evt["side"],
+                        entry=evt["entry"],
+                        sl=evt["sl"],
+                        tp1=evt["tp1"],
+                        tp2=evt["tp2"],
+                        tp3=evt["tp3"],
+                        strength=profile["strength"],
+                        size=dyn_size,
+                        score=score,
+                        trend=self.macro_trend,
+                        reasons=reasons,
+                        tp_liq_prob=tp_liq["prob"] if tp_liq else None,
+                        tp_liq_usd=tp_liq["size_usd"] if tp_liq else None,
+                        tp_liq_target=tp_liq["target"] if tp_liq else None,
+                        trigger_label=trigger_label,
+                        chat_id=self._signal_chat_id(),
+                        message_thread_id=self._trading_signal_thread_id(),
+                    )
                     resp = tg.send_scalp_confirmed(
                         timeframe=tf,
                         side=evt["side"],
@@ -6755,6 +6863,9 @@ class PonchBot:
                 )
                 self.tracker.signals[-1]["signal_id"] = signal_id
                 self.tracker.signals[-1]["signal_size_pct"] = dyn_size
+                self.tracker.signals[-1]["trading_signal_msg_id"] = trading_resp.get("result", {}).get("message_id") if trading_resp else None
+                self._track_active_trade_message(self.tracker.signals[-1], msg_id)
+                self._save_state()
                 self._execute_exchange_trade(self.tracker.signals[-1])
 
             elif evt["type"] == "CLOSED":

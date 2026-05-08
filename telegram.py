@@ -114,6 +114,7 @@ def set_bot_commands(commands=None):
     if commands is None:
         commands = [
             {"command": "scenarios", "description": "Show BTC scenarios"},
+            {"command": "shortplans", "description": "Show short-term BTC plans"},
             {"command": "analytics", "description": "Show signal analytics"},
         ]
 

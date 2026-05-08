@@ -568,8 +568,32 @@ def _tight_plan_stop(entry_low, entry_high, current_price, atr_1h, side, nearby_
     return stop
 
 
-def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticker_ctx, liq_ctx, okx_ctx, liq_map):
+def _scenario_mode_config(mode):
+    mode_name = str(mode or "swing").strip().lower()
+    if mode_name == "short_term":
+        return {
+            "min_dist_pct": 0.55,
+            "max_dist_pct": 2.10,
+            "preferred_dist_pct": 0.95,
+            "usable_entry_dist_pct": 1.75,
+            "major_liq_min_dist_pct": 1.40,
+            "title": "BTC Short-Term Plans",
+            "final_note": "Use only the plan whose short-term trigger prints first.",
+        }
+    return {
+        "min_dist_pct": 0.80,
+        "max_dist_pct": 5.50,
+        "preferred_dist_pct": 1.50,
+        "usable_entry_dist_pct": 3.20,
+        "major_liq_min_dist_pct": 2.20,
+        "title": "BTC Scenarios",
+        "final_note": "Plan the long only if the long trigger prints. Plan the short only if the short trigger prints.",
+    }
+
+
+def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticker_ctx, liq_ctx, okx_ctx, liq_map, mode="swing", max_scenarios=4):
     current_price = _safe_float(current_price)
+    mode_cfg = _scenario_mode_config(mode)
     tf_weights = {"1M": 4.0, "1w": 3.0, "1d": 2.0, "4h": 2.0, "1h": 1.0}
     overall_bias_score = 0.0
     for tf, weight in tf_weights.items():
@@ -583,21 +607,21 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
     fallback_support = _pick_planning_cluster(
         support_clusters,
         current_price,
-        min_dist_pct=0.80,
-        max_dist_pct=5.5,
-        preferred_dist_pct=1.50,
+        min_dist_pct=mode_cfg["min_dist_pct"],
+        max_dist_pct=mode_cfg["max_dist_pct"],
+        preferred_dist_pct=mode_cfg["preferred_dist_pct"],
     )
     fallback_resistance = _pick_planning_cluster(
         resistance_clusters,
         current_price,
-        min_dist_pct=0.80,
-        max_dist_pct=5.5,
-        preferred_dist_pct=1.50,
+        min_dist_pct=mode_cfg["min_dist_pct"],
+        max_dist_pct=mode_cfg["max_dist_pct"],
+        preferred_dist_pct=mode_cfg["preferred_dist_pct"],
     )
     mapped_long_entry = _zone_to_cluster((liq_map or {}).get("long_entry_zone"))
     mapped_short_entry = _zone_to_cluster((liq_map or {}).get("short_entry_zone"))
-    planning_support = mapped_long_entry if _is_usable_entry_zone(mapped_long_entry, current_price) else fallback_support
-    planning_resistance = mapped_short_entry if _is_usable_entry_zone(mapped_short_entry, current_price) else fallback_resistance
+    planning_support = mapped_long_entry if _is_usable_entry_zone(mapped_long_entry, current_price, mode_cfg["usable_entry_dist_pct"]) else fallback_support
+    planning_resistance = mapped_short_entry if _is_usable_entry_zone(mapped_short_entry, current_price, mode_cfg["usable_entry_dist_pct"]) else fallback_resistance
     next_support = _zone_to_cluster((liq_map or {}).get("short_target_zone"))
     next_resistance = _zone_to_cluster((liq_map or {}).get("long_target_zone"))
     if not next_support and planning_support and support_clusters:
@@ -814,7 +838,7 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
             }
         )
 
-    if next_support and _distance_pct(next_support.get("price"), current_price) >= 2.2:
+    if next_support and _distance_pct(next_support.get("price"), current_price) >= mode_cfg["major_liq_min_dist_pct"]:
         liq_price = _safe_float(next_support.get("price"))
         zone_half = max(liq_price * 0.00030, atr_1h * 0.05)
         entry_low = liq_price - zone_half
@@ -898,7 +922,7 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
             }
         )
 
-    if next_resistance and _distance_pct(next_resistance.get("price"), current_price) >= 2.2:
+    if next_resistance and _distance_pct(next_resistance.get("price"), current_price) >= mode_cfg["major_liq_min_dist_pct"]:
         liq_price = _safe_float(next_resistance.get("price"))
         zone_half = max(liq_price * 0.00030, atr_1h * 0.05)
         entry_low = liq_price - zone_half
@@ -966,11 +990,21 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
         selected.append(best_long)
     if best_short:
         selected.append(best_short)
-    if not selected:
-        selected = sorted(scenarios, key=lambda row: row.get("probability", 0), reverse=True)[:2]
-    else:
-        selected = sorted(selected, key=lambda row: row.get("probability", 0), reverse=True)
-    return selected[:2]
+
+    extra_long_candidates = [row for row in sorted(long_candidates, key=lambda row: row.get("probability", 0), reverse=True) if row not in selected]
+    extra_short_candidates = [row for row in sorted(short_candidates, key=lambda row: row.get("probability", 0), reverse=True) if row not in selected]
+    if extra_long_candidates and len(selected) < max_scenarios:
+        selected.append(extra_long_candidates[0])
+    if extra_short_candidates and len(selected) < max_scenarios:
+        selected.append(extra_short_candidates[0])
+    if len(selected) < max_scenarios:
+        remaining = [row for row in sorted(scenarios, key=lambda row: row.get("probability", 0), reverse=True) if row not in selected]
+        for row in remaining:
+            selected.append(row)
+            if len(selected) >= max_scenarios:
+                break
+    selected = sorted(selected, key=lambda row: row.get("probability", 0), reverse=True)
+    return selected[:max_scenarios]
 
 
 def _scenario_html(idx, scenario):
@@ -996,7 +1030,8 @@ def _scenario_html(idx, scenario):
     )
 
 
-def build_btc_market_report(symbol=SYMBOL):
+def build_btc_market_report(symbol=SYMBOL, mode="swing"):
+    mode_cfg = _scenario_mode_config(mode)
     data = _fetch_all_bitunix_timeframes(symbol=symbol, timeframes=BITUNIX_TIMEFRAMES)
     missing = [tf for tf in BITUNIX_TIMEFRAMES if tf not in data or data[tf].empty]
     if missing:
@@ -1049,21 +1084,22 @@ def build_btc_market_report(symbol=SYMBOL):
         liq_ctx=liq_ctx,
         okx_ctx=okx_ctx,
         liq_map=liq_map,
+        mode=mode,
+        max_scenarios=4,
     )
     if not scenarios:
         raise RuntimeError("No valid BTC scenarios could be built from Bitunix data.")
 
     blocks = [
         (
-            "\U0001F4CD <b>BTC Scenarios</b>\n\n"
+            f"\U0001F4CD <b>{mode_cfg['title']}</b>\n\n"
             "<blockquote>"
             f"Price: {_fmt_price(current_price)}\n"
             f"Funding: {funding_rate_raw:+.6f}%"
             "</blockquote>"
         ),
-        _scenario_html(1, scenarios[0]),
     ]
-    if len(scenarios) > 1:
-        blocks.append(_scenario_html(2, scenarios[1]))
-    blocks.append("<blockquote>Plan the long only if the long trigger prints. Plan the short only if the short trigger prints.</blockquote>")
+    for idx, scenario in enumerate(scenarios, start=1):
+        blocks.append(_scenario_html(idx, scenario))
+    blocks.append(f"<blockquote>{mode_cfg['final_note']}</blockquote>")
     return "\n\n".join(blocks)
