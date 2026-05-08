@@ -1030,6 +1030,99 @@ def _scenario_html(idx, scenario):
     )
 
 
+def _pick_zone_for_distance(rows, target_dist_pct, tolerance_pct):
+    if not rows:
+        return None
+    eligible = [row for row in rows if abs(_safe_float(row.get("distance_pct")) - target_dist_pct) <= tolerance_pct]
+    source = eligible or rows
+    return min(
+        source,
+        key=lambda row: (
+            abs(_safe_float(row.get("distance_pct")) - target_dist_pct),
+            -_safe_float(row.get("score")),
+            -_safe_float(row.get("size_usd")),
+        ),
+    )
+
+
+def build_liquidation_map_snapshot(symbol=SYMBOL):
+    data = _fetch_all_bitunix_timeframes(symbol=symbol, timeframes=BITUNIX_TIMEFRAMES)
+    missing = [tf for tf in BITUNIX_TIMEFRAMES if tf not in data or data[tf].empty]
+    if missing:
+        raise RuntimeError(f"Missing Bitunix data for: {', '.join(missing)}")
+
+    tf_map = {tf: _tf_summary(tf, data[tf]) for tf in BITUNIX_TIMEFRAMES}
+    ticker = _fetch_bitunix_ticker(symbol=symbol)
+    funding = _fetch_bitunix_funding(symbol=symbol)
+    funding_history = _fetch_bitunix_funding_history(symbol=symbol, limit=30)
+    book = _fetch_bitunix_depth(symbol=symbol, limit="50")
+
+    current_price = _safe_float(
+        ticker.get("lastPrice") or ticker.get("last") or funding.get("lastPrice") or funding.get("markPrice")
+    )
+    if current_price <= 0:
+        current_price = _safe_float((tf_map.get("1h") or {}).get("close"))
+    if current_price <= 0:
+        raise RuntimeError("Could not load the current BTC price from Bitunix.")
+
+    levels = calculate_levels(
+        data["1d"],
+        weekly_df=data["1w"],
+        monthly_df=data["1M"],
+        hourly_df=data["1h"],
+    )
+    book_ctx = _order_book_context(book, current_price)
+    atr_1h = max(_safe_float((tf_map.get("1h") or {}).get("atr")), current_price * 0.0035)
+    funding_rate_raw = _safe_float(funding.get("fundingRate"))
+    funding_ctx = _funding_context(funding_rate_raw, funding_history)
+    ticker_ctx = _ticker_context(ticker)
+    liq_ctx = _liquidity_context(book, current_price, atr_1h)
+    okx_ctx = _okx_liquidation_context(current_price, atr_1h, levels)
+    liq_map = build_liquidation_map(
+        current_price=current_price,
+        levels=levels,
+        tf_map=tf_map,
+        funding_ctx=funding_ctx,
+        ticker_ctx=ticker_ctx,
+        book_ctx=book_ctx,
+        liq_ctx=liq_ctx,
+        okx_ctx=okx_ctx,
+    )
+
+    upside_rows = list((liq_map or {}).get("short_liq_zones") or [])
+    downside_rows = list((liq_map or {}).get("long_liq_zones") or [])
+    horizon_targets = [
+        ("12H", 0.7, 0.35),
+        ("24H", 1.1, 0.45),
+        ("48H", 1.8, 0.60),
+        ("3D", 2.6, 0.75),
+        ("1W", 3.7, 1.00),
+        ("2W", 5.2, 1.35),
+        ("1M", 7.0, 1.80),
+    ]
+    horizons = []
+    for name, target_dist, tolerance in horizon_targets:
+        upside = _pick_zone_for_distance(upside_rows, target_dist, tolerance)
+        downside = _pick_zone_for_distance(downside_rows, target_dist, tolerance)
+        horizons.append(
+            {
+                "horizon": name,
+                "upside": _safe_float((upside or {}).get("price")) if upside else None,
+                "downside": _safe_float((downside or {}).get("price")) if downside else None,
+                "upside_zone": upside,
+                "downside_zone": downside,
+            }
+        )
+
+    return {
+        "current_price": current_price,
+        "funding_rate": funding_rate_raw,
+        "chart_df": data["1h"],
+        "liq_map": liq_map,
+        "horizons": horizons,
+    }
+
+
 def build_btc_market_report(symbol=SYMBOL, mode="swing"):
     mode_cfg = _scenario_mode_config(mode)
     data = _fetch_all_bitunix_timeframes(symbol=symbol, timeframes=BITUNIX_TIMEFRAMES)

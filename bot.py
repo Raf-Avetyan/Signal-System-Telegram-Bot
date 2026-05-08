@@ -93,7 +93,7 @@ from momentum import calculate_momentum, ScalpTracker, detect_trend, classify_mo
 from scoring import calculate_signal_score
 from signals import check_momentum_confirm, check_range_confirm, check_flow_confirm, check_rsi_divergence
 from confirmation import ConfirmationTracker
-from charting import generate_daily_levels_chart
+from charting import generate_daily_levels_chart, generate_signal_setup_chart, generate_liquidation_map_chart
 from data import (
     fetch_klines, fetch_all_timeframes, fetch_daily, fetch_weekly, fetch_monthly, 
     fetch_funding_rate, fetch_open_interest, fetch_liquidations, fetch_global_indicators, fetch_order_book,
@@ -106,14 +106,14 @@ from bitunix import verify_bitunix_user
 from bitunix_trade import TradeExecutor, new_signal_id
 from liquidity_map import detect_liquidity_event, detect_liquidity_candidates
 from smart_money import detect_smart_money_entry
-from market_report import build_btc_market_report
+from market_report import build_btc_market_report, build_liquidation_map_snapshot
 import telegram as tg
 
 
 class PonchBot:
     """Main Ponch Signal System bot."""
 
-    def __init__(self):
+    def __init__(self, quiet_init=False):
         # Scalp trackers - one per timeframe
         self.scalp_trackers = {
             tf: ScalpTracker(tf) for tf in SIGNAL_TIMEFRAMES
@@ -159,6 +159,9 @@ class PonchBot:
         self.last_daily_report_date = state.get("last_daily_report_date")
         self.last_session_thread_cleanup_date = state.get("last_session_thread_cleanup_date")
         self.last_exec_snapshot_date = state.get("last_exec_snapshot_date")
+        self.last_liquidation_map_date = state.get("last_liquidation_map_date")
+        self.last_education_post_date = state.get("last_education_post_date")
+        self.education_post_index = int(state.get("education_post_index", 0) or 0)
         self.pending_exec_action = state.get("pending_exec_action")
         self.last_exec_suggested_action = state.get("last_exec_suggested_action")
         self.private_exec_focus = state.get("private_exec_focus", {})
@@ -231,7 +234,7 @@ class PonchBot:
         )
         for err in reconcile.get("errors", []):
             print(f"[TRADE] Reconcile detail: {err}")
-        if self._execution_chat_id():
+        if self._execution_chat_id() and not quiet_init:
             startup_lines = self._build_execution_status_lines(
                 trade_check=trade_check,
                 reconcile=reconcile,
@@ -447,8 +450,10 @@ class PonchBot:
         target_chat = self._signal_chat_id()
         if not target_chat:
             sig["active_thread_message_ids"] = []
+            sig["active_snapshot_msg_id"] = None
             return
         cleaned = False
+        had_snapshot = bool(sig.get("active_snapshot_msg_id"))
         seen = set()
         for raw_id in list(sig.get("active_thread_message_ids") or []):
             try:
@@ -461,9 +466,359 @@ class PonchBot:
             tg.delete_message(target_chat, msg_id)
             cleaned = True
         sig["active_thread_message_ids"] = []
+        sig["active_snapshot_msg_id"] = None
         sig["msg_id"] = None
-        if cleaned:
+        if cleaned or had_snapshot:
             self._save_state()
+
+    def _compact_usd(self, value):
+        try:
+            value = float(value or 0)
+        except Exception:
+            value = 0.0
+        if abs(value) >= 1_000_000_000:
+            return f"${value/1_000_000_000:.2f}B"
+        if abs(value) >= 1_000_000:
+            return f"${value/1_000_000:.1f}M"
+        if abs(value) >= 1_000:
+            return f"${value/1_000:.0f}K"
+        return f"${value:.0f}"
+
+    def _signal_strategy_label(self, sig):
+        return str((sig.get("meta") or {}).get("strategy") or sig.get("type") or "Setup").replace("_", " ").title()
+
+    def _active_trade_snapshot_caption(self, sig, *, event_label=None, close_price=None):
+        side = str(sig.get("side") or "").upper()
+        strategy = self._signal_strategy_label(sig)
+        header = "📍 <b>ACTIVE BTC PLAN</b>"
+        if event_label:
+            header = f"📍 <b>{str(event_label).upper()} UPDATE</b>"
+        lines = [
+            f"{side} | {strategy}",
+            f"Entry: {float(sig.get('entry', 0) or 0):,.2f}",
+            f"SL: {float(sig.get('sl', 0) or 0):,.2f}",
+            f"Targets: {float(sig.get('tp1', 0) or 0):,.2f} / {float(sig.get('tp2', 0) or 0):,.2f} / {float(sig.get('tp3', 0) or 0):,.2f}",
+        ]
+        if close_price is not None:
+            lines.append(f"Current: {float(close_price):,.2f}")
+        return f"{header}\n<blockquote>{chr(10).join(lines)}</blockquote>\nWatching the active zone, invalidation, and target path."
+
+    def _trade_journal_caption(self, sig, outcome_label, r_mult, note, *, close_price=None):
+        side = str(sig.get("side") or "").upper()
+        strategy = self._signal_strategy_label(sig)
+        lines = [
+            f"{side} | {outcome_label} | {float(r_mult):+.2f}R",
+            f"Setup: {strategy}",
+            f"Entry: {float(sig.get('entry', 0) or 0):,.2f}",
+        ]
+        if close_price is not None:
+            lines.append(f"Close: {float(close_price):,.2f}")
+        return f"📘 <b>TRADE JOURNAL</b>\n<blockquote>{chr(10).join(lines)}</blockquote>\n{note}"
+
+    def _signal_chart_timeframe(self, sig):
+        tf = str((sig or {}).get("tf") or "").strip().lower()
+        if tf == "5m":
+            return "5m", 160
+        if tf == "15m":
+            return "15m", 140
+        if tf == "1h":
+            return "15m", 160
+        return "1h", 120
+
+    def _generate_signal_snapshot_chart(self, sig, *, output_name="signal_snapshot.png", close_price=None, event_label=None, title="Signal Setup"):
+        if not sig:
+            return None
+        tf, limit = self._signal_chart_timeframe(sig)
+        try:
+            df = fetch_klines(interval=tf, limit=limit)
+            if df.empty:
+                return None
+            return generate_signal_setup_chart(
+                df,
+                side=sig.get("side"),
+                entry=float(sig.get("entry", 0) or 0),
+                sl=float(sig.get("sl", 0) or 0),
+                tp1=float(sig.get("tp1", 0) or 0),
+                tp2=float(sig.get("tp2", 0) or 0),
+                tp3=float(sig.get("tp3", 0) or 0),
+                symbol=SYMBOL,
+                timeframe=tf,
+                output_path=output_name,
+                title=title,
+                close_price=close_price,
+                event_label=event_label,
+            )
+        except Exception as e:
+            print(f"[CHART] Signal snapshot failed: {e}")
+            return None
+
+    def _send_active_trade_snapshot(self, sig):
+        if not sig or self.is_booting:
+            return
+        side = str(sig.get("side") or "").upper() or "BTC"
+        chart_path = self._generate_signal_snapshot_chart(
+            sig,
+            output_name=f"active_trade_{str(sig.get('signal_id') or 'sig')}.png",
+            title=f"{side} PLAN",
+        )
+        if not chart_path:
+            return
+        try:
+            caption = self._active_trade_snapshot_caption(sig)
+            resp = tg.send_photo(
+                chart_path,
+                caption=caption,
+                chat_id=self._signal_chat_id(),
+                message_thread_id=self._active_trades_thread_id(),
+            )
+            snapshot_msg_id = (resp or {}).get("result", {}).get("message_id")
+            sig["active_snapshot_msg_id"] = snapshot_msg_id
+            self._track_active_trade_message(sig, snapshot_msg_id)
+            self._save_state()
+        finally:
+            try:
+                import os
+                if chart_path and os.path.exists(chart_path):
+                    os.remove(chart_path)
+            except Exception:
+                pass
+
+    def _refresh_active_trade_snapshot(self, sig, *, close_price=None, event_label=None):
+        if not sig or self.is_booting:
+            return
+        try:
+            msg_id = int(sig.get("active_snapshot_msg_id") or 0)
+        except Exception:
+            msg_id = 0
+        if msg_id <= 0:
+            return
+        side = str(sig.get("side") or "").upper() or "BTC"
+        title = f"{side} PLAN"
+        if event_label:
+            title = f"{str(event_label).upper()} UPDATE"
+        chart_path = self._generate_signal_snapshot_chart(
+            sig,
+            output_name=f"active_trade_refresh_{str(sig.get('signal_id') or 'sig')}.png",
+            close_price=close_price,
+            event_label=event_label,
+            title=title,
+        )
+        if not chart_path:
+            return
+        try:
+            result = tg.edit_message_media(
+                msg_id,
+                chart_path,
+                caption=self._active_trade_snapshot_caption(sig, event_label=event_label, close_price=close_price),
+                chat_id=self._signal_chat_id(),
+            )
+            if result == "DELETED":
+                sig["active_snapshot_msg_id"] = None
+                self._save_state()
+        finally:
+            try:
+                import os
+                if chart_path and os.path.exists(chart_path):
+                    os.remove(chart_path)
+            except Exception:
+                pass
+
+    def _send_trade_journal(self, sig, evt_type, close_price=None):
+        if not sig or self.is_booting or sig.get("journal_posted"):
+            return
+        outcome_key, r_mult = self.tracker._metric_outcome(sig)
+        outcome_label = {
+            "wins": "Win",
+            "losses": "Loss",
+            "breakeven": "Breakeven",
+        }.get(outcome_key, str(evt_type or "Closed").title())
+        chart_path = self._generate_signal_snapshot_chart(
+            sig,
+            output_name=f"journal_{str(sig.get('signal_id') or 'sig')}.png",
+            close_price=float(close_price or sig.get("tp3") or sig.get("tp2") or sig.get("tp1") or sig.get("entry") or 0),
+            event_label=evt_type,
+            title=f"{outcome_label.upper()} JOURNAL",
+        )
+        try:
+            note = "Managed well and closed according to plan."
+            if outcome_key == "losses":
+                note = "Invalidation hit. This stayed a rules-based loss."
+            elif outcome_key == "breakeven":
+                note = "Protected exit after the trade lost momentum."
+            caption = self._trade_journal_caption(sig, outcome_label, r_mult, note, close_price=close_price)
+            if chart_path:
+                tg.send_photo(
+                    chart_path,
+                    caption=caption,
+                    chat_id=self._signal_chat_id(),
+                    message_thread_id=self._general_thread_id(),
+                )
+            else:
+                tg.send(
+                    caption,
+                    parse_mode="HTML",
+                    chat_id=self._signal_chat_id(),
+                    message_thread_id=self._general_thread_id(),
+                )
+            sig["journal_posted"] = True
+            self._save_state()
+        finally:
+            try:
+                import os
+                if chart_path and os.path.exists(chart_path):
+                    os.remove(chart_path)
+            except Exception:
+                pass
+
+    def _member_education_posts(self):
+        return [
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Reclaim entry</blockquote>\n"
+                "A reclaim is not just a wick through a level. Wait for price to lose the level, get back above it, and show acceptance before treating it as a long."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: With trend vs counter-trend</blockquote>\n"
+                "With-trend setups usually need less proof and can travel farther. Counter-trend setups need cleaner rejection or reclaim confirmation."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Why no-trade is a real decision</blockquote>\n"
+                "If price is trapped between levels with weak momentum, the best position is often no position. Waiting is part of risk control."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Funding context</blockquote>\n"
+                "Negative funding means shorts are paying. That can support long squeeze ideas, but only if price action confirms it."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Liquidity sweep logic</blockquote>\n"
+                "A sweep alone is not the entry. The entry is the reaction after the sweep: rejection, reclaim, or continuation failure."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Session behavior</blockquote>\n"
+                "London and New York usually decide where liquidity gets taken. Asia often sets the range that later sessions attack."
+            ),
+        ]
+
+    def _send_member_education_post(self):
+        posts = self._member_education_posts()
+        if not posts or self.is_booting:
+            return
+        idx = int(self.education_post_index or 0) % len(posts)
+        tg.send(
+            posts[idx],
+            parse_mode="HTML",
+            chat_id=self._signal_chat_id(),
+            message_thread_id=self._general_thread_id(),
+        )
+        self.education_post_index = idx + 1
+        self._save_state()
+
+    def _send_liquidation_map_post(self):
+        if self.is_booting:
+            return
+        snapshot = build_liquidation_map_snapshot(symbol=SYMBOL)
+        horizon_rows = list(snapshot.get("horizons", []) or [])
+        lines = []
+        for row in snapshot.get("horizons", []):
+            horizon = str(row.get("horizon") or "")
+            upside = row.get("upside")
+            downside = row.get("downside")
+            upside_zone = row.get("upside_zone") or {}
+            downside_zone = row.get("downside_zone") or {}
+            up_txt = f"{float(upside):,.0f} ({self._compact_usd(upside_zone.get('size_usd'))})" if upside else "n/a"
+            down_txt = f"{float(downside):,.0f} ({self._compact_usd(downside_zone.get('size_usd'))})" if downside else "n/a"
+            lines.append(f"{horizon}: ↑ {up_txt} | ↓ {down_txt}")
+        chart_path = generate_liquidation_map_chart(
+            snapshot.get("chart_df"),
+            current_price=float(snapshot.get("current_price", 0) or 0),
+            horizon_rows=horizon_rows,
+            symbol=SYMBOL,
+            timeframe="1h",
+            output_path="liquidation_map_post.png",
+        )
+        message = (
+            f"🟡 <b>BTC Liquidation Map</b>\n\n"
+            f"<blockquote>"
+            f"Price: {float(snapshot.get('current_price', 0) or 0):,.2f}\n"
+            f"Funding: {float(snapshot.get('funding_rate', 0) or 0):+.6f}%"
+            f"</blockquote>\n"
+            f"<blockquote>{chr(10).join(lines)}</blockquote>"
+        )
+        try:
+            if chart_path:
+                tg.send_photo(
+                    chart_path,
+                    caption=message,
+                    chat_id=self._signal_chat_id(),
+                    message_thread_id=self._scenarios_thread_id(),
+                )
+            else:
+                tg.send(
+                    message,
+                    parse_mode="HTML",
+                    chat_id=self._signal_chat_id(),
+                    message_thread_id=self._scenarios_thread_id(),
+                )
+        finally:
+            try:
+                import os
+                if chart_path and os.path.exists(chart_path):
+                    os.remove(chart_path)
+            except Exception:
+                pass
+
+    def _build_demo_signal(self, side="LONG"):
+        side_text = str(side or "LONG").upper()
+        try:
+            price = float(fetch_last_price(SYMBOL) or 0)
+        except Exception:
+            price = 0.0
+        if price <= 0:
+            try:
+                df = fetch_klines(interval="15m", limit=4)
+                if not df.empty:
+                    price = float(df["Close"].iloc[-1])
+            except Exception:
+                price = 0.0
+        if price <= 0:
+            price = 80000.0
+
+        if side_text == "SHORT":
+            sl = price + 420.0
+            tp1 = price - 550.0
+            tp2 = price - 900.0
+            tp3 = price - 1400.0
+        else:
+            sl = price - 420.0
+            tp1 = price + 550.0
+            tp2 = price + 900.0
+            tp3 = price + 1400.0
+
+        return {
+            "signal_id": f"TEST-{int(time.time())}",
+            "type": "SCALP",
+            "side": side_text,
+            "entry": price,
+            "sl": sl,
+            "initial_sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
+            "tf": "15m",
+            "status": "OPEN",
+            "signal_size_pct": 0.5,
+            "meta": {
+                "strategy": "TEST_FEATURE",
+                "size": 0.5,
+                "trigger": "manual feature test",
+            },
+            "journal_posted": False,
+        }
 
     def _hedge_mode_enabled(self):
         return str(BITUNIX_POSITION_MODE or "").strip().upper() == "HEDGE"
@@ -4632,6 +4987,9 @@ class PonchBot:
                 "last_daily_report_date": self.last_daily_report_date,
                 "last_session_thread_cleanup_date": self.last_session_thread_cleanup_date,
                 "last_exec_snapshot_date": self.last_exec_snapshot_date,
+                "last_liquidation_map_date": self.last_liquidation_map_date,
+                "last_education_post_date": self.last_education_post_date,
+                "education_post_index": self.education_post_index,
                 "pending_exec_action": self.pending_exec_action,
                 "last_exec_suggested_action": self.last_exec_suggested_action,
                 "private_exec_focus": self.private_exec_focus,
@@ -4761,6 +5119,14 @@ class PonchBot:
             if self.last_exec_snapshot_date != today_str:
                 self._send_execution_status_snapshot(now)
                 self.last_exec_snapshot_date = today_str
+                self._save_state()
+            if self.last_liquidation_map_date != today_str:
+                self._send_liquidation_map_post()
+                self.last_liquidation_map_date = today_str
+                self._save_state()
+            if self.last_education_post_date != today_str:
+                self._send_member_education_post()
+                self.last_education_post_date = today_str
                 self._save_state()
 
         # 2. Fetch Global context
@@ -5052,6 +5418,7 @@ class PonchBot:
                         self.tracker.signals[-1]["signal_size_pct"] = strong_size
                         self.tracker.signals[-1]["trading_signal_msg_id"] = trading_resp.get("result", {}).get("message_id") if trading_resp else None
                         self._track_active_trade_message(self.tracker.signals[-1], msg_id)
+                        self._send_active_trade_snapshot(self.tracker.signals[-1])
                         self._record_signal_sent("STRONG", now=now)
                         self._execute_exchange_trade(self.tracker.signals[-1])
                         self._save_state()
@@ -5110,6 +5477,7 @@ class PonchBot:
                         self.tracker.signals[-1]["signal_size_pct"] = extreme_size
                         self.tracker.signals[-1]["trading_signal_msg_id"] = trading_resp.get("result", {}).get("message_id") if trading_resp else None
                         self._track_active_trade_message(self.tracker.signals[-1], msg_id)
+                        self._send_active_trade_snapshot(self.tracker.signals[-1])
                         self._record_signal_sent("EXTREME", now=now)
                         self._execute_exchange_trade(self.tracker.signals[-1])
                         self._save_state()
@@ -5181,6 +5549,9 @@ class PonchBot:
                 if sig.get("msg_id") and current_public_signal and not private_exec_paper_signal:
                     tg.update_signal_message(self._signal_chat_id(), sig["msg_id"], sig)
 
+                if evt_type in {"TP1", "TP2"} and current_public_signal and not private_exec_paper_signal:
+                    self._refresh_active_trade_snapshot(sig, close_price=latest_price, event_label=evt_type)
+
                 # Public reply alerts keep the original public behavior.
                 if sig.get("msg_id") and current_public_signal and not private_exec_paper_signal and not suppress_intermediate_notice:
                     if evt_type == "TP1":
@@ -5236,6 +5607,7 @@ class PonchBot:
                     self._save_state()
 
                 if evt_type in terminal_event_types and current_public_signal and not private_exec_paper_signal:
+                    self._send_trade_journal(sig, evt_type, close_price=latest_price)
                     self._cleanup_active_trade_messages(sig)
 
                 if evt_type in ("TP1", "TP2", "TP3", "ENTRY_CLOSE", "PROFIT_SL", "SL") and not suppress_intermediate_notice:
@@ -6865,6 +7237,7 @@ class PonchBot:
                 self.tracker.signals[-1]["signal_size_pct"] = dyn_size
                 self.tracker.signals[-1]["trading_signal_msg_id"] = trading_resp.get("result", {}).get("message_id") if trading_resp else None
                 self._track_active_trade_message(self.tracker.signals[-1], msg_id)
+                self._send_active_trade_snapshot(self.tracker.signals[-1])
                 self._save_state()
                 self._execute_exchange_trade(self.tracker.signals[-1])
 
