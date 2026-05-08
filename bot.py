@@ -87,6 +87,7 @@ from config import (
     STRUCTURE_GUARD_MODE_BY_TF, LATE_CONFIRM_MAX_EMA2_ATR_DISTANCE_BY_TF,
     LATE_CONFIRM_MAX_BODY_ATR_BY_TF
 )
+from education_posts import PROFESSIONAL_MEMBER_EDUCATION_POSTS
 from levels import calculate_levels, check_liquidity_sweep, check_volatility_touch
 from channels import calculate_channels, check_channel_signals
 from momentum import calculate_momentum, ScalpTracker, detect_trend, classify_momentum_zone, check_htf_pullback_entry, check_one_h_reclaim_entry
@@ -191,6 +192,7 @@ class PonchBot:
         self.live_exchange_history_cache = {}
         self.last_session_update = time.time()
         self.last_daily_update   = time.time()
+        self.last_liq_heatmap_capture = 0.0
         self.last_update_id      = state.get("last_update_id", 0)
         self.last_command_check  = 0
 
@@ -338,6 +340,9 @@ class PonchBot:
     def _is_analytics_topic(self, chat_id, message_thread_id):
         return self._is_specific_signal_topic(chat_id, message_thread_id, self._trading_signal_thread_id())
 
+    def _is_liqmap_topic(self, chat_id, message_thread_id):
+        return self._is_specific_signal_topic(chat_id, message_thread_id, self._general_thread_id())
+
     def _is_signal_command_topic(self, chat_id, message_thread_id):
         return self._is_specific_signal_topic(chat_id, message_thread_id, self._trading_signal_thread_id())
 
@@ -415,6 +420,8 @@ class PonchBot:
         if cmd_base in {"/scenarios", "/intraday"} and not self._is_scenarios_topic(chat_id, message_thread_id):
             return self._silence_restricted_command(message)
         if cmd_base == "/analytics" and not self._is_analytics_topic(chat_id, message_thread_id):
+            return self._silence_restricted_command(message)
+        if cmd_base == "/liqmap" and not self._is_liqmap_topic(chat_id, message_thread_id):
             return self._silence_restricted_command(message)
         return False
 
@@ -702,10 +709,275 @@ class PonchBot:
                 "<blockquote>Topic: Session behavior</blockquote>\n"
                 "London and New York usually decide where liquidity gets taken. Asia often sets the range that later sessions attack."
             ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Breakout confirmation</blockquote>\n"
+                "A breakout is stronger when price closes above the level and then holds it. A quick wick above resistance is not enough by itself."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Retest entries</blockquote>\n"
+                "After a breakout, the retest is often the cleaner entry. Chasing the first candle usually gives worse risk and more emotional mistakes."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Stop placement</blockquote>\n"
+                "A stop should sit beyond invalidation, not at a random dollar amount. If the idea is still valid after your stop, the stop is in the wrong place."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Target selection</blockquote>\n"
+                "Targets work better when they point to real liquidity or structure. Arbitrary take-profit numbers usually ignore where price actually wants to travel."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Range trading</blockquote>\n"
+                "Inside a range, the best trades often come from the edges. Entries in the middle of the range usually offer weak reward and messy price action."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Trend continuation</blockquote>\n"
+                "Continuation setups work best when the pullback is controlled and volume dries up into support. A violent pullback often means the move is losing quality."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Counter-trend rules</blockquote>\n"
+                "Counter-trend trades need a stronger reason than with-trend trades. That usually means a sweep, rejection, and fast reclaim, not just a guess at the top or bottom."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Timeframe alignment</blockquote>\n"
+                "When 1H and 4H point the same way, signals usually behave cleaner. Mixed timeframes often create noise and shorter-lived moves."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: News caution</blockquote>\n"
+                "Right before major news, clean structure can break for no technical reason. Lower size or stay flat when volatility is event-driven."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Funding extremes</blockquote>\n"
+                "Extreme funding can warn that one side is overcrowded. It is a clue about risk, not an automatic signal by itself."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Open interest context</blockquote>\n"
+                "Price rising with open interest rising often means new positions are joining the move. Price rising while open interest falls can mean shorts are only closing."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Wick rejection</blockquote>\n"
+                "A strong wick matters more when it hits a real level and the next candle confirms it. A wick in the middle of nowhere usually has less meaning."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Patience after sweep</blockquote>\n"
+                "After a liquidity sweep, let the market show its reaction first. The sweep itself is the setup context, not always the exact entry trigger."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Failed breakout</blockquote>\n"
+                "A failed breakout can become a sharp move the other way. When price loses the breakout level fast, trapped traders often fuel the reversal."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Failed breakdown</blockquote>\n"
+                "A failed breakdown is powerful when price quickly reclaims the lost support. That tells you sellers could not keep control below the level."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Market structure break</blockquote>\n"
+                "A structure break means more when it removes a meaningful swing, not just a tiny intraday pivot. Bigger breaks usually lead to cleaner continuation."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Higher-low logic</blockquote>\n"
+                "In an uptrend, a higher low that holds is often more useful than a random bullish candle. It shows buyers are defending earlier than before."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Lower-high logic</blockquote>\n"
+                "In a downtrend, a lower high helps confirm seller control. If price cannot reclaim the prior reaction high, continuation lower becomes more likely."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Risk-reward filter</blockquote>\n"
+                "Even a good idea can be a bad trade if the stop is too wide for the target. Location matters as much as direction."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: First touch vs second touch</blockquote>\n"
+                "The first touch of a level often gives the cleanest reaction. Each extra test can weaken the level as liquidity gets consumed."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Confluence</blockquote>\n"
+                "A level becomes stronger when multiple reasons meet there: structure, liquidity, funding pressure, session timing, and trend alignment."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Session highs and lows</blockquote>\n"
+                "Session highs and lows matter because they attract stops and liquidity. Price often visits them before the real directional move begins."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Daily open</blockquote>\n"
+                "The daily open can act like a balance point. Holding above it often supports longs, while repeated rejection below it can help shorts."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Weekly open</blockquote>\n"
+                "The weekly open is more meaningful than many traders realize. When price reclaims or loses it cleanly, that can shape the whole week."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Monthly levels</blockquote>\n"
+                "Monthly highs, lows, and opens matter because they hold bigger liquidity. Reactions there usually carry more weight than small intraday levels."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: ATR awareness</blockquote>\n"
+                "If your target sits inside normal hourly volatility, the move may happen too easily to be meaningful. If your stop is smaller than normal noise, it may be too tight."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Choppy market warning</blockquote>\n"
+                "When candles overlap heavily and both sides keep getting rejected, the market is often in chop. Good traders preserve energy there instead of forcing trades."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Momentum candle trap</blockquote>\n"
+                "Large momentum candles look exciting, but they often offer the worst entry if you are late. Let the market pull back or prove continuation first."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Acceptance above a level</blockquote>\n"
+                "Acceptance means price spends time above the level and keeps holding it. One fast poke above resistance is not the same thing."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Acceptance below a level</blockquote>\n"
+                "Acceptance below support tells you the market is comfortable lower. That is very different from a quick sweep that snaps right back up."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Best side of the market</blockquote>\n"
+                "Sometimes the best edge is not in predicting both directions. It is in choosing the side that has trend, structure, and positioning behind it."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Trade location</blockquote>\n"
+                "A mediocre setup from a great location can outperform a great-looking setup from a bad location. Price level still matters more than excitement."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Internal range traps</blockquote>\n"
+                "Small local highs and lows inside a bigger range often trap impatient traders. Focus on the meaningful external liquidity first."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Strong support</blockquote>\n"
+                "Support is stronger when it comes from a bigger timeframe and lines up with a liquidity zone. The best long reactions usually happen from those deeper clusters."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Strong resistance</blockquote>\n"
+                "Resistance is stronger when it matches a major prior high and a crowded short-liquidation area above price. That is where rejection plans become more attractive."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Liquidity above price</blockquote>\n"
+                "Liquidity above price can act like a magnet when the market is bullish. That does not mean long immediately, but it does help explain likely path."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Liquidity below price</blockquote>\n"
+                "Liquidity below price becomes important when longs are crowded or support is weak. Flushes often happen before the market shows its real intention."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Compression</blockquote>\n"
+                "When price compresses tightly under resistance or above support, expansion usually follows. The key is waiting for direction instead of guessing too early."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Impulse and pullback</blockquote>\n"
+                "Healthy trends usually alternate between impulse and pullback. Entering after the impulse without waiting for the pullback often hurts the trade location."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Entry quality</blockquote>\n"
+                "A better entry is not only about price. It also gives better invalidation, cleaner logic, and less emotional pressure after entering."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Invalidated setup</blockquote>\n"
+                "When a setup is invalidated, the smart move is to accept it quickly. Staying loyal to a dead idea usually creates a bigger loss than planned."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Breakeven discipline</blockquote>\n"
+                "Moving to breakeven too early can remove a good trade for no reason. Moving too late can give back a solid position. Let structure guide the adjustment."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Scaling out</blockquote>\n"
+                "Taking partials can reduce pressure and protect profit, but do not cut the whole trade too early. Leave room for the part of the move that pays best."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Strong close</blockquote>\n"
+                "A candle closing near its high in a bullish move, or near its low in a bearish move, usually shows commitment. Weak closes often signal hesitation."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Fake strength</blockquote>\n"
+                "Some moves look strong only because they are fueled by short covering or thin liquidity. Structure and follow-through tell you if the move is real."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Laddering levels</blockquote>\n"
+                "When several nearby levels stack together, treat the area as a zone instead of pretending every line is separate. Markets often react to clusters, not exact numbers."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Good miss vs bad fill</blockquote>\n"
+                "Missing a trade is frustrating, but forcing a late entry is often worse. A disciplined miss is still better than a low-quality fill."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Trade fatigue</blockquote>\n"
+                "After several trades in a row, decision quality often drops. Overtrading usually starts when discipline gets replaced by the need to stay active."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Clean chart thinking</blockquote>\n"
+                "More indicators do not always mean more clarity. The best read often comes from price, key levels, liquidity, and a few strong context tools."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Confirmation candle</blockquote>\n"
+                "A confirmation candle should support the idea with close, location, and reaction. A random green or red candle is not enough confirmation by itself."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Sweep and hold</blockquote>\n"
+                "The strongest sweeps are often the ones that reverse quickly and then hold the reclaimed area. That hold tells you the trap actually worked."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Map before entry</blockquote>\n"
+                "Know the invalidation and target path before you enter. If the plan is unclear after entry, the trade was probably not ready."
+            ),
+            (
+                "🎓 <b>Member Education</b>\n"
+                "<blockquote>Topic: Waiting for the better trade</blockquote>\n"
+                "Good trading is often the skill of rejecting average setups. The biggest edge usually comes from selectivity, not constant action."
+            ),
         ]
 
     def _send_member_education_post(self):
-        posts = self._member_education_posts()
+        posts = self._member_education_posts() + PROFESSIONAL_MEMBER_EDUCATION_POSTS
         if not posts or self.is_booting:
             return
         idx = int(self.education_post_index or 0) % len(posts)
@@ -718,7 +990,7 @@ class PonchBot:
         self.education_post_index = idx + 1
         self._save_state()
 
-    def _send_liquidation_map_post(self):
+    def _send_liquidation_map_post(self, *, chat_id=None, message_thread_id=None):
         if self.is_booting:
             return
         snapshot = build_liquidation_map_snapshot(symbol=SYMBOL)
@@ -730,15 +1002,20 @@ class PonchBot:
             downside = row.get("downside")
             upside_zone = row.get("upside_zone") or {}
             downside_zone = row.get("downside_zone") or {}
-            up_txt = f"{float(upside):,.0f} ({self._compact_usd(upside_zone.get('size_usd'))})" if upside else "n/a"
-            down_txt = f"{float(downside):,.0f} ({self._compact_usd(downside_zone.get('size_usd'))})" if downside else "n/a"
+            up_txt = f"{float(upside):,.0f} {self._compact_usd(upside_zone.get('size_usd'))}" if upside else "n/a"
+            down_txt = f"{float(downside):,.0f} {self._compact_usd(downside_zone.get('size_usd'))}" if downside else "n/a"
             lines.append(f"{horizon}: ↑ {up_txt} | ↓ {down_txt}")
+        compact_lines = lines[:4]
+        if len(lines) > 4:
+            compact_lines.append(f"1M: {lines[-1].split(': ', 1)[1]}")
         chart_path = generate_liquidation_map_chart(
             snapshot.get("chart_df"),
             current_price=float(snapshot.get("current_price", 0) or 0),
             horizon_rows=horizon_rows,
+            heatmap_rows=snapshot.get("heatmap_rows"),
+            heatmap_history=snapshot.get("heatmap_history"),
             symbol=SYMBOL,
-            timeframe="1h",
+            timeframe=str(snapshot.get("chart_timeframe") or "15m"),
             output_path="liquidation_map_post.png",
         )
         message = (
@@ -747,22 +1024,22 @@ class PonchBot:
             f"Price: {float(snapshot.get('current_price', 0) or 0):,.2f}\n"
             f"Funding: {float(snapshot.get('funding_rate', 0) or 0):+.6f}%"
             f"</blockquote>\n"
-            f"<blockquote>{chr(10).join(lines)}</blockquote>"
+            f"<blockquote>{chr(10).join(compact_lines)}</blockquote>"
         )
         try:
             if chart_path:
                 tg.send_photo(
                     chart_path,
                     caption=message,
-                    chat_id=self._signal_chat_id(),
-                    message_thread_id=self._scenarios_thread_id(),
+                    chat_id=chat_id or self._signal_chat_id(),
+                    message_thread_id=message_thread_id if message_thread_id is not None else self._scenarios_thread_id(),
                 )
             else:
                 tg.send(
                     message,
                     parse_mode="HTML",
-                    chat_id=self._signal_chat_id(),
-                    message_thread_id=self._scenarios_thread_id(),
+                    chat_id=chat_id or self._signal_chat_id(),
+                    message_thread_id=message_thread_id if message_thread_id is not None else self._scenarios_thread_id(),
                 )
         finally:
             try:
@@ -2561,6 +2838,8 @@ class PonchBot:
                 message_thread_id=message.get("message_thread_id"),
                 mode="short_term" if cmd_base == "/intraday" else "swing",
             )
+        if cmd_base == "/liqmap":
+            return True
         if cmd_base == "/analytics":
             return True
         if (message.get("photo") or (message.get("document") or {}).get("mime_type")) and not text:
@@ -5247,6 +5526,12 @@ class PonchBot:
 
         # Check confirmation aggregation (once per tick)
         if latest_price is not None:
+            if current_time - float(self.last_liq_heatmap_capture or 0) >= 300:
+                try:
+                    build_liquidation_map_snapshot(symbol=SYMBOL)
+                    self.last_liq_heatmap_capture = current_time
+                except Exception as e:
+                    print(f"[LIQMAP] history capture failed: {e}")
             self._update_liquidity_pool_context(data, latest_price, current_time)
             self._maybe_send_liquidity_pool_report(data, latest_price, now, current_time)
             for side in ["LONG", "SHORT"]:
@@ -6149,6 +6434,12 @@ class PonchBot:
                     message_thread_id=message_thread_id,
                     mode="short_term" if cmd_base == "/intraday" else "swing",
                 )
+            elif cmd_base == "/liqmap":
+                if not self._is_liqmap_topic(chat_id, message_thread_id):
+                    self._silence_restricted_command(message)
+                    self._save_state()
+                    continue
+                self._send_liquidation_map_post(chat_id=chat_id, message_thread_id=message_thread_id)
             elif text == "/start":
                 welcome_msg = (
                     f"<b>How to Join:</b>\n\n"

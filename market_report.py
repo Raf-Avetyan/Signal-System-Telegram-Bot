@@ -1,5 +1,8 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
 import math
+import os
+import time
 
 import pandas as pd
 
@@ -28,6 +31,9 @@ BITUNIX_LIMITS = {
     "1w": 80,
     "1M": 36,
 }
+LIQUIDATION_HEATMAP_HISTORY_FILE = "liquidation_heatmap_history.json"
+LIQUIDATION_HEATMAP_HISTORY_MAX_POINTS = 192
+LIQUIDATION_HEATMAP_HISTORY_MIN_SECONDS = 300
 
 
 def _safe_float(value, default=0.0):
@@ -1045,6 +1051,143 @@ def _pick_zone_for_distance(rows, target_dist_pct, tolerance_pct):
     )
 
 
+def _build_liquidation_heatmap_rows(current_price, atr_1h, bitunix_book, okx_order_book, liq_map):
+    rows = []
+
+    def add_book_rows(order_book, source_name, max_distance_mult, bucket_pct, min_usd):
+        if not order_book:
+            return
+        raw_rows = detect_liquidity_candidates(
+            order_book=order_book,
+            price=current_price,
+            atr=max(atr_1h, current_price * 0.0025),
+            timeframe=source_name,
+            max_distance_atr_mult=max_distance_mult,
+            bucket_pct=bucket_pct,
+        )
+        for row in raw_rows:
+            price = _safe_float(row.get("level_price"))
+            size_usd = _safe_float(row.get("size_usd"))
+            dist_pct = _safe_float(row.get("distance_pct"))
+            side = str(row.get("side") or "").upper()
+            if price <= 0 or size_usd < min_usd:
+                continue
+            if dist_pct < 0.10 or dist_pct > 8.5:
+                continue
+            rows.append(
+                {
+                    "price": price,
+                    "size_usd": size_usd,
+                    "distance_pct": dist_pct,
+                    "zone_side": "short_liq" if side == "LONG" else "long_liq",
+                    "bucket": "major" if dist_pct >= 2.5 or size_usd >= 18_000_000 else ("mid" if dist_pct >= 0.7 else "near"),
+                    "source": source_name,
+                }
+            )
+
+    add_book_rows(bitunix_book, "bitunix", 24.0, 0.03, 350_000)
+    add_book_rows(okx_order_book, "okx", 24.0, 0.03, 2_000_000)
+
+    for row in list((liq_map or {}).get("all_short_liq_zones") or []) + list((liq_map or {}).get("all_long_liq_zones") or []):
+        price = _safe_float(row.get("price"))
+        size_usd = _safe_float(row.get("size_usd"))
+        dist_pct = _safe_float(row.get("distance_pct"))
+        if price <= 0 or size_usd <= 0 or dist_pct > 9.5:
+            continue
+        rows.append(
+            {
+                "price": price,
+                "size_usd": size_usd,
+                "distance_pct": dist_pct,
+                "zone_side": row.get("zone_side"),
+                "bucket": row.get("bucket") or ("major" if dist_pct >= 2.5 else "mid"),
+                "source": "cluster",
+            }
+        )
+
+    if not rows:
+        return []
+
+    grouped = {}
+    bucket_size = max(current_price * 0.0007, 1.0)
+    for row in rows:
+        zone_side = str(row.get("zone_side") or "")
+        key = (zone_side, int(_safe_float(row.get("price")) / bucket_size))
+        current = grouped.get(key)
+        if current is None:
+            grouped[key] = dict(row)
+            continue
+        if _safe_float(row.get("size_usd")) > _safe_float(current.get("size_usd")):
+            current["price"] = _safe_float(row.get("price"))
+            current["bucket"] = row.get("bucket")
+            current["source"] = row.get("source")
+        current["size_usd"] = _safe_float(current.get("size_usd")) + _safe_float(row.get("size_usd")) * 0.35
+        current["distance_pct"] = min(_safe_float(current.get("distance_pct")), _safe_float(row.get("distance_pct")))
+        grouped[key] = current
+
+    merged_rows = list(grouped.values())
+    merged_rows.sort(
+        key=lambda row: (
+            str(row.get("bucket") or "") == "major",
+            _safe_float(row.get("size_usd")),
+            -_safe_float(row.get("distance_pct")),
+        ),
+        reverse=True,
+    )
+    return merged_rows[:90]
+
+
+def _load_liquidation_heatmap_history():
+    if not os.path.exists(LIQUIDATION_HEATMAP_HISTORY_FILE):
+        return []
+    try:
+        with open(LIQUIDATION_HEATMAP_HISTORY_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return payload if isinstance(payload, list) else []
+    except Exception:
+        return []
+
+
+def _save_liquidation_heatmap_history(history_rows):
+    try:
+        with open(LIQUIDATION_HEATMAP_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history_rows, f, separators=(",", ":"))
+    except Exception:
+        pass
+
+
+def _record_liquidation_heatmap_history(current_price, heatmap_rows):
+    now_ts = int(time.time())
+    compact_rows = []
+    for row in (heatmap_rows or [])[:60]:
+        price = _safe_float(row.get("price"))
+        size_usd = _safe_float(row.get("size_usd"))
+        if price <= 0 or size_usd <= 0:
+            continue
+        compact_rows.append(
+            {
+                "price": price,
+                "size_usd": size_usd,
+                "distance_pct": _safe_float(row.get("distance_pct")),
+                "zone_side": str(row.get("zone_side") or ""),
+                "bucket": str(row.get("bucket") or ""),
+            }
+        )
+    history = _load_liquidation_heatmap_history()
+    snapshot = {
+        "ts": now_ts,
+        "price": _safe_float(current_price),
+        "rows": compact_rows,
+    }
+    if history and (now_ts - int(history[-1].get("ts") or 0)) < LIQUIDATION_HEATMAP_HISTORY_MIN_SECONDS:
+        history[-1] = snapshot
+    else:
+        history.append(snapshot)
+    history = history[-LIQUIDATION_HEATMAP_HISTORY_MAX_POINTS:]
+    _save_liquidation_heatmap_history(history)
+    return history
+
+
 def build_liquidation_map_snapshot(symbol=SYMBOL):
     data = _fetch_all_bitunix_timeframes(symbol=symbol, timeframes=BITUNIX_TIMEFRAMES)
     missing = [tf for tf in BITUNIX_TIMEFRAMES if tf not in data or data[tf].empty]
@@ -1055,7 +1198,7 @@ def build_liquidation_map_snapshot(symbol=SYMBOL):
     ticker = _fetch_bitunix_ticker(symbol=symbol)
     funding = _fetch_bitunix_funding(symbol=symbol)
     funding_history = _fetch_bitunix_funding_history(symbol=symbol, limit=30)
-    book = _fetch_bitunix_depth(symbol=symbol, limit="50")
+    book = _fetch_bitunix_depth(symbol=symbol, limit="max")
 
     current_price = _safe_float(
         ticker.get("lastPrice") or ticker.get("last") or funding.get("lastPrice") or funding.get("markPrice")
@@ -1089,8 +1232,8 @@ def build_liquidation_map_snapshot(symbol=SYMBOL):
         okx_ctx=okx_ctx,
     )
 
-    upside_rows = list((liq_map or {}).get("short_liq_zones") or [])
-    downside_rows = list((liq_map or {}).get("long_liq_zones") or [])
+    upside_rows = list((liq_map or {}).get("all_short_liq_zones") or (liq_map or {}).get("short_liq_zones") or [])
+    downside_rows = list((liq_map or {}).get("all_long_liq_zones") or (liq_map or {}).get("long_liq_zones") or [])
     horizon_targets = [
         ("12H", 0.7, 0.35),
         ("24H", 1.1, 0.45),
@@ -1114,12 +1257,24 @@ def build_liquidation_map_snapshot(symbol=SYMBOL):
             }
         )
 
+    heatmap_rows = _build_liquidation_heatmap_rows(
+        current_price=current_price,
+        atr_1h=atr_1h,
+        bitunix_book=book,
+        okx_order_book=(okx_ctx or {}).get("order_book"),
+        liq_map=liq_map,
+    )
+    heatmap_history = _record_liquidation_heatmap_history(current_price, heatmap_rows)
+
     return {
         "current_price": current_price,
         "funding_rate": funding_rate_raw,
-        "chart_df": data["1h"],
+        "chart_df": data["15m"],
+        "chart_timeframe": "15m",
         "liq_map": liq_map,
         "horizons": horizons,
+        "heatmap_rows": heatmap_rows,
+        "heatmap_history": heatmap_history,
     }
 
 

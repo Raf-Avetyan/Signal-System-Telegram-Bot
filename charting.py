@@ -4,6 +4,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import mplfinance as mpf
+import numpy as np
 import pandas as pd
 
 from config import get_adjusted_sessions
@@ -51,6 +52,50 @@ def _compact_money(value):
 
 def _draw_segment_line(ax, y, x_start, x_end, color, lw=2.0, ls="-"):
     ax.hlines(y, x_start, x_end, colors=color, linewidth=lw, linestyles=ls, zorder=3)
+
+
+def _synthetic_heatmap_history(rows, steps=72):
+    ordered = [row for row in (rows or []) if float(row.get("price") or 0) > 0]
+    if not ordered:
+        return []
+    ordered = sorted(ordered, key=lambda row: float(row.get("size_usd") or 0), reverse=True)[:60]
+    steps = int(max(steps, 12))
+    history = [{"ts": step, "rows": []} for step in range(steps)]
+    size_values = [max(float(row.get("size_usd") or 0), 1.0) for row in ordered]
+    min_size = min(size_values)
+    max_size = max(size_values)
+    for idx, row in enumerate(ordered):
+        size_usd = max(float(row.get("size_usd") or 0), 1.0)
+        if max_size > min_size:
+            norm = (size_usd - min_size) / (max_size - min_size)
+        else:
+            norm = 0.5
+        seg_count = 1 if norm >= 0.70 else (2 if norm >= 0.35 else 3)
+        for seg_idx in range(seg_count):
+            base_len = int(steps * (0.18 + 0.52 * norm))
+            seg_len = max(8, min(steps, base_len - seg_idx * max(2, int(base_len * 0.18))))
+            max_start = max(0, steps - seg_len)
+            seed = (idx + 3) * 17 + (seg_idx + 1) * 29
+            start = seed % (max_start + 1 if max_start > 0 else 1)
+            end = min(steps, start + seg_len)
+            for step in range(start, end):
+                mid = (start + end - 1) / 2.0
+                if end - start > 1:
+                    dist_from_mid = abs(step - mid) / max((end - start) / 2.0, 1.0)
+                else:
+                    dist_from_mid = 0.0
+                intensity = 0.78 + (1.0 - dist_from_mid) * 0.22
+                price_jitter = ((((idx * 5) + (seg_idx * 3) + step) % 3) - 1) * 0.00003
+                history[step]["rows"].append(
+                    {
+                        "price": float(row.get("price") or 0) * (1.0 + price_jitter),
+                        "size_usd": max(size_usd * intensity, 1.0),
+                        "distance_pct": float(row.get("distance_pct") or 0),
+                        "zone_side": row.get("zone_side"),
+                        "bucket": row.get("bucket"),
+                    }
+                )
+    return history
 
 
 def generate_signal_setup_chart(
@@ -160,8 +205,10 @@ def generate_liquidation_map_chart(
     *,
     current_price,
     horizon_rows,
+    heatmap_rows=None,
+    heatmap_history=None,
     symbol="BTCUSDT",
-    timeframe="1h",
+    timeframe="15m",
     output_path="liquidation_map.png",
 ):
     if df is None or df.empty:
@@ -171,39 +218,48 @@ def generate_liquidation_map_chart(
     all_values = list(plot_df["High"]) + list(plot_df["Low"]) + [float(current_price)]
     for row in horizon_rows or []:
         all_values.extend([float(row.get("upside") or current_price), float(row.get("downside") or current_price)])
+    for row in heatmap_rows or []:
+        px = float(row.get("price") or 0)
+        if px > 0:
+            all_values.append(px)
     ymin = min(all_values)
     ymax = max(all_values)
     padding_y = max((ymax - ymin) * 0.10, float(current_price) * 0.003)
     ylim = (ymin - padding_y, ymax + padding_y)
     num_candles = len(plot_df)
-    xlim = (0, num_candles + 28)
+    x_padding = 28
+    xlim = (0, num_candles + x_padding)
 
-    lines = [float(current_price)]
-    colors = ["#ffffff"]
-    widths = [1.8]
-    styles = ["--"]
+    dense_rows = [row for row in list(heatmap_rows or []) if float(row.get("price") or 0) > 0]
+    if not dense_rows:
+        for row in horizon_rows or []:
+            upside = row.get("upside")
+            downside = row.get("downside")
+            if upside:
+                dense_rows.append(
+                    {
+                        "price": float(upside),
+                        "size_usd": float((row.get("upside_zone") or {}).get("size_usd") or 0),
+                        "zone_side": "short_liq",
+                        "bucket": "mid",
+                    }
+                )
+            if downside:
+                dense_rows.append(
+                    {
+                        "price": float(downside),
+                        "size_usd": float((row.get("downside_zone") or {}).get("size_usd") or 0),
+                        "zone_side": "long_liq",
+                        "bucket": "mid",
+                    }
+                )
+
     labels = [(float(current_price), "PRICE", "#ffffff")]
-
-    yellow_palette = ["#fff3bf", "#ffec99", "#ffe066", "#ffd43b", "#fcc419", "#fab005", "#f59f00"]
-    for idx, row in enumerate(horizon_rows or []):
-        horizon = str(row.get("horizon") or f"H{idx + 1}")
-        upside = row.get("upside")
-        downside = row.get("downside")
-        color = yellow_palette[idx % len(yellow_palette)]
-        if upside:
-            zone = row.get("upside_zone") or {}
-            lines.append(float(upside))
-            colors.append(color)
-            widths.append(1.5)
-            styles.append("-")
-            labels.append((float(upside), f"{horizon} ↑ {float(upside):,.0f} | {_compact_money(zone.get('size_usd'))}", color))
-        if downside:
-            zone = row.get("downside_zone") or {}
-            lines.append(float(downside))
-            colors.append(color)
-            widths.append(1.5)
-            styles.append((0, (5, 3)))
-            labels.append((float(downside), f"{horizon} ↓ {float(downside):,.0f} | {_compact_money(zone.get('size_usd'))}", color))
+    top_above = [row for row in dense_rows if float(row.get("price") or 0) > float(current_price)]
+    top_below = [row for row in dense_rows if float(row.get("price") or 0) < float(current_price)]
+    top_above = sorted(top_above, key=lambda row: float(row.get("size_usd") or 0), reverse=True)[:2]
+    top_below = sorted(top_below, key=lambda row: float(row.get("size_usd") or 0), reverse=True)[:2]
+    selected_rows = top_above + top_below
 
     try:
         fig, axlist = mpf.plot(
@@ -222,11 +278,26 @@ def generate_liquidation_map_chart(
             returnfig=True,
         )
         ax = axlist[0]
+        ax.set_facecolor("#2b0047")
+        ax.grid(True, alpha=0.10, color="#323232")
         label_x = num_candles + 2.4
-        base_start = max(14, int(num_candles * 0.48))
-        for idx, (price, color, width, style) in enumerate(zip(lines, colors, widths, styles)):
-            offset = min(idx * 4, 20)
-            _draw_segment_line(ax, price, base_start + offset, num_candles + 2.0, color, lw=width, ls=style)
+        x_end = num_candles + 2.0
+        palette_above = ["#ffe066", "#ffd43b"]
+        palette_below = ["#74c0fc", "#5cdbd3"]
+        for idx, row in enumerate(top_above):
+            price = float(row.get("price") or 0)
+            size_usd = float(row.get("size_usd") or 0)
+            color = palette_above[min(idx, len(palette_above) - 1)]
+            _draw_segment_line(ax, price, max(10, int(num_candles * 0.58)), x_end, color, lw=1.8, ls="--")
+            labels.append((price, f"UP {price:,.0f} | {_compact_money(size_usd)}", color))
+        for idx, row in enumerate(top_below):
+            price = float(row.get("price") or 0)
+            size_usd = float(row.get("size_usd") or 0)
+            color = palette_below[min(idx, len(palette_below) - 1)]
+            _draw_segment_line(ax, price, max(10, int(num_candles * 0.58)), x_end, color, lw=1.8, ls="--")
+            labels.append((price, f"DN {price:,.0f} | {_compact_money(size_usd)}", color))
+
+        _draw_segment_line(ax, float(current_price), max(10, int(num_candles * 0.54)), x_end, "#ffffff", lw=1.6, ls="--")
         _draw_level_labels(ax, label_x, labels, show_price=False)
         fig.subplots_adjust(left=0.06, right=0.98)
         fig.savefig(output_path, bbox_inches="tight", pad_inches=0.1)

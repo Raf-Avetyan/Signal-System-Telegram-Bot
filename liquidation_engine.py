@@ -376,6 +376,8 @@ def build_liquidation_map(current_price, levels, tf_map, funding_ctx, ticker_ctx
         "positioning": positioning,
         "dominant_side": positioning.get("dominant_side"),
         "confidence": positioning.get("confidence"),
+        "all_long_liq_zones": long_liq_zones,
+        "all_short_liq_zones": short_liq_zones,
         "long_liq_zones": long_liq_zones[:6],
         "short_liq_zones": short_liq_zones[:6],
         "long_entry_zone": long_entry_zone,

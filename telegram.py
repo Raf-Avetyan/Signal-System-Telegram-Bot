@@ -116,6 +116,7 @@ def set_bot_commands(commands=None):
             {"command": "scenarios", "description": "Show BTC scenarios"},
             {"command": "intraday", "description": "Show short-term BTC plans"},
             {"command": "analytics", "description": "Show signal analytics"},
+            {"command": "liqmap", "description": "Show BTC liquidation map"},
         ]
 
     scopes = [
