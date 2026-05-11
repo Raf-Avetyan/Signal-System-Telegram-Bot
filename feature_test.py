@@ -7,14 +7,14 @@ def main():
     parser = argparse.ArgumentParser(description="Trigger feature test posts from terminal.")
     parser.add_argument(
         "action",
-        choices=["all", "snapshot", "journal", "liqmap", "education"],
+        choices=["all", "snapshot", "liqmap", "education"],
         help="Which feature test to run.",
     )
     parser.add_argument(
         "--side",
         choices=["LONG", "SHORT"],
         default="LONG",
-        help="Side used for demo signal snapshot/journal tests.",
+        help="Side used for demo signal snapshot tests.",
     )
     args = parser.parse_args()
 
@@ -26,20 +26,6 @@ def main():
     if args.action in {"all", "snapshot"}:
         bot._send_active_trade_snapshot(demo_sig)
         print("snapshot test sent")
-
-    if args.action in {"all", "journal"}:
-        journal_sig = dict(demo_sig)
-        journal_sig.update(
-            {
-                "status": "TP3",
-                "tp1_hit": True,
-                "tp2_hit": True,
-                "tp3_hit": True,
-                "journal_posted": False,
-            }
-        )
-        bot._send_trade_journal(journal_sig, "TP3", close_price=journal_sig.get("tp3"))
-        print("journal test sent")
 
     if args.action in {"all", "liqmap"}:
         bot._send_liquidation_map_post()

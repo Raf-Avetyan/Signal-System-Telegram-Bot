@@ -23,7 +23,7 @@ from config import (
     OI_CHANGE_THRESHOLD, LIQ_SQUEEZE_THRESHOLD, LIQ_ALERT_COOLDOWN, CHAT_ID,
     SIGNAL_CHAT_ID, SIGNAL_TRADING_THREAD_ID, SIGNAL_GENERAL_THREAD_ID,
     SIGNAL_SESSIONS_THREAD_ID, SIGNAL_ACTIVE_TRADES_THREAD_ID,
-    SIGNAL_SCENARIOS_THREAD_ID, SIGNAL_BLOCKED_THREAD_IDS,
+    SIGNAL_SCENARIOS_THREAD_ID, SIGNAL_SUCCESS_TRADES_THREAD_ID, SIGNAL_BLOCKED_THREAD_IDS,
     FAST_MOVE_THRESHOLD, FAST_MOVE_WINDOW, FAST_MOVE_COOLDOWN,
     BITUNIX_REG_LINK, INVITE_LINK, COMMAND_POLL_INTERVAL,
     BITUNIX_SCENARIO_TRADING_ENABLED, BITUNIX_SCENARIO_TRADING_MODE,
@@ -318,6 +318,12 @@ class PonchBot:
     def _scenarios_thread_id(self):
         try:
             return int(SIGNAL_SCENARIOS_THREAD_ID or 0)
+        except Exception:
+            return 0
+
+    def _success_trades_thread_id(self):
+        try:
+            return int(SIGNAL_SUCCESS_TRADES_THREAD_ID or 0)
         except Exception:
             return 0
 
@@ -641,6 +647,73 @@ class PonchBot:
             lines.append(f"Current: {float(close_price):,.2f}")
         return f"{header} [{tf_label}]\n<blockquote>{chr(10).join(lines)}</blockquote>\n<pre>{levels_code}</pre>"
 
+    def _public_signal_caption(self, sig, *, status_override="OPEN"):
+        sig = sig or {}
+        meta = sig.get("meta", {}) or {}
+        signal_type = str(sig.get("type") or "SCALP").upper()
+        signal_html_type = signal_type if signal_type in {"SCALP", "STRONG", "EXTREME"} else "SCALP"
+        tf_val = sig.get("tf")
+        indicators = meta.get("indicators")
+        if tf_val == "Confluence" and indicators:
+            tfs = sorted(list(set(ind.get('tf', 'N/A') for ind in indicators)))
+            tf_val = ", ".join(tfs)
+        return tg.get_signal_html(
+            signal_type=signal_html_type,
+            side=sig.get("side"),
+            timeframe=tf_val or "N/A",
+            entry=sig.get("entry"),
+            sl=sig.get("sl"),
+            initial_sl=sig.get("initial_sl", sig.get("sl")),
+            tp1=sig.get("tp1"),
+            tp2=sig.get("tp2"),
+            tp3=sig.get("tp3"),
+            status=status_override,
+            score=meta.get("score"),
+            trend=meta.get("trend"),
+            indicators=indicators,
+            reasons=meta.get("reasons"),
+            size=sig.get("signal_size_pct", meta.get("size")),
+            tp_liq_prob=meta.get("tp_liq_prob"),
+            tp_liq_usd=meta.get("tp_liq_usd"),
+            tp_liq_target=meta.get("tp_liq_target"),
+            trigger_label=meta.get("trigger"),
+        )
+
+    def _send_public_signal_snapshot(self, sig):
+        if not sig or self.is_booting:
+            return None
+        side = str(sig.get("side") or "").upper() or "BTC"
+        chart_path = self._generate_signal_snapshot_chart(
+            sig,
+            output_name=f"public_signal_{str(sig.get('signal_id') or 'sig')}.png",
+            title=f"{side} SIGNAL",
+        )
+        caption = self._public_signal_caption(sig, status_override="OPEN")
+        try:
+            if chart_path:
+                sig["public_signal_is_photo"] = True
+                resp = tg.send_photo(
+                    chart_path,
+                    caption=caption,
+                    chat_id=self._signal_chat_id(),
+                    message_thread_id=self._trading_signal_thread_id(),
+                )
+                return resp
+            sig["public_signal_is_photo"] = False
+            return tg.send(
+                caption,
+                parse_mode="HTML",
+                chat_id=self._signal_chat_id(),
+                message_thread_id=self._trading_signal_thread_id(),
+            )
+        finally:
+            try:
+                import os
+                if chart_path and os.path.exists(chart_path):
+                    os.remove(chart_path)
+            except Exception:
+                pass
+
     def _trade_journal_caption(self, sig, outcome_label, r_mult, note, *, close_price=None):
         side = str(sig.get("side") or "").upper()
         strategy = self._signal_strategy_label(sig)
@@ -652,6 +725,25 @@ class PonchBot:
         if close_price is not None:
             lines.append(f"Close: {float(close_price):,.2f}")
         return f"📘 <b>TRADE JOURNAL</b>\n<blockquote>{chr(10).join(lines)}</blockquote>\n{note}"
+
+    def _success_trade_caption(self, sig, outcome_label, r_mult, note, *, close_price=None):
+        side = str(sig.get("side") or "").upper()
+        strategy = self._signal_strategy_label(sig)
+        tf_label = self._signal_timeframe_label(sig)
+        lines = [
+            f"{side} | {tf_label} | {float(r_mult):+.2f}R",
+            f"Setup: {strategy}",
+            f"Entry: {float(sig.get('entry', 0) or 0):,.2f}",
+        ]
+        if close_price is not None:
+            lines.append(f"Close: {float(close_price):,.2f}")
+        if sig.get("tp1_hit"):
+            lines.append("TP1: hit")
+        if sig.get("tp2_hit"):
+            lines.append("TP2: hit")
+        if sig.get("tp3_hit"):
+            lines.append("TP3: hit")
+        return f"🏆 <b>TODAY'S SUCCESSFUL TRADE</b>\n<blockquote>{chr(10).join(lines)}</blockquote>\n{note}"
 
     def _signal_chart_timeframe(self, sig):
         tf = str((sig or {}).get("tf") or "").strip().lower()
@@ -984,30 +1076,6 @@ class PonchBot:
         signal_id = new_signal_id()
         tp_liq = self._estimate_tp_liquidity(side, current_price, scenario.get("tp1"), scenario.get("tp2"), scenario.get("tp3"))
 
-        trading_resp = None
-        if not self.is_booting:
-            trading_resp = tg.send_scalp_confirmed(
-                timeframe=exec_tf,
-                side=side,
-                entry=current_price,
-                sl=float(scenario.get("stop") or 0),
-                tp1=float(scenario.get("tp1") or 0),
-                tp2=float(scenario.get("tp2") or 0),
-                tp3=float(scenario.get("tp3") or 0),
-                strength=strength_label,
-                size=size_pct,
-                score=int(round(float(scenario.get("probability") or 0.0) / 10.0)),
-                trend=self.macro_trend,
-                reasons=reasons,
-                tp_liq_prob=tp_liq["prob"] if tp_liq else None,
-                tp_liq_usd=tp_liq["size_usd"] if tp_liq else None,
-                tp_liq_target=tp_liq["target"] if tp_liq else None,
-                trigger_label=trigger_label,
-                chat_id=self._signal_chat_id(),
-                message_thread_id=self._trading_signal_thread_id(),
-            )
-        public_msg_id = trading_resp.get("result", {}).get("message_id") if trading_resp else None
-
         self.tracker.log_signal(
             side=side,
             entry=current_price,
@@ -1017,7 +1085,7 @@ class PonchBot:
             tp3=float(scenario.get("tp3") or 0),
             tf=exec_tf,
             timestamp=now.strftime("%Y-%m-%d %H:%M"),
-            msg_id=public_msg_id,
+            msg_id=None,
             chat_id=self._signal_chat_id(),
             signal_type=signal_type,
             meta={
@@ -1042,6 +1110,10 @@ class PonchBot:
         sig = self.tracker.signals[-1]
         sig["signal_id"] = signal_id
         sig["signal_size_pct"] = size_pct
+        sig["public_signal_is_photo"] = True
+        trading_resp = self._send_public_signal_snapshot(sig) if not self.is_booting else None
+        public_msg_id = trading_resp.get("result", {}).get("message_id") if trading_resp else None
+        sig["msg_id"] = public_msg_id
         sig["trading_signal_msg_id"] = public_msg_id
         sig["symbol"] = SYMBOL
         self._send_active_trade_snapshot(sig)
@@ -1200,43 +1272,61 @@ class PonchBot:
                 break
 
     def _send_trade_journal(self, sig, evt_type, close_price=None):
-        if not sig or self.is_booting or sig.get("journal_posted"):
+        # Journal posts are intentionally disabled now.
+        return
+
+    def _send_success_trade_post(self, sig, evt_type, close_price=None):
+        if not sig or self.is_booting or sig.get("success_trade_posted"):
             return
+        target_chat = self._signal_chat_id()
+        target_thread = self._success_trades_thread_id()
+        if not target_chat or target_thread <= 0:
+            return
+
         outcome_key, r_mult = self.tracker._metric_outcome(sig)
+        evt_key = str(evt_type or "").upper()
+        has_any_tp = bool(sig.get("tp1_hit") or sig.get("tp2_hit") or sig.get("tp3_hit"))
+        success_like_close = outcome_key == "wins" or (evt_key in {"ENTRY_CLOSE", "PROFIT_SL", "TP3"} and has_any_tp)
+        if not success_like_close:
+            return
+
         outcome_label = {
-            "wins": "Win",
-            "losses": "Loss",
-            "breakeven": "Breakeven",
-        }.get(outcome_key, str(evt_type or "Closed").title())
+            "TP3": "Full Target Win",
+            "PROFIT_SL": "Protected Win",
+            "ENTRY_CLOSE": "Managed Win",
+        }.get(evt_key, "Win")
         chart_path = self._generate_signal_snapshot_chart(
             sig,
-            output_name=f"journal_{str(sig.get('signal_id') or 'sig')}.png",
+            output_name=f"success_trade_{str(sig.get('signal_id') or 'sig')}.png",
             close_price=float(close_price or sig.get("tp3") or sig.get("tp2") or sig.get("tp1") or sig.get("entry") or 0),
             event_label=evt_type,
-            title=f"{outcome_label.upper()} JOURNAL",
+            title="SUCCESSFUL TRADE",
         )
         try:
-            note = "Managed well and closed according to plan."
-            if outcome_key == "losses":
-                note = "Invalidation hit. This stayed a rules-based loss."
-            elif outcome_key == "breakeven":
-                note = "Protected exit after the trade lost momentum."
-            caption = self._trade_journal_caption(sig, outcome_label, r_mult, note, close_price=close_price)
+            note = "Closed green and managed according to plan."
+            if evt_key == "ENTRY_CLOSE":
+                note = "Locked a positive result after targets were touched and momentum cooled."
+            elif evt_key == "PROFIT_SL":
+                note = "Protected profit on the stop after the move already paid."
+            elif evt_key == "TP3":
+                note = "Full target sequence completed cleanly."
+
+            caption = self._success_trade_caption(sig, outcome_label, r_mult, note, close_price=close_price)
             if chart_path:
                 tg.send_photo(
                     chart_path,
                     caption=caption,
-                    chat_id=self._signal_chat_id(),
-                    message_thread_id=self._general_thread_id(),
+                    chat_id=target_chat,
+                    message_thread_id=target_thread,
                 )
             else:
                 tg.send(
                     caption,
                     parse_mode="HTML",
-                    chat_id=self._signal_chat_id(),
-                    message_thread_id=self._general_thread_id(),
+                    chat_id=target_chat,
+                    message_thread_id=target_thread,
                 )
-            sig["journal_posted"] = True
+            sig["success_trade_posted"] = True
             self._save_state()
         finally:
             try:
@@ -6245,25 +6335,10 @@ class PonchBot:
                         )
                         tp_liq = self._estimate_tp_liquidity(side, latest_price, tp1_c, tp2_c, tp3_c)
                         signal_id = new_signal_id()
-                        trading_resp = tg.send_strong(
-                            side=ce["side"],
-                            total_points=ce["points"],
-                            confirmations=ce["confirmations"],
-                            indicators_list=ce["indicators"],
-                            price=latest_price,
-                            sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
-                            size=strong_size,
-                            tp_liq_prob=tp_liq["prob"] if tp_liq else None,
-                            tp_liq_usd=tp_liq["size_usd"] if tp_liq else None,
-                            tp_liq_target=tp_liq["target"] if tp_liq else None,
-                            chat_id=self._signal_chat_id(),
-                            message_thread_id=self._trading_signal_thread_id(),
-                        )
-                        public_msg_id = trading_resp.get("result", {}).get("message_id") if trading_resp else None
                         self.tracker.log_signal(
                             side=ce["side"], entry=latest_price, sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
                             tf="Confluence", timestamp=base_candle_ts or conf_ts,
-                            msg_id=public_msg_id, chat_id=self._signal_chat_id(), signal_type="STRONG",
+                            msg_id=None, chat_id=self._signal_chat_id(), signal_type="STRONG",
                             meta={
                                 "signal_id": signal_id,
                                 "indicators": ce["indicators"],
@@ -6275,6 +6350,10 @@ class PonchBot:
                         )
                         self.tracker.signals[-1]["signal_id"] = signal_id
                         self.tracker.signals[-1]["signal_size_pct"] = strong_size
+                        self.tracker.signals[-1]["public_signal_is_photo"] = True
+                        trading_resp = self._send_public_signal_snapshot(self.tracker.signals[-1]) if not self.is_booting else None
+                        public_msg_id = trading_resp.get("result", {}).get("message_id") if trading_resp else None
+                        self.tracker.signals[-1]["msg_id"] = public_msg_id
                         self.tracker.signals[-1]["trading_signal_msg_id"] = public_msg_id
                         self._send_active_trade_snapshot(self.tracker.signals[-1])
                         self._record_signal_sent("STRONG", now=now)
@@ -6289,25 +6368,10 @@ class PonchBot:
                         )
                         tp_liq = self._estimate_tp_liquidity(side, latest_price, tp1_c, tp2_c, tp3_c)
                         signal_id = new_signal_id()
-                        trading_resp = tg.send_extreme(
-                            side=ce["side"],
-                            total_points=ce["points"],
-                            confirmations=ce["confirmations"],
-                            indicators_list=ce["indicators"],
-                            price=latest_price,
-                            sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
-                            size=extreme_size,
-                            tp_liq_prob=tp_liq["prob"] if tp_liq else None,
-                            tp_liq_usd=tp_liq["size_usd"] if tp_liq else None,
-                            tp_liq_target=tp_liq["target"] if tp_liq else None,
-                            chat_id=self._signal_chat_id(),
-                            message_thread_id=self._trading_signal_thread_id(),
-                        )
-                        public_msg_id = trading_resp.get("result", {}).get("message_id") if trading_resp else None
                         self.tracker.log_signal(
                             side=ce["side"], entry=latest_price, sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
                             tf="Confluence", timestamp=base_candle_ts or conf_ts,
-                            msg_id=public_msg_id, chat_id=self._signal_chat_id(), signal_type="EXTREME",
+                            msg_id=None, chat_id=self._signal_chat_id(), signal_type="EXTREME",
                             meta={
                                 "signal_id": signal_id,
                                 "indicators": ce["indicators"],
@@ -6319,6 +6383,10 @@ class PonchBot:
                         )
                         self.tracker.signals[-1]["signal_id"] = signal_id
                         self.tracker.signals[-1]["signal_size_pct"] = extreme_size
+                        self.tracker.signals[-1]["public_signal_is_photo"] = True
+                        trading_resp = self._send_public_signal_snapshot(self.tracker.signals[-1]) if not self.is_booting else None
+                        public_msg_id = trading_resp.get("result", {}).get("message_id") if trading_resp else None
+                        self.tracker.signals[-1]["msg_id"] = public_msg_id
                         self.tracker.signals[-1]["trading_signal_msg_id"] = public_msg_id
                         self._send_active_trade_snapshot(self.tracker.signals[-1])
                         self._record_signal_sent("EXTREME", now=now)
@@ -6391,7 +6459,12 @@ class PonchBot:
                 public_msg_id = self._public_signal_message_id(sig)
 
                 if public_msg_id and current_public_signal and not private_exec_paper_signal:
-                    tg.update_signal_message(self._signal_chat_id(), public_msg_id, sig)
+                    tg.update_signal_message(
+                        self._signal_chat_id(),
+                        public_msg_id,
+                        sig,
+                        use_caption=bool(sig.get("public_signal_is_photo")),
+                    )
 
                 if evt_type in {"TP1", "TP2"} and current_public_signal and not private_exec_paper_signal:
                     self._refresh_active_trade_snapshot(sig, close_price=latest_price, event_label=evt_type)
@@ -6463,7 +6536,7 @@ class PonchBot:
                     self._save_state()
 
                 if evt_type in terminal_event_types and current_public_signal and not private_exec_paper_signal:
-                    self._send_trade_journal(sig, evt_type, close_price=latest_price)
+                    self._send_success_trade_post(sig, evt_type, close_price=latest_price)
                     self._cleanup_active_trade_messages(sig)
 
                 if evt_type in ("TP1", "TP2", "TP3", "ENTRY_CLOSE", "PROFIT_SL", "SL") and not suppress_intermediate_notice:
@@ -8031,29 +8104,6 @@ class PonchBot:
                 tp_liq = self._estimate_tp_liquidity(evt["side"], evt["entry"], evt["tp1"], evt["tp2"], evt["tp3"])
                 signal_id = new_signal_id()
 
-                trading_resp = None
-                if not self.is_booting:
-                    trading_resp = tg.send_scalp_confirmed(
-                        timeframe=tf,
-                        side=evt["side"],
-                        entry=evt["entry"],
-                        sl=evt["sl"],
-                        tp1=evt["tp1"],
-                        tp2=evt["tp2"],
-                        tp3=evt["tp3"],
-                        strength=profile["strength"],
-                        size=dyn_size,
-                        score=score,
-                        trend=self.macro_trend,
-                        reasons=reasons,
-                        tp_liq_prob=tp_liq["prob"] if tp_liq else None,
-                        tp_liq_usd=tp_liq["size_usd"] if tp_liq else None,
-                        tp_liq_target=tp_liq["target"] if tp_liq else None,
-                        trigger_label=trigger_label,
-                        chat_id=self._signal_chat_id(),
-                        message_thread_id=self._trading_signal_thread_id(),
-                    )
-                public_msg_id = trading_resp.get("result", {}).get("message_id") if trading_resp else None
                 self._save_state()
                 sent_label = "Smart Money Confirmed" if str(evt.get("strategy", "")).upper() == "SMART_MONEY_LIQUIDITY" else "Scalp Confirmed"
                 self._record_signal_sent("SMART_MONEY" if str(evt.get("strategy", "")).upper() == "SMART_MONEY_LIQUIDITY" else f"SCALP_{tf}", now=now)
@@ -8069,7 +8119,7 @@ class PonchBot:
                     tp3=evt["tp3"],
                     tf=tf,
                     timestamp=entry_protection_ts or candle_ts,
-                    msg_id=public_msg_id,
+                    msg_id=None,
                     chat_id=self._signal_chat_id(),
                     signal_type="SCALP",
                     meta={
@@ -8087,6 +8137,10 @@ class PonchBot:
                 )
                 self.tracker.signals[-1]["signal_id"] = signal_id
                 self.tracker.signals[-1]["signal_size_pct"] = dyn_size
+                self.tracker.signals[-1]["public_signal_is_photo"] = True
+                trading_resp = self._send_public_signal_snapshot(self.tracker.signals[-1]) if not self.is_booting else None
+                public_msg_id = trading_resp.get("result", {}).get("message_id") if trading_resp else None
+                self.tracker.signals[-1]["msg_id"] = public_msg_id
                 self.tracker.signals[-1]["trading_signal_msg_id"] = public_msg_id
                 self._send_active_trade_snapshot(self.tracker.signals[-1])
                 self._save_state()

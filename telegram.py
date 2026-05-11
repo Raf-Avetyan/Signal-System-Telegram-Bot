@@ -7,6 +7,7 @@ API_URL_MSG   = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 API_URL_PHOTO = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
 API_URL_EDIT_MEDIA = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageMedia"
 API_URL_EDIT_TEXT  = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
+API_URL_EDIT_CAPTION = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageCaption"
 API_URL_UPDATES    = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
 API_URL_COMMANDS   = f"https://api.telegram.org/bot{BOT_TOKEN}/setMyCommands"
 API_URL_DELETE     = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage"
@@ -283,6 +284,28 @@ def edit_message_text(message_id, text, chat_id=None, parse_mode="HTML"):
         return resp.json()
     except Exception as e:
         print(f"[TG ERROR] Edit Text: {e}")
+        return None
+
+
+def edit_message_caption(message_id, caption, chat_id=None, parse_mode="HTML"):
+    """Edit an existing message caption."""
+    target_chat = chat_id if chat_id else _default_public_chat_id()
+    try:
+        payload = {
+            "chat_id": target_chat,
+            "message_id": message_id,
+            "caption": caption,
+            "parse_mode": parse_mode,
+        }
+        resp = requests.post(API_URL_EDIT_CAPTION, data=payload)
+        if not resp.ok:
+            if "message is not modified" in resp.text:
+                return None
+            print(f"[TG ERROR] Edit Caption {resp.status_code}: {resp.text}")
+            return None
+        return resp.json()
+    except Exception as e:
+        print(f"[TG ERROR] Edit Caption: {e}")
         return None
 
 
@@ -640,7 +663,7 @@ def send_extreme(side, total_points, confirmations, indicators_list, price=None,
     return send(html, parse_mode="HTML", chat_id=chat_id, message_thread_id=message_thread_id)
 
 
-def update_signal_message(chat_id, msg_id, sig_data):
+def update_signal_message(chat_id, msg_id, sig_data, use_caption=False):
     """Edit the original signal message with updated hit markers."""
     # 'meta' contains original info like indicators or reasons
     meta = sig_data.get("meta", {})
@@ -701,6 +724,8 @@ def update_signal_message(chat_id, msg_id, sig_data):
         tp_liq_target=meta.get("tp_liq_target"),
         trigger_label=meta.get("trigger"),
     )
+    if use_caption:
+        return edit_message_caption(msg_id, html, chat_id=chat_id)
     return edit_message_text(msg_id, html, chat_id=chat_id)
 
 
