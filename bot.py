@@ -847,6 +847,16 @@ class PonchBot:
     def _active_hedge_execution_signals(self):
         return [sig for sig in self._active_execution_signals() if self._is_hedge_signal(sig)]
 
+    def _find_active_primary_opposite_execution(self, side, symbol=None):
+        wanted_symbol = str(symbol or SYMBOL).upper()
+        opposite = "SHORT" if str(side or "").upper() == "LONG" else "LONG"
+        for sig in self._active_primary_execution_signals():
+            sig_side = str(sig.get("side") or "").upper()
+            sig_symbol = str(sig.get("symbol") or (sig.get("meta") or {}).get("symbol") or SYMBOL).upper()
+            if sig_side == opposite and sig_symbol == wanted_symbol:
+                return sig
+        return None
+
     def _find_active_hedge_for_parent(self, parent_signal_id):
         parent_signal_id = str(parent_signal_id or "").strip()
         if not parent_signal_id:
@@ -7122,6 +7132,17 @@ class PonchBot:
         if not self.trade_executor.can_trade():
             print(f"  [TRADE] Skipped signal {sig_obj.get('type')} {sig_obj.get('side')}: executor disabled")
             return
+        symbol = str(sig_obj.get("symbol") or (sig_obj.get("meta") or {}).get("symbol") or SYMBOL).upper()
+        side = str(sig_obj.get("side") or "").upper()
+        if self._hedge_mode_enabled() and not self._is_hedge_signal(sig_obj):
+            opposite_live = self._find_active_primary_opposite_execution(side, symbol)
+            if opposite_live:
+                print(
+                    f"  [TRADE] Skipped opposite auto-trade {sig_obj.get('type')} {side}: "
+                    f"active primary {opposite_live.get('side')} {opposite_live.get('tf')} already exists; "
+                    f"only SMART_HEDGE may open opposite in hedge mode"
+                )
+                return
         open_counts = self.tracker.get_open_signal_counts(signal_type=sig_obj.get("type", "SCALP"))
         try:
             result = self.trade_executor.execute_signal(sig_obj, open_positions_count=int(open_counts.get("total", 0)))
