@@ -581,6 +581,11 @@ def _scenario_mode_config(mode):
             "min_dist_pct": 0.55,
             "max_dist_pct": 2.10,
             "preferred_dist_pct": 0.95,
+            "near_pick_max_dist_pct": 1.30,
+            "near_pick_target_dist_pct": 0.85,
+            "near_pick_min_usd": 500.0,
+            "near_pick_max_usd": 1500.0,
+            "near_pick_target_usd": 950.0,
             "usable_entry_dist_pct": 1.75,
             "major_liq_min_dist_pct": 1.40,
             "title": "BTC Short-Term Plans",
@@ -591,6 +596,11 @@ def _scenario_mode_config(mode):
         "min_dist_pct": 0.80,
         "max_dist_pct": 5.50,
         "preferred_dist_pct": 1.50,
+        "near_pick_max_dist_pct": 2.40,
+        "near_pick_target_dist_pct": 1.20,
+        "near_pick_min_usd": 1200.0,
+        "near_pick_max_usd": 2800.0,
+        "near_pick_target_usd": 1800.0,
         "usable_entry_dist_pct": 3.20,
         "major_liq_min_dist_pct": 2.20,
         "title": "BTC Scenarios",
@@ -970,6 +980,14 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
     long_candidates = [row for row in scenarios if row.get("side") == "LONG"]
     short_candidates = [row for row in scenarios if row.get("side") == "SHORT"]
 
+    def _entry_distance_pct(row):
+        entry_mid = (_safe_float(row.get("entry_low")) + _safe_float(row.get("entry_high"))) / 2.0
+        return _distance_pct(entry_mid, current_price)
+
+    def _entry_distance_usd(row):
+        entry_mid = (_safe_float(row.get("entry_low")) + _safe_float(row.get("entry_high"))) / 2.0
+        return abs(entry_mid - current_price)
+
     def _select_best(rows, preferred_kinds):
         if not rows:
             return None
@@ -983,20 +1001,67 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
             ),
         )
 
+    def _select_near(rows, preferred_kinds, *, expected_side_of_price):
+        if not rows:
+            return None
+        directional_rows = []
+        for row in rows:
+            entry_mid = (_safe_float(row.get("entry_low")) + _safe_float(row.get("entry_high"))) / 2.0
+            if expected_side_of_price == "below" and entry_mid >= current_price:
+                continue
+            if expected_side_of_price == "above" and entry_mid <= current_price:
+                continue
+            directional_rows.append(row)
+        if not directional_rows:
+            return None
+        band_rows = [
+            row for row in directional_rows
+            if (
+                mode_cfg["min_dist_pct"] <= _entry_distance_pct(row) <= mode_cfg["near_pick_max_dist_pct"]
+                and mode_cfg["near_pick_min_usd"] <= _entry_distance_usd(row) <= mode_cfg["near_pick_max_usd"]
+            )
+        ]
+        bounded_rows = [
+            row for row in directional_rows
+            if mode_cfg["min_dist_pct"] <= _entry_distance_pct(row) <= mode_cfg["max_dist_pct"]
+        ]
+        source_pool = band_rows or bounded_rows or directional_rows
+        preferred = [row for row in source_pool if row.get("kind") in preferred_kinds]
+        source = preferred or source_pool
+        return min(
+            source,
+            key=lambda row: (
+                abs(_entry_distance_usd(row) - mode_cfg["near_pick_target_usd"]),
+                abs(_entry_distance_pct(row) - mode_cfg["near_pick_target_dist_pct"]),
+                -float(row.get("probability", 0.0)),
+                not row.get("trend_aligned", False),
+            ),
+        )
+
     if trend_bias_score >= 1.5:
         best_long = _select_best(long_candidates, {"pullback", "breakout", "major_flush"})
         best_short = _select_best(short_candidates, {"rejection", "major_squeeze"})
+        near_long = _select_near(long_candidates, {"pullback", "major_flush"}, expected_side_of_price="below")
+        near_short = _select_near(short_candidates, {"rejection", "major_squeeze"}, expected_side_of_price="above")
     elif trend_bias_score <= -1.5:
         best_long = _select_best(long_candidates, {"pullback", "major_flush"})
         best_short = _select_best(short_candidates, {"breakdown", "rejection", "major_squeeze"})
+        near_long = _select_near(long_candidates, {"pullback", "major_flush"}, expected_side_of_price="below")
+        near_short = _select_near(short_candidates, {"rejection", "major_squeeze"}, expected_side_of_price="above")
     else:
         best_long = _select_best(long_candidates, {"pullback", "breakout", "major_flush"})
         best_short = _select_best(short_candidates, {"rejection", "breakdown", "major_squeeze"})
+        near_long = _select_near(long_candidates, {"pullback", "major_flush"}, expected_side_of_price="below")
+        near_short = _select_near(short_candidates, {"rejection", "major_squeeze"}, expected_side_of_price="above")
 
     selected = []
-    if best_long:
+    if near_long:
+        selected.append(near_long)
+    if near_short and near_short not in selected:
+        selected.append(near_short)
+    if best_long and best_long not in selected:
         selected.append(best_long)
-    if best_short:
+    if best_short and best_short not in selected:
         selected.append(best_short)
 
     extra_long_candidates = [row for row in sorted(long_candidates, key=lambda row: row.get("probability", 0), reverse=True) if row not in selected]
