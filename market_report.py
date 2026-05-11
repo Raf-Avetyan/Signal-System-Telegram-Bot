@@ -585,6 +585,7 @@ def _scenario_mode_config(mode):
             "major_liq_min_dist_pct": 1.40,
             "title": "BTC Short-Term Plans",
             "final_note": "Use only the plan whose short-term trigger prints first.",
+            "execution_tf": "15m",
         }
     return {
         "min_dist_pct": 0.80,
@@ -594,6 +595,7 @@ def _scenario_mode_config(mode):
         "major_liq_min_dist_pct": 2.20,
         "title": "BTC Scenarios",
         "final_note": "Plan the long only if the long trigger prints. Plan the short only if the short trigger prints.",
+        "execution_tf": "1h",
     }
 
 
@@ -1009,6 +1011,10 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
             selected.append(row)
             if len(selected) >= max_scenarios:
                 break
+    for row in selected:
+        row["execution_tf"] = str(mode_cfg.get("execution_tf") or "15m")
+        row["scenario_mode"] = str(mode or "swing")
+        row["entry_mid"] = (_safe_float(row.get("entry_low")) + _safe_float(row.get("entry_high"))) / 2.0
     selected = sorted(selected, key=lambda row: row.get("probability", 0), reverse=True)
     return selected[:max_scenarios]
 
@@ -1278,7 +1284,7 @@ def build_liquidation_map_snapshot(symbol=SYMBOL):
     }
 
 
-def build_btc_market_report(symbol=SYMBOL, mode="swing"):
+def build_btc_scenarios_payload(symbol=SYMBOL, mode="swing"):
     mode_cfg = _scenario_mode_config(mode)
     data = _fetch_all_bitunix_timeframes(symbol=symbol, timeframes=BITUNIX_TIMEFRAMES)
     missing = [tf for tf in BITUNIX_TIMEFRAMES if tf not in data or data[tf].empty]
@@ -1337,6 +1343,31 @@ def build_btc_market_report(symbol=SYMBOL, mode="swing"):
     )
     if not scenarios:
         raise RuntimeError("No valid BTC scenarios could be built from Bitunix data.")
+
+    return {
+        "symbol": symbol,
+        "mode": str(mode or "swing"),
+        "mode_cfg": mode_cfg,
+        "current_price": current_price,
+        "funding_rate": funding_rate_raw,
+        "tf_map": tf_map,
+        "levels": levels,
+        "book_ctx": book_ctx,
+        "funding_ctx": funding_ctx,
+        "ticker_ctx": ticker_ctx,
+        "liq_ctx": liq_ctx,
+        "okx_ctx": okx_ctx,
+        "liq_map": liq_map,
+        "scenarios": scenarios,
+    }
+
+
+def build_btc_market_report(symbol=SYMBOL, mode="swing"):
+    payload = build_btc_scenarios_payload(symbol=symbol, mode=mode)
+    mode_cfg = payload["mode_cfg"]
+    current_price = _safe_float(payload.get("current_price"))
+    funding_rate_raw = _safe_float(payload.get("funding_rate"))
+    scenarios = list(payload.get("scenarios") or [])
 
     blocks = [
         (

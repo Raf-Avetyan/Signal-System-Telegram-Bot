@@ -114,7 +114,6 @@ def set_bot_commands(commands=None):
     if commands is None:
         commands = [
             {"command": "scenarios", "description": "Show BTC scenarios"},
-            {"command": "intraday", "description": "Show short-term BTC plans"},
             {"command": "analytics", "description": "Show signal analytics"},
             {"command": "liqmap", "description": "Show BTC liquidation map"},
         ]
@@ -162,7 +161,7 @@ def send_execution_notice(title, lines=None, chat_id=None, icon="🔐"):
 
 def send_tp1_hit_congrats(
     chat_id, message_id, tf, side=None, lock_price=None,
-    entry=None, sl=None, tp1=None, tp2=None, size=None
+    entry=None, sl=None, tp1=None, tp2=None, size=None, message_thread_id=None
 ):
     """Send a reply for hitting TP1 without changing the stop yet."""
     import random
@@ -172,11 +171,17 @@ def send_tp1_hit_congrats(
         f"📈 <b>TP1 REACHED</b> [{tf}] The first target was filled.",
     ]
     txt = random.choice(messages)
-    return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
+    return send(
+        txt,
+        parse_mode="HTML",
+        chat_id=chat_id,
+        reply_to_message_id=message_id,
+        message_thread_id=message_thread_id,
+    )
 
 def send_tp2_hit_congrats(
     chat_id, message_id, tf, side=None, lock_price=None,
-    entry=None, sl=None, tp1=None, tp2=None, size=None, single_full=False
+    entry=None, sl=None, tp1=None, tp2=None, size=None, single_full=False, message_thread_id=None
 ):
     """Send a reply for hitting TP2 or the only active fallback take profit."""
     import random
@@ -187,7 +192,13 @@ def send_tp2_hit_congrats(
             f"💰 <b>TARGET HIT!</b> [{tf}] The whole position was closed at take profit.",
         ]
         txt = random.choice(messages)
-        return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
+        return send(
+            txt,
+            parse_mode="HTML",
+            chat_id=chat_id,
+            reply_to_message_id=message_id,
+            message_thread_id=message_thread_id,
+        )
 
     messages = [
         f"⚡️ <b>TARGET 2 SMACKED!</b> [{tf}] The runner is protected now.",
@@ -201,9 +212,15 @@ def send_tp2_hit_congrats(
             f"\n\n\U0001F6E1 <b>Safety Update</b>\n"
             f"Set SL to <b>protected breakeven</b> for <b>{side_txt}</b> at <b>{fmt_price(lock_price)}</b>"
         )
-    return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
+    return send(
+        txt,
+        parse_mode="HTML",
+        chat_id=chat_id,
+        reply_to_message_id=message_id,
+        message_thread_id=message_thread_id,
+    )
 
-def send_tp3_hit_congrats(chat_id, message_id, tf):
+def send_tp3_hit_congrats(chat_id, message_id, tf, message_thread_id=None):
     """Send a congratulatory reply for hitting TP3."""
     import random
     messages = [
@@ -213,20 +230,38 @@ def send_tp3_hit_congrats(chat_id, message_id, tf):
         f"📊 <b>PERFECT TRADE!</b> [{tf}] 3/3 Targets Hit. Pure accuracy. ✅",
     ]
     txt = random.choice(messages)
-    return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
+    return send(
+        txt,
+        parse_mode="HTML",
+        chat_id=chat_id,
+        reply_to_message_id=message_id,
+        message_thread_id=message_thread_id,
+    )
 
-def send_breakeven_alert(chat_id, message_id, tf):
+def send_breakeven_alert(chat_id, message_id, tf, message_thread_id=None):
     """Send a reply when price returns to entry after TPs hit."""
     txt = f"📉 <b>REVERSAL ALERT!</b> [{tf}] Price returned to the protected breakeven level after hitting targets. Signal closed safely. ⚖️"
-    return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
+    return send(
+        txt,
+        parse_mode="HTML",
+        chat_id=chat_id,
+        reply_to_message_id=message_id,
+        message_thread_id=message_thread_id,
+    )
 
-def send_profit_sl_alert(chat_id, message_id, tf):
+def send_profit_sl_alert(chat_id, message_id, tf, message_thread_id=None):
     """Send a reply when protected stop is hit in profit after targets."""
     txt = (
         f"🛡 <b>PROTECTED EXIT!</b> [{tf}] Stop-loss was hit in <b>profit</b> "
         f"after targets. Trade closed safely with locked gains. ✅"
     )
-    return send(txt, parse_mode="HTML", chat_id=chat_id, reply_to_message_id=message_id)
+    return send(
+        txt,
+        parse_mode="HTML",
+        chat_id=chat_id,
+        reply_to_message_id=message_id,
+        message_thread_id=message_thread_id,
+    )
 
 def edit_message_text(message_id, text, chat_id=None, parse_mode="HTML"):
     """Edit an existing text message."""

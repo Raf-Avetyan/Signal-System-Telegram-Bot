@@ -214,22 +214,7 @@ def generate_liquidation_map_chart(
     if df is None or df.empty:
         return None
 
-    plot_df = df.tail(140).copy()
-    all_values = list(plot_df["High"]) + list(plot_df["Low"]) + [float(current_price)]
-    for row in horizon_rows or []:
-        all_values.extend([float(row.get("upside") or current_price), float(row.get("downside") or current_price)])
-    for row in heatmap_rows or []:
-        px = float(row.get("price") or 0)
-        if px > 0:
-            all_values.append(px)
-    ymin = min(all_values)
-    ymax = max(all_values)
-    padding_y = max((ymax - ymin) * 0.10, float(current_price) * 0.003)
-    ylim = (ymin - padding_y, ymax + padding_y)
-    num_candles = len(plot_df)
-    x_padding = 28
-    xlim = (0, num_candles + x_padding)
-
+    plot_df = df.tail(96).copy()
     dense_rows = [row for row in list(heatmap_rows or []) if float(row.get("price") or 0) > 0]
     if not dense_rows:
         for row in horizon_rows or []:
@@ -261,6 +246,19 @@ def generate_liquidation_map_chart(
     top_below = sorted(top_below, key=lambda row: float(row.get("size_usd") or 0), reverse=True)[:2]
     selected_rows = top_above + top_below
 
+    focus_values = list(plot_df["High"]) + list(plot_df["Low"]) + [float(current_price)]
+    for row in selected_rows:
+        px = float(row.get("price") or 0)
+        if px > 0:
+            focus_values.append(px)
+    ymin = min(focus_values)
+    ymax = max(focus_values)
+    padding_y = max((ymax - ymin) * 0.16, float(current_price) * 0.0028)
+    ylim = (ymin - padding_y, ymax + padding_y)
+    num_candles = len(plot_df)
+    x_padding = 18
+    xlim = (0, num_candles + x_padding)
+
     try:
         fig, axlist = mpf.plot(
             plot_df,
@@ -271,7 +269,7 @@ def generate_liquidation_map_chart(
             datetime_format="%d %H:%M",
             tight_layout=True,
             savefig=output_path,
-            figratio=(16, 9),
+            figratio=(14, 11),
             figscale=1.35,
             ylim=ylim,
             xlim=xlim,
