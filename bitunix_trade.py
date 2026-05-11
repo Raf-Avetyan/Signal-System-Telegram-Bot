@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import os
 import secrets
 import time
@@ -51,6 +52,13 @@ class ExecutionResult:
     accepted: bool
     message: str
     payload: Dict[str, Any]
+
+
+LIMIT_ENTRY_REPRICE_BPS = (2.0, 4.0, 7.0, 11.0, 16.0, 24.0)
+LIMIT_ENTRY_MAX_RETRIES = 6
+LIMIT_ENTRY_POLL_RETRIES = 8
+LIMIT_ENTRY_POLL_DELAY_SEC = 0.55
+LIMIT_ENTRY_FULL_FILL_TOLERANCE_PCT = 0.02
 
 
 def _sorted_keys(d: Dict[str, Any]) -> List[str]:
@@ -969,35 +977,22 @@ class TradeExecutor:
 
         try:
             self.client.change_leverage(symbol, int(plan["leverage"]))
-            entry_order = self.client.place_order(
-                symbol=symbol,
-                side=entry_side,
-                qty=plan["qty"],
-                order_type="MARKET",
-                reduce_only=None,
-                client_id=f"{signal_id}-entry",
-                trade_side=plan.get("entry_trade_side"),
+            entry_order_data, position = self._place_limit_entry_until_filled(
+                plan=plan,
+                signal=signal,
+                signal_id=signal_id,
             )
-            entry_order_data = self._data_dict(entry_order)
             entry_order_id = entry_order_data.get("orderId") or entry_order_data.get("id")
-            entry_client_id = entry_order_data.get("clientId") or f"{signal_id}-entry"
+            entry_client_id = entry_order_data.get("clientId") or f"{signal_id}-entry-1"
             plan["entry_order_id"] = entry_order_id
             plan["entry_client_id"] = entry_client_id
-
-            position = self._find_position_from_entry(
-                symbol=symbol,
-                side=signal["side"],
-                order_id=entry_order_id,
-                client_id=entry_client_id,
-                retries=20,
-                delay_sec=0.75,
-            )
             if not position:
                 order_detail = self._safe_get_order_detail(order_id=entry_order_id, client_id=entry_client_id)
                 if order_detail:
                     plan["entry_status"] = order_detail.get("status")
                     plan["entry_trade_qty"] = order_detail.get("tradeQty")
                 raise BitunixTradeError(f"Entry accepted but no pending {signal['side']} position was returned.")
+            self._apply_filled_position_to_plan(plan, position)
 
             position_id = str(position.get("positionId") or "")
             if not position_id:
@@ -1068,6 +1063,9 @@ class TradeExecutor:
                 "tp_qtys": plan["tp_qtys"],
                 "tp_targets": [float(signal["tp1"]), float(signal["tp2"]), float(signal["tp3"])],
                 "leverage": plan["leverage"],
+                "entry_order_type": "LIMIT",
+                "entry_attempts": plan.get("entry_attempts") or [],
+                "filled_entry_price": plan.get("filled_entry_price"),
                 "risk_budget_usd": plan["risk_budget_usd"],
                 "balance_available": plan["balance_available"],
                 "position_mode": plan.get("position_mode"),
@@ -1455,6 +1453,250 @@ class TradeExecutor:
                 time.sleep(delay_sec)
 
         return latest_symbol_position
+
+    @staticmethod
+    def _price_step(symbol_rules: Dict[str, Any]) -> float:
+        quote_precision = int((symbol_rules or {}).get("quote_precision") or 0)
+        if quote_precision > 0:
+            return float(f"1e-{quote_precision}")
+        return 1.0
+
+    @staticmethod
+    def _round_price(price: float, step: float, *, side: str) -> float:
+        price_val = max(0.0, float(price or 0))
+        step_val = max(float(step or 0), 1e-9)
+        if str(side or "").upper() == "BUY":
+            return max(step_val, math.ceil((price_val / step_val) - 1e-12) * step_val)
+        return max(step_val, math.floor((price_val / step_val) + 1e-12) * step_val)
+
+    def _live_entry_book(self, symbol: str, fallback_price: float) -> Dict[str, float]:
+        best_bid = 0.0
+        best_ask = 0.0
+        last_price = 0.0
+
+        try:
+            depth = self.client.get_depth(symbol, "20").get("data", {}) or {}
+            bids = depth.get("bids") or []
+            asks = depth.get("asks") or []
+            if bids:
+                best_bid = float((bids[0] or [0])[0] or 0)
+            if asks:
+                best_ask = float((asks[0] or [0])[0] or 0)
+        except Exception:
+            pass
+
+        try:
+            tickers = self.client.get_tickers(symbol).get("data", []) or []
+            if isinstance(tickers, dict):
+                tickers = tickers.get("list") or tickers.get("data") or []
+            ticker = tickers[0] if tickers else {}
+            last_price = float(ticker.get("lastPrice") or ticker.get("last") or 0)
+            if best_bid <= 0:
+                best_bid = float(ticker.get("bidPrice") or ticker.get("bid") or last_price or 0)
+            if best_ask <= 0:
+                best_ask = float(ticker.get("askPrice") or ticker.get("ask") or last_price or 0)
+        except Exception:
+            pass
+
+        if best_bid <= 0:
+            best_bid = float(last_price or fallback_price or 0)
+        if best_ask <= 0:
+            best_ask = float(last_price or fallback_price or 0)
+        if last_price <= 0:
+            last_price = float(best_ask or best_bid or fallback_price or 0)
+
+        return {
+            "best_bid": float(best_bid or 0),
+            "best_ask": float(best_ask or 0),
+            "last_price": float(last_price or 0),
+        }
+
+    def _marketable_limit_price(
+        self,
+        *,
+        entry_side: str,
+        fallback_price: float,
+        symbol_rules: Dict[str, Any],
+        attempt: int,
+        book: Dict[str, float],
+    ) -> float:
+        side = str(entry_side or "").upper()
+        price_step = self._price_step(symbol_rules)
+        buffer_bps = LIMIT_ENTRY_REPRICE_BPS[min(max(0, int(attempt)), len(LIMIT_ENTRY_REPRICE_BPS) - 1)]
+        best_bid = float((book or {}).get("best_bid") or 0)
+        best_ask = float((book or {}).get("best_ask") or 0)
+        fallback = float(fallback_price or 0)
+
+        if side == "BUY":
+            reference = best_ask or best_bid or fallback
+            if reference <= 0:
+                raise BitunixTradeError("Unable to determine a live Bitunix ask price for limit entry.")
+            raw_price = reference * (1.0 + buffer_bps / 10000.0)
+        else:
+            reference = best_bid or best_ask or fallback
+            if reference <= 0:
+                raise BitunixTradeError("Unable to determine a live Bitunix bid price for limit entry.")
+            raw_price = reference * (1.0 - buffer_bps / 10000.0)
+
+        return self._round_price(raw_price, price_step, side=side)
+
+    def _cancel_entry_order(self, symbol: str, order_id: Optional[str]) -> None:
+        if not order_id:
+            return
+        try:
+            self.client.cancel_orders(symbol, [str(order_id)])
+        except Exception:
+            pass
+
+    def _apply_filled_position_to_plan(self, plan: Dict[str, Any], position: Dict[str, Any]) -> None:
+        actual_qty = self._round_qty_down(
+            self._position_qty(position),
+            float(plan.get("symbol_rules", {}).get("qty_step") or BITUNIX_QTY_STEP),
+        )
+        if actual_qty <= 0:
+            return
+        tp_qtys, tp_split_warning = self._split_qty(
+            actual_qty,
+            min_base_qty=float(plan.get("symbol_rules", {}).get("min_base_qty") or BITUNIX_MIN_BASE_QTY),
+            step=float(plan.get("symbol_rules", {}).get("qty_step") or BITUNIX_QTY_STEP),
+            splits=plan.get("tp_splits"),
+        )
+        if tp_split_warning:
+            existing = str(plan.get("tp_split_warning") or "").strip()
+            plan["tp_split_warning"] = tp_split_warning if not existing else f"{existing} | {tp_split_warning}"
+        avg_entry = (
+            position.get("avgOpenPrice")
+            or position.get("avgPrice")
+            or position.get("entryPrice")
+            or position.get("openPrice")
+            or plan.get("entry")
+        )
+        plan["qty"] = float(actual_qty)
+        plan["tp_qtys"] = tp_qtys
+        plan["filled_entry_price"] = float(avg_entry or plan.get("entry") or 0)
+        plan["notional"] = float(actual_qty) * float(plan.get("filled_entry_price") or plan.get("entry") or 0)
+
+    def _place_limit_entry_until_filled(
+        self,
+        *,
+        plan: Dict[str, Any],
+        signal: Dict[str, Any],
+        signal_id: str,
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        symbol = str(plan["symbol"])
+        entry_side = str(plan["entry_side"]).upper()
+        signal_side = str(signal["side"]).upper()
+        symbol_rules = plan.get("symbol_rules") or self._get_symbol_rules(symbol)
+        qty_step = float(symbol_rules.get("qty_step") or BITUNIX_QTY_STEP)
+        min_base_qty = float(symbol_rules.get("min_base_qty") or BITUNIX_MIN_BASE_QTY)
+        target_qty = self._round_qty_down(float(plan["qty"]), qty_step)
+        fallback_price = float(plan.get("entry") or 0)
+        full_fill_tolerance_qty = max(qty_step, target_qty * LIMIT_ENTRY_FULL_FILL_TOLERANCE_PCT)
+
+        latest_order_data: Dict[str, Any] = {}
+        latest_position: Dict[str, Any] = {}
+        latest_order_detail: Dict[str, Any] = {}
+        attempts_meta: List[Dict[str, Any]] = []
+        remaining_qty = target_qty
+
+        for attempt in range(LIMIT_ENTRY_MAX_RETRIES):
+            if remaining_qty < min_base_qty:
+                break
+            book = self._live_entry_book(symbol, fallback_price)
+            limit_price = self._marketable_limit_price(
+                entry_side=entry_side,
+                fallback_price=fallback_price,
+                symbol_rules=symbol_rules,
+                attempt=attempt,
+                book=book,
+            )
+            client_id = f"{signal_id}-entry-{attempt + 1}"
+            entry_order = self.client.place_order(
+                symbol=symbol,
+                side=entry_side,
+                qty=remaining_qty,
+                order_type="LIMIT",
+                price=limit_price,
+                reduce_only=None,
+                client_id=client_id,
+                effect="GTC",
+                trade_side=plan.get("entry_trade_side"),
+            )
+            entry_order_data = self._data_dict(entry_order)
+            entry_order_id = entry_order_data.get("orderId") or entry_order_data.get("id")
+            latest_order_data = entry_order_data or latest_order_data
+
+            attempt_meta: Dict[str, Any] = {
+                "attempt": attempt + 1,
+                "price": float(limit_price),
+                "qty": float(remaining_qty),
+                "best_bid": float(book.get("best_bid") or 0),
+                "best_ask": float(book.get("best_ask") or 0),
+                "order_id": str(entry_order_id or ""),
+                "client_id": client_id,
+            }
+
+            for _ in range(LIMIT_ENTRY_POLL_RETRIES):
+                matched = self._find_position_from_entry(
+                    symbol=symbol,
+                    side=signal_side,
+                    order_id=entry_order_id,
+                    client_id=client_id,
+                    retries=1,
+                    delay_sec=0.0,
+                )
+                if matched:
+                    latest_position = matched
+                order_detail = self._safe_get_order_detail(order_id=entry_order_id, client_id=client_id)
+                if order_detail:
+                    latest_order_detail = order_detail
+                filled_qty = self._round_qty_down(self._position_qty(latest_position), qty_step) if latest_position else 0.0
+                trade_qty = float((order_detail or {}).get("tradeQty") or 0)
+                status = str((order_detail or {}).get("status") or "").upper()
+                attempt_meta["status"] = status
+                attempt_meta["trade_qty"] = float(trade_qty)
+                attempt_meta["filled_qty"] = float(filled_qty)
+                if filled_qty >= max(min_base_qty, target_qty - full_fill_tolerance_qty):
+                    attempt_meta["outcome"] = "filled"
+                    attempts_meta.append(attempt_meta)
+                    plan["entry_attempts"] = attempts_meta
+                    self._cancel_entry_order(symbol, entry_order_id)
+                    return latest_order_data, latest_position
+                if status in {"FILLED", "FULLY_FILLED"} and (filled_qty > 0 or trade_qty > 0):
+                    attempt_meta["outcome"] = "filled"
+                    attempts_meta.append(attempt_meta)
+                    plan["entry_attempts"] = attempts_meta
+                    self._cancel_entry_order(symbol, entry_order_id)
+                    if latest_position:
+                        return latest_order_data, latest_position
+                    break
+                time.sleep(LIMIT_ENTRY_POLL_DELAY_SEC)
+
+            self._cancel_entry_order(symbol, entry_order_id)
+            latest_position = self._find_position_with_retry(symbol, signal_side, retries=2, delay_sec=0.25) or latest_position
+            filled_qty = self._round_qty_down(self._position_qty(latest_position), qty_step) if latest_position else 0.0
+            attempt_meta["filled_qty"] = float(filled_qty)
+            if filled_qty >= max(min_base_qty, target_qty - full_fill_tolerance_qty):
+                attempt_meta["outcome"] = "filled"
+                attempts_meta.append(attempt_meta)
+                plan["entry_attempts"] = attempts_meta
+                return latest_order_data, latest_position
+            if filled_qty > 0:
+                remaining_qty = self._round_qty_down(max(0.0, target_qty - filled_qty), qty_step)
+                attempt_meta["outcome"] = "partial"
+            else:
+                remaining_qty = target_qty
+                attempt_meta["outcome"] = "reprice"
+            attempts_meta.append(attempt_meta)
+
+        plan["entry_attempts"] = attempts_meta
+        if latest_order_detail:
+            plan["entry_status"] = latest_order_detail.get("status")
+            plan["entry_trade_qty"] = latest_order_detail.get("tradeQty")
+        if latest_position and self._position_qty(latest_position) >= min_base_qty:
+            plan["entry_attempts"] = attempts_meta
+            return latest_order_data, latest_position
+        raise BitunixTradeError("Limit entry was not filled after multiple reprices.")
 
     def _safe_get_order_detail(self, order_id: Optional[str] = None, client_id: Optional[str] = None) -> Dict[str, Any]:
         if not order_id and not client_id:

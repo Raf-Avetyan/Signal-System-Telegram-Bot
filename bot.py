@@ -28,7 +28,10 @@ from config import (
     BITUNIX_REG_LINK, INVITE_LINK, COMMAND_POLL_INTERVAL,
     BITUNIX_SCENARIO_TRADING_ENABLED, BITUNIX_SCENARIO_TRADING_MODE,
     BITUNIX_SCENARIO_MIN_PROBABILITY, BITUNIX_SCENARIO_SCAN_INTERVAL_SEC,
-    BITUNIX_SCENARIO_TRIGGER_COOLDOWN_SEC,
+    BITUNIX_SCENARIO_TRIGGER_COOLDOWN_SEC, BITUNIX_AUTO_HEDGE_ENABLED,
+    BITUNIX_AUTO_HEDGE_MIN_PROBABILITY, BITUNIX_AUTO_HEDGE_TRIGGER_R,
+    BITUNIX_AUTO_HEDGE_MAX_PROGRESS_R, BITUNIX_AUTO_HEDGE_SIZE_MULT,
+    BITUNIX_AUTO_HEDGE_COOLDOWN_SEC,
     SCALP_TREND_FILTER_MODE, SCALP_COUNTERTREND_MIN_SCORE,
     SCALP_OPEN_ALERT_COOLDOWN, SCALP_COUNTERTREND_MAX_PER_WINDOW,
     SCALP_COUNTERTREND_WINDOW_SEC, SCALP_LOSS_STREAK_LIMIT,
@@ -780,6 +783,86 @@ class PonchBot:
     def _scenario_trading_enabled(self):
         return bool(BITUNIX_SCENARIO_TRADING_ENABLED and self.trade_executor.can_trade())
 
+    def _smart_hedge_enabled(self):
+        return bool(
+            BITUNIX_AUTO_HEDGE_ENABLED
+            and self._hedge_mode_enabled()
+            and self.trade_executor.can_trade()
+        )
+
+    def _is_hedge_signal(self, sig):
+        sig = sig or {}
+        meta = sig.get("meta") or {}
+        execution = sig.get("execution") or {}
+        strategy = str(meta.get("strategy") or "").strip().upper()
+        if strategy == "SMART_HEDGE":
+            return True
+        if execution.get("hedge_parent_signal_id"):
+            return True
+        return False
+
+    def _execution_effective_entry(self, sig):
+        execution = (sig or {}).get("execution") or {}
+        for key in ("filled_entry_price", "entry"):
+            try:
+                price = float(execution.get(key) or 0)
+            except Exception:
+                price = 0.0
+            if price > 0:
+                return price
+        try:
+            return float((sig or {}).get("entry") or 0)
+        except Exception:
+            return 0.0
+
+    def _signal_stop_progress_r(self, sig, current_price):
+        sig = sig or {}
+        side = str(sig.get("side") or "").upper()
+        entry = self._execution_effective_entry(sig)
+        execution = sig.get("execution") or {}
+        try:
+            stop_price = float(
+                execution.get("sl_moved_to")
+                or sig.get("sl")
+                or sig.get("initial_sl")
+                or 0
+            )
+        except Exception:
+            stop_price = 0.0
+        current = float(current_price or 0)
+        if entry <= 0 or stop_price <= 0 or current <= 0:
+            return 0.0
+        risk = abs(entry - stop_price)
+        if risk <= 0:
+            return 0.0
+        if side == "LONG":
+            return max(0.0, (entry - current) / risk)
+        if side == "SHORT":
+            return max(0.0, (current - entry) / risk)
+        return 0.0
+
+    def _active_primary_execution_signals(self):
+        return [sig for sig in self._active_execution_signals() if not self._is_hedge_signal(sig)]
+
+    def _active_hedge_execution_signals(self):
+        return [sig for sig in self._active_execution_signals() if self._is_hedge_signal(sig)]
+
+    def _find_active_hedge_for_parent(self, parent_signal_id):
+        parent_signal_id = str(parent_signal_id or "").strip()
+        if not parent_signal_id:
+            return None
+        for sig in self._active_hedge_execution_signals():
+            execution = sig.get("execution") or {}
+            meta = sig.get("meta") or {}
+            hedge_parent = str(
+                execution.get("hedge_parent_signal_id")
+                or meta.get("hedge_parent_signal_id")
+                or ""
+            ).strip()
+            if hedge_parent == parent_signal_id:
+                return sig
+        return None
+
     def _scenario_execution_size_pct(self, scenario):
         style = str((scenario or {}).get("risk_style") or "").strip().lower()
         probability = float((scenario or {}).get("probability") or 0.0)
@@ -796,6 +879,12 @@ class PonchBot:
         elif probability < 58:
             target -= 0.3
         return round(min(float(MAX_SIGNAL_SIZE_PCT), max(float(MIN_SIGNAL_SIZE_PCT), target)), 1)
+
+    def _smart_hedge_size_pct(self, scenario):
+        base = float(self._scenario_execution_size_pct(scenario))
+        reduced = max(float(MIN_SIGNAL_SIZE_PCT), base * float(BITUNIX_AUTO_HEDGE_SIZE_MULT))
+        # Keep hedges intentionally smaller than normal directional trades.
+        return round(min(base, reduced), 1)
 
     def _scenario_reason_tokens(self, scenario, payload):
         scenario = scenario or {}
@@ -855,9 +944,21 @@ class PonchBot:
             return current_price <= entry_high and close_15m <= entry_high and (reclaim_short or bearish_bias)
         return in_zone and (channel_long or channel_short or bullish_bias or bearish_bias)
 
-    def _send_scenario_execution_signal(self, scenario, payload, now=None):
+    def _send_scenario_execution_signal(
+        self,
+        scenario,
+        payload,
+        now=None,
+        *,
+        size_pct_override=None,
+        strategy_name="SCENARIO_PLAN",
+        trigger_label="Scenario Plan",
+        signal_type="SCALP",
+        extra_meta=None,
+    ):
         scenario = scenario or {}
         payload = payload or {}
+        extra_meta = extra_meta or {}
         now = now or datetime.now(timezone.utc)
         current_price = float(payload.get("current_price") or 0.0)
         side = str(scenario.get("side") or "").upper()
@@ -865,8 +966,11 @@ class PonchBot:
             return False
 
         exec_tf = str(scenario.get("execution_tf") or "15m")
-        size_pct = self._scenario_execution_size_pct(scenario)
+        size_pct = float(size_pct_override) if size_pct_override is not None else self._scenario_execution_size_pct(scenario)
         reasons = self._scenario_reason_tokens(scenario, payload)
+        if str(strategy_name or "").upper() == "SMART_HEDGE":
+            reasons = ["Smart Hedge"] + [r for r in reasons if r != "Smart Hedge"]
+        strength_label = "Hedge" if str(strategy_name or "").upper() == "SMART_HEDGE" else "Scenario"
         signal_id = new_signal_id()
         tp_liq = self._estimate_tp_liquidity(side, current_price, scenario.get("tp1"), scenario.get("tp2"), scenario.get("tp3"))
 
@@ -880,7 +984,7 @@ class PonchBot:
                 tp1=float(scenario.get("tp1") or 0),
                 tp2=float(scenario.get("tp2") or 0),
                 tp3=float(scenario.get("tp3") or 0),
-                strength="Scenario",
+                strength=strength_label,
                 size=size_pct,
                 score=int(round(float(scenario.get("probability") or 0.0) / 10.0)),
                 trend=self.macro_trend,
@@ -888,7 +992,7 @@ class PonchBot:
                 tp_liq_prob=tp_liq["prob"] if tp_liq else None,
                 tp_liq_usd=tp_liq["size_usd"] if tp_liq else None,
                 tp_liq_target=tp_liq["target"] if tp_liq else None,
-                trigger_label="Scenario Plan",
+                trigger_label=trigger_label,
                 chat_id=self._signal_chat_id(),
                 message_thread_id=self._trading_signal_thread_id(),
             )
@@ -905,13 +1009,13 @@ class PonchBot:
             timestamp=now.strftime("%Y-%m-%d %H:%M"),
             msg_id=public_msg_id,
             chat_id=self._signal_chat_id(),
-            signal_type="SCALP",
+            signal_type=signal_type,
             meta={
                 "signal_id": signal_id,
                 "score": int(round(float(scenario.get("probability") or 0.0) / 10.0)),
                 "trend": self.macro_trend,
-                "trigger": "Scenario Plan",
-                "strategy": "SCENARIO_PLAN",
+                "trigger": trigger_label,
+                "strategy": strategy_name,
                 "reasons": reasons,
                 "size": size_pct,
                 "scenario_kind": scenario.get("kind"),
@@ -922,6 +1026,7 @@ class PonchBot:
                 "tp_liq_prob": tp_liq["prob"] if tp_liq else None,
                 "tp_liq_usd": tp_liq["size_usd"] if tp_liq else None,
                 "tp_liq_target": tp_liq["target"] if tp_liq else None,
+                **dict(extra_meta or {}),
             },
         )
         sig = self.tracker.signals[-1]
@@ -934,6 +1039,100 @@ class PonchBot:
         self._execute_exchange_trade(sig)
         return True
 
+    def _pick_smart_hedge_scenario(self, owner_sig, payload):
+        owner_sig = owner_sig or {}
+        payload = payload or {}
+        opposite_side = "SHORT" if str(owner_sig.get("side") or "").upper() == "LONG" else "LONG"
+        preferred_kinds = {"breakdown", "rejection", "major_squeeze", "major_flush", "breakout", "pullback"}
+        candidates = []
+        for scenario in list(payload.get("scenarios") or []):
+            side = str(scenario.get("side") or "").upper()
+            probability = float(scenario.get("probability") or 0.0)
+            if side != opposite_side:
+                continue
+            if probability < float(BITUNIX_AUTO_HEDGE_MIN_PROBABILITY):
+                continue
+            if not self._scenario_trigger_ready(scenario, payload):
+                continue
+            score = probability
+            if scenario.get("trend_aligned"):
+                score += 4.0
+            if str(scenario.get("kind") or "").strip().lower() in preferred_kinds:
+                score += 2.0
+            candidates.append((score, scenario))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
+    def _maybe_execute_smart_hedge(self, now, current_time):
+        if not self._smart_hedge_enabled():
+            return
+        primary_active = self._active_primary_execution_signals()
+        if len(primary_active) != 1:
+            return
+        if self._active_hedge_execution_signals():
+            return
+
+        owner_sig = primary_active[0]
+        owner_signal_id = str(self._signal_id_value(owner_sig) or "").strip()
+        if not owner_signal_id:
+            return
+        if self._find_active_hedge_for_parent(owner_signal_id):
+            return
+
+        owner_status = str(owner_sig.get("status") or "OPEN").upper()
+        if owner_status not in {"OPEN", "TP1"}:
+            return
+
+        cutoff = current_time - max(float(BITUNIX_AUTO_HEDGE_COOLDOWN_SEC), 300.0)
+        hedge_key = f"HEDGE:{owner_signal_id}"
+        if float((self.scenario_trade_cooldowns or {}).get(hedge_key) or 0) >= cutoff:
+            return
+
+        try:
+            payload = build_btc_scenarios_payload(symbol=SYMBOL, mode=BITUNIX_SCENARIO_TRADING_MODE or "short_term")
+        except Exception as e:
+            print(f"  [HEDGE] Scenario payload failed: {e}")
+            return
+
+        current_price = float(payload.get("current_price") or 0.0)
+        if current_price <= 0:
+            return
+        progress_r = self._signal_stop_progress_r(owner_sig, current_price)
+        if progress_r < float(BITUNIX_AUTO_HEDGE_TRIGGER_R):
+            return
+        if progress_r > float(BITUNIX_AUTO_HEDGE_MAX_PROGRESS_R):
+            return
+
+        hedge_scenario = self._pick_smart_hedge_scenario(owner_sig, payload)
+        if not hedge_scenario:
+            return
+
+        sent = self._send_scenario_execution_signal(
+            hedge_scenario,
+            payload,
+            now=now,
+            size_pct_override=self._smart_hedge_size_pct(hedge_scenario),
+            strategy_name="SMART_HEDGE",
+            trigger_label="Smart Hedge",
+            signal_type="SCALP",
+            extra_meta={
+                "hedge_parent_signal_id": owner_signal_id,
+                "hedge_parent_side": owner_sig.get("side"),
+                "hedge_parent_tf": owner_sig.get("tf"),
+                "hedge_trigger_progress_r": round(progress_r, 3),
+            },
+        )
+        if sent:
+            self.scenario_trade_cooldowns[hedge_key] = current_time
+            self._record_signal_sent("SMART_HEDGE", now=now)
+            self._save_state()
+            print(
+                f"  [HEDGE] Sent smart hedge against {owner_sig.get('side')} "
+                f"{owner_sig.get('tf')} progress_r={progress_r:.2f}"
+            )
+
     def _maybe_execute_scenario_trade(self, now, current_time):
         if not self._scenario_trading_enabled() or self.is_booting:
             return
@@ -941,15 +1140,21 @@ class PonchBot:
             return
         self.last_scenario_trade_scan_at = current_time
 
-        active_exec = self._active_execution_signals()
-        if active_exec:
-            return
-
-        cutoff = current_time - max(float(BITUNIX_SCENARIO_TRIGGER_COOLDOWN_SEC), 60.0)
+        retention_sec = max(
+            float(BITUNIX_SCENARIO_TRIGGER_COOLDOWN_SEC),
+            float(BITUNIX_AUTO_HEDGE_COOLDOWN_SEC),
+            60.0,
+        )
+        cutoff = current_time - retention_sec
         self.scenario_trade_cooldowns = {
             k: float(v) for k, v in (self.scenario_trade_cooldowns or {}).items()
             if float(v or 0) >= cutoff
         }
+
+        active_exec = self._active_execution_signals()
+        if active_exec:
+            self._maybe_execute_smart_hedge(now, current_time)
+            return
 
         try:
             payload = build_btc_scenarios_payload(symbol=SYMBOL, mode=BITUNIX_SCENARIO_TRADING_MODE or "short_term")
