@@ -22,8 +22,10 @@ from config import (
     BITUNIX_LIQUIDATION_SAFETY_BUFFER_R,
     BITUNIX_LIQUIDATION_SAFETY_ENABLED,
     BITUNIX_MARGIN_COIN,
+    BITUNIX_MAX_DEPOSIT_USAGE_PCT,
     BITUNIX_MAX_OPEN_POSITIONS,
     BITUNIX_MAX_RISK_USD,
+    BITUNIX_MIN_DEPOSIT_USAGE_PCT,
     BITUNIX_MIN_BASE_QTY,
     BITUNIX_MIN_NOTIONAL_USD,
     BITUNIX_POSITION_MODE,
@@ -1040,6 +1042,16 @@ class TradeExecutor:
                     plan["entry_trade_qty"] = order_detail.get("tradeQty")
                 raise BitunixTradeError(f"Entry accepted but no pending {signal['side']} position was returned.")
             self._apply_filled_position_to_plan(plan, position)
+            live_stop_risk = abs(float(plan.get("filled_entry_price") or plan.get("entry") or 0) - float(signal["sl"])) * float(plan.get("qty") or 0)
+            plan["risk_budget_usd"] = max(0.0, live_stop_risk)
+            plan["estimated_stop_risk_usd"] = max(0.0, live_stop_risk)
+            if float(plan.get("leverage") or 0) > 0 and float(plan.get("notional") or 0) > 0:
+                margin_budget_live = float(plan.get("notional") or 0) / (float(plan.get("leverage") or 1) * 0.98)
+            else:
+                margin_budget_live = float(plan.get("margin_budget_usd") or 0)
+            plan["margin_budget_usd"] = max(0.0, margin_budget_live)
+            balance_available = float(plan.get("balance_available") or 0)
+            plan["margin_usage_pct"] = (margin_budget_live / balance_available) if balance_available > 0 and margin_budget_live > 0 else 0.0
 
             position_id = str(position.get("positionId") or "")
             if not position_id:
@@ -1109,12 +1121,20 @@ class TradeExecutor:
                 "qty": plan["qty"],
                 "tp_qtys": plan["tp_qtys"],
                 "tp_targets": [float(signal["tp1"]), float(signal["tp2"]), float(signal["tp3"])],
+                "tp_splits": list(plan.get("tp_splits") or get_tp_splits_for_tf(signal.get("tf"), str((signal.get("meta") or {}).get("strategy") or signal.get("strategy") or ""))),
                 "leverage": plan["leverage"],
                 "entry_order_type": "LIMIT",
                 "entry_attempts": plan.get("entry_attempts") or [],
                 "filled_entry_price": plan.get("filled_entry_price"),
                 "risk_budget_usd": plan["risk_budget_usd"],
+                "configured_risk_budget_usd": plan.get("configured_risk_budget_usd"),
                 "balance_available": plan["balance_available"],
+                "balance_total": plan.get("balance_total"),
+                "margin_budget_usd": plan.get("margin_budget_usd"),
+                "margin_usage_pct": plan.get("margin_usage_pct"),
+                "min_deposit_usage_pct": plan.get("min_deposit_usage_pct"),
+                "max_deposit_usage_pct": plan.get("max_deposit_usage_pct"),
+                "estimated_stop_risk_usd": plan.get("estimated_stop_risk_usd"),
                 "position_mode": plan.get("position_mode"),
                 "liq_price": plan.get("liq_price"),
                 "liq_safe": plan.get("liq_safe"),
@@ -1168,7 +1188,20 @@ class TradeExecutor:
                 execution["active"] = False
                 execution["sl_moved_to"] = None
                 return ExecutionResult(self.mode, True, "Take profit closed the full position.", execution)
-            return ExecutionResult(self.mode, True, "TP1 reached; stop stays in place for now.", execution)
+            try:
+                new_sl = float(
+                    execution.get("filled_entry_price")
+                    or signal.get("entry")
+                    or 0
+                )
+            except Exception:
+                new_sl = float(signal.get("entry") or 0)
+            if new_sl <= 0:
+                new_sl = float(signal.get("entry") or 0)
+            self._update_position_stop(symbol, str(position_id), signal, execution, new_sl)
+            signal["sl"] = new_sl
+            execution["sl_moved_to"] = new_sl
+            return ExecutionResult(self.mode, True, "Moved SL to entry after TP1.", execution)
 
         if event_type == "TP2" and position_id:
             self._ensure_tp_leg_closed(signal, execution, 2)
@@ -1193,24 +1226,6 @@ class TradeExecutor:
             execution["sl_moved_to"] = new_sl
             return ExecutionResult(self.mode, True, "Moved SL to protected breakeven after TP2.", execution)
 
-        if event_type == "TP2" and position_id:
-            self._ensure_tp_leg_closed(signal, execution, 2)
-            qtys = list(execution.get("tp_qtys") or [0.0, 0.0, 0.0])
-            while len(qtys) < 3:
-                qtys.append(0.0)
-            remaining_qty = max(0.0, float(execution.get("qty", 0) or 0) - float(qtys[1] or 0))
-            if remaining_qty <= 1e-12:
-                self._cancel_remaining_protection(execution)
-                if sl_order_id:
-                    try:
-                        self.client.cancel_tpsl(symbol, str(sl_order_id))
-                    except Exception:
-                        pass
-                execution["active"] = False
-                execution["sl_moved_to"] = None
-                return ExecutionResult(self.mode, True, "TP2 closed the full position.", execution)
-            return ExecutionResult(self.mode, True, "TP2 reached; SL remains at entry.", execution)
-
         if event_type in {"TP3", "SL", "ENTRY_CLOSE", "PROFIT_SL"}:
             if event_type == "TP3":
                 self._ensure_tp_leg_closed(signal, execution, 3)
@@ -1234,6 +1249,7 @@ class TradeExecutor:
 
         balance_data = self._safe_get_balance()
         balance_available = float(balance_data.get("available", 0) or 0)
+        balance_total = float(balance_data.get("total", 0) or 0)
         raw_account = balance_data.get("raw") or {}
         position_mode = str(raw_account.get("positionMode") or BITUNIX_POSITION_MODE or "ONE_WAY").strip().upper()
         if position_mode not in {"ONE_WAY", "HEDGE"}:
@@ -1274,19 +1290,41 @@ class TradeExecutor:
             signal_size_pct = float(signal_size_pct or 0)
         except Exception:
             signal_size_pct = 0.0
-        effective_risk_cap_pct = (signal_size_pct / 100.0) if signal_size_pct > 0 else float(BITUNIX_RISK_CAP_PCT)
-        risk_from_balance = balance_available * effective_risk_cap_pct
-        risk_budget = min(BITUNIX_MAX_RISK_USD, risk_from_balance) if balance_available > 0 else 0.0
-        risk_qty = (risk_budget / risk_per_unit) if risk_budget > 0 else 0.0
-        margin_budget = balance_available
-        if manual_margin_usd is not None:
-            margin_budget = min(balance_available, max(0.0, manual_margin_usd))
+        min_deposit_usage_pct = max(0.0, float(BITUNIX_MIN_DEPOSIT_USAGE_PCT or 0.0))
+        max_deposit_usage_pct = max(min_deposit_usage_pct, min(1.0, float(BITUNIX_MAX_DEPOSIT_USAGE_PCT or 1.0)))
+        deposit_band_enabled = min_deposit_usage_pct > 0 or max_deposit_usage_pct < 0.999999
+        auto_usage_quality = self._auto_usage_quality(signal)
+        auto_margin_usage_pct = (
+            min_deposit_usage_pct + (auto_usage_quality * max(0.0, max_deposit_usage_pct - min_deposit_usage_pct))
+        ) if deposit_band_enabled else 0.0
+        if deposit_band_enabled:
+            auto_margin_usage_pct = self._clamp(auto_margin_usage_pct, min_deposit_usage_pct, max_deposit_usage_pct)
+        fallback_risk_cap_pct = float(BITUNIX_RISK_CAP_PCT or 0.0)
+        risk_from_balance = balance_available * fallback_risk_cap_pct
+        configured_risk_budget = min(BITUNIX_MAX_RISK_USD, risk_from_balance) if balance_available > 0 else 0.0
+        risk_qty = (configured_risk_budget / risk_per_unit) if configured_risk_budget > 0 else 0.0
+        min_margin_budget = (balance_available * min_deposit_usage_pct) if balance_available > 0 else 0.0
+        max_margin_budget = (balance_available * max_deposit_usage_pct) if balance_available > 0 else 0.0
+        risk_margin_budget = ((risk_qty * entry) / leverage) if risk_qty > 0 and leverage > 0 else 0.0
+        margin_budget = risk_margin_budget
+        if manual_margin_usd is not None and manual_margin_usd > 0:
+            margin_budget = float(manual_margin_usd)
+        elif deposit_band_enabled and balance_available > 0:
+            margin_budget = balance_available * auto_margin_usage_pct
+        elif risk_margin_budget <= 0 and min_margin_budget > 0:
+            margin_budget = min_margin_budget
+        if balance_available <= 0:
+            margin_budget = 0.0
+        if balance_available > 0:
+            margin_budget = max(0.0, float(margin_budget or 0.0))
+            if max_margin_budget > 0:
+                margin_budget = min(max_margin_budget, margin_budget)
+            if min_margin_budget > 0:
+                margin_budget = max(min_margin_budget, margin_budget)
+            margin_budget = min(balance_available, margin_budget)
         affordable_notional = max(0.0, margin_budget * leverage * 0.98)
         affordable_qty = (affordable_notional / entry) if entry > 0 else 0.0
-        if manual_margin_usd is not None and manual_margin_usd > 0:
-            qty = affordable_qty
-        else:
-            qty = min(risk_qty, affordable_qty) if affordable_qty > 0 else 0.0
+        qty = affordable_qty if affordable_qty > 0 else 0.0
         if (
             qty > 0
             and balance_available >= BITUNIX_MIN_NOTIONAL_USD
@@ -1298,6 +1336,9 @@ class TradeExecutor:
         if qty < min_base_qty:
             qty = min_base_qty if affordable_qty >= min_base_qty else 0.0
         qty = self._round_qty_down(qty, qty_step)
+        estimated_stop_risk_usd = max(0.0, qty * risk_per_unit)
+        margin_usage_pct = (margin_budget / balance_available) if balance_available > 0 and margin_budget > 0 else 0.0
+        effective_risk_cap_pct = (estimated_stop_risk_usd / balance_available) if balance_available > 0 and estimated_stop_risk_usd > 0 else 0.0
         strategy_name = str(
             signal.get("strategy")
             or (signal.get("meta") or {}).get("strategy")
@@ -1344,8 +1385,10 @@ class TradeExecutor:
             "leverage": leverage,
             "current_exchange_leverage": int(raw_account.get("leverage") or 0),
             "target_leverage": target_leverage,
-            "risk_budget_usd": risk_budget,
+            "risk_budget_usd": estimated_stop_risk_usd,
+            "configured_risk_budget_usd": configured_risk_budget,
             "risk_cap_pct": effective_risk_cap_pct,
+            "fallback_risk_cap_pct": fallback_risk_cap_pct,
             "signal_size_pct": signal_size_pct,
             "manual_margin_usd": manual_margin_usd,
             "manual_leverage": manual_leverage,
@@ -1353,6 +1396,15 @@ class TradeExecutor:
             "affordable_qty": affordable_qty,
             "affordable_notional": affordable_notional,
             "balance_available": balance_available,
+            "balance_total": balance_total,
+            "margin_budget_usd": margin_budget,
+            "margin_usage_pct": margin_usage_pct,
+            "auto_margin_usage_pct": auto_margin_usage_pct,
+            "auto_usage_quality": auto_usage_quality,
+            "deposit_band_enabled": deposit_band_enabled,
+            "min_deposit_usage_pct": min_deposit_usage_pct,
+            "max_deposit_usage_pct": max_deposit_usage_pct,
+            "estimated_stop_risk_usd": estimated_stop_risk_usd,
             "position_mode": position_mode,
             "margin_mode": margin_mode,
             "required_margin_mode": BITUNIX_REQUIRED_MARGIN_MODE,
@@ -1447,6 +1499,54 @@ class TradeExecutor:
         except Exception:
             ts_val = 0.0
         return (ts_val, abs(float(pos.get("qty") or pos.get("positionQty") or 0) or 0))
+
+    @staticmethod
+    def _clamp(value: float, lower: float, upper: float) -> float:
+        return max(float(lower), min(float(upper), float(value)))
+
+    def _auto_usage_quality(self, signal: Dict[str, Any]) -> float:
+        signal = signal or {}
+        meta = signal.get("meta") or {}
+        signal_type = str(signal.get("type") or "SCALP").strip().upper()
+        strategy = str(meta.get("strategy") or signal.get("strategy") or "").strip().upper()
+        base = {
+            "SCALP": 0.46,
+            "STRONG": 0.68,
+            "EXTREME": 0.84,
+        }.get(signal_type, 0.52)
+        if strategy == "SMART_HEDGE":
+            base = min(base, 0.34)
+        elif strategy == "SMART_MONEY_LIQUIDITY":
+            base = max(base, 0.74)
+        elif strategy == "SCENARIO_PLAN":
+            base = max(base, 0.58)
+
+        score_val = 0.0
+        try:
+            raw_score = float(meta.get("score") or 0)
+            if raw_score > 0:
+                score_val = self._clamp(raw_score / 10.0, 0.0, 1.0)
+        except Exception:
+            score_val = 0.0
+
+        prob_val = 0.0
+        try:
+            raw_prob = float(meta.get("scenario_probability") or meta.get("probability") or 0)
+            if raw_prob > 0:
+                prob_val = self._clamp((raw_prob - 45.0) / 35.0, 0.0, 1.0)
+        except Exception:
+            prob_val = 0.0
+
+        size_hint_val = 0.0
+        try:
+            raw_size = float(meta.get("size") or signal.get("signal_size_pct") or 0)
+            if raw_size > 0:
+                size_hint_val = self._clamp((raw_size - 4.0) / 6.0, 0.0, 1.0)
+        except Exception:
+            size_hint_val = 0.0
+
+        quality = (base * 0.55) + (score_val * 0.20) + (prob_val * 0.20) + (size_hint_val * 0.05)
+        return self._clamp(quality, 0.20, 1.0)
 
     def _match_position_side(self, positions: List[Dict[str, Any]], target_side: str) -> Optional[Dict[str, Any]]:
         target = str(target_side or "").upper()
@@ -1934,6 +2034,150 @@ class TradeExecutor:
             except Exception:
                 pass
 
+    def rebuild_position_protection(self, signal: Dict[str, Any], *, reason: str = "position change") -> ExecutionResult:
+        self._refresh_state()
+        execution = (signal or {}).get("execution") or {}
+        if not execution or not execution.get("active"):
+            return ExecutionResult(self.mode, False, "No active exchange execution found for protection rebuild.", {})
+        symbol = str(execution.get("symbol") or signal.get("symbol") or SYMBOL).upper()
+        position_id = str(execution.get("position_id") or "").strip()
+        if not symbol or not position_id:
+            return ExecutionResult(self.mode, False, "Missing exchange position reference for rebuild.", execution)
+        if self.mode != "live":
+            return ExecutionResult(self.mode, False, "Protection rebuild is only available in live mode.", execution)
+
+        live_position = None
+        for pos in self._pending_positions_list(symbol):
+            candidate_id = str(pos.get("positionId") or pos.get("id") or "").strip()
+            if candidate_id == position_id and self._position_qty(pos) > 0:
+                live_position = pos
+                break
+        if live_position is None:
+            fallback = self._find_position(symbol, str(signal.get("side") or "").upper())
+            if fallback and str(fallback.get("positionId") or fallback.get("id") or "").strip():
+                live_position = fallback
+                execution["position_id"] = str(fallback.get("positionId") or fallback.get("id") or "").strip()
+                position_id = str(execution.get("position_id") or "").strip()
+        if live_position is None:
+            execution["active"] = False
+            return ExecutionResult(self.mode, False, "Live Bitunix position was not found during protection rebuild.", execution)
+
+        symbol_rules = self._get_symbol_rules(symbol)
+        qty_step = float(symbol_rules.get("qty_step") or BITUNIX_QTY_STEP)
+        min_base_qty = float(symbol_rules.get("min_base_qty") or BITUNIX_MIN_BASE_QTY)
+        actual_qty = self._round_qty_down(self._position_qty(live_position), qty_step)
+        if actual_qty <= 0:
+            execution["active"] = False
+            return ExecutionResult(self.mode, False, "Live Bitunix position quantity is zero during protection rebuild.", execution)
+
+        avg_entry = (
+            live_position.get("avgOpenPrice")
+            or live_position.get("avgPrice")
+            or live_position.get("entryPrice")
+            or live_position.get("openPrice")
+            or execution.get("filled_entry_price")
+            or signal.get("entry")
+        )
+        try:
+            avg_entry = float(avg_entry or 0)
+        except Exception:
+            avg_entry = float(signal.get("entry") or 0)
+        execution["qty"] = float(actual_qty)
+        execution["filled_entry_price"] = float(avg_entry or signal.get("entry") or 0)
+        execution["entry"] = execution["filled_entry_price"]
+        execution["notional"] = float(actual_qty) * float(execution["filled_entry_price"] or 0)
+
+        splits = tuple(execution.get("tp_splits") or get_tp_splits_for_tf(signal.get("tf"), str((signal.get("meta") or {}).get("strategy") or signal.get("strategy") or "")))
+        execution["tp_splits"] = list(splits)
+        tp_targets = list(execution.get("tp_targets") or [signal.get("tp1"), signal.get("tp2"), signal.get("tp3")])
+        while len(tp_targets) < 3:
+            tp_targets.append(None)
+        executed_indices = {
+            int(idx)
+            for idx in (execution.get("executed_tp_indices") or [])
+            if int(idx or 0) in {1, 2, 3}
+        }
+        active_target_indices = [
+            idx
+            for idx in (1, 2, 3)
+            if idx not in executed_indices and float(tp_targets[idx - 1] or 0) > 0
+        ]
+        rebuilt_tp_qtys, rebuild_warning = self._split_qty_for_indices(
+            actual_qty,
+            active_indices=active_target_indices,
+            min_base_qty=min_base_qty,
+            step=qty_step,
+            splits=splits,
+        )
+
+        current_sl_price = self._current_sl_price(signal, execution)
+        if current_sl_price is None or current_sl_price <= 0:
+            current_sl_price = float(signal.get("sl") or 0)
+        if current_sl_price > 0:
+            live_stop_risk = abs(float(execution.get("filled_entry_price") or 0) - float(current_sl_price or 0)) * float(actual_qty)
+            execution["risk_budget_usd"] = max(0.0, live_stop_risk)
+            execution["estimated_stop_risk_usd"] = max(0.0, live_stop_risk)
+
+        leverage = float(execution.get("leverage") or 0)
+        balance_available = float(execution.get("balance_available") or 0)
+        if leverage > 0 and float(execution.get("notional") or 0) > 0:
+            margin_budget_live = float(execution.get("notional") or 0) / (leverage * 0.98)
+            execution["margin_budget_usd"] = max(0.0, margin_budget_live)
+            execution["margin_usage_pct"] = (margin_budget_live / balance_available) if balance_available > 0 and margin_budget_live > 0 else 0.0
+
+        if not execution.get("sl_order") and current_sl_price > 0:
+            try:
+                sl_row = self._data_dict(self.client.place_position_tpsl(symbol, position_id, None, float(current_sl_price)))
+                if sl_row.get("orderId") or sl_row.get("id"):
+                    execution["sl_order"] = sl_row
+            except Exception:
+                pass
+
+        self._cancel_remaining_protection(execution)
+        execution["tp_qtys"] = rebuilt_tp_qtys
+        execution["tp_orders"] = []
+        execution["missing_tp_indices"] = []
+        protection_warnings: List[str] = []
+        if rebuild_warning:
+            protection_warnings.append(rebuild_warning)
+
+        plan = {
+            "exit_reduce_only": execution.get("exit_reduce_only"),
+            "exit_trade_side": execution.get("exit_trade_side"),
+        }
+        active_rebuilt_indices = [idx for idx, qty_part in enumerate(rebuilt_tp_qtys[:3], start=1) if float(qty_part or 0) > 0]
+        single_tp_index = active_rebuilt_indices[0] if len(active_rebuilt_indices) == 1 else None
+        for idx in active_rebuilt_indices:
+            target_price = float(tp_targets[idx - 1] or signal.get(f"tp{idx}") or 0)
+            if target_price <= 0:
+                continue
+            tp_record, tp_warning = self._place_take_profit_order(
+                symbol=symbol,
+                position_id=position_id,
+                exit_side=execution.get("exit_side"),
+                qty_part=float(rebuilt_tp_qtys[idx - 1]),
+                tp_price=target_price,
+                signal_id=execution.get("signal_id", new_signal_id()),
+                tp_index=idx,
+                plan=plan,
+                use_position_tp=(single_tp_index == idx),
+                current_sl_price=current_sl_price if current_sl_price and current_sl_price > 0 else None,
+            )
+            if tp_warning:
+                protection_warnings.append(tp_warning)
+            if tp_record is None:
+                execution["missing_tp_indices"].append(idx)
+            else:
+                execution["tp_orders"].append(tp_record)
+        execution["protection_warnings"] = protection_warnings
+        execution["protection_ready"] = bool(execution.get("sl_order")) and len(execution.get("tp_orders") or []) == len(active_rebuilt_indices)
+        return ExecutionResult(
+            self.mode,
+            True,
+            f"Rebuilt Bitunix protection after {reason} with merged qty {actual_qty:.6f}.",
+            execution,
+        )
+
     def _cancel_tp_order_record(self, execution: Dict[str, Any], order: Dict[str, Any]) -> None:
         symbol = execution.get("symbol")
         if not symbol or not order:
@@ -2359,6 +2603,61 @@ class TradeExecutor:
 
         return [0.0, total, 0.0], (
             f"Compressed TP legs to a single full TP2 because partial TP legs fall below Bitunix min qty {min_leg:.8f}."
+        )
+
+    @classmethod
+    def _split_qty_for_indices(
+        cls,
+        qty: float,
+        *,
+        active_indices: List[int],
+        min_base_qty: Optional[float] = None,
+        step: Optional[float] = None,
+        splits: Optional[tuple[float, float, float]] = None,
+    ) -> tuple[List[float], Optional[str]]:
+        active = [int(i) for i in active_indices if int(i) in {1, 2, 3}]
+        if not active:
+            return [0.0, 0.0, 0.0], "No active TP targets remain for protection rebuild."
+
+        step = max(float(step or BITUNIX_QTY_STEP or 0), 0.00000001)
+        min_leg = max(float(min_base_qty or BITUNIX_MIN_BASE_QTY or 0), step)
+        total = cls._round_qty_down(float(qty), step)
+        if total <= 0:
+            return [0.0, 0.0, 0.0], "TP rebuild skipped: quantity rounded to zero."
+        if total < min_leg:
+            return [0.0, 0.0, 0.0], (
+                f"TP rebuild skipped: total qty {total:.8f} is below Bitunix min leg {min_leg:.8f}."
+            )
+
+        raw_splits = list(splits or get_tp_splits_for_tf(None, ""))
+        while len(raw_splits) < 3:
+            raw_splits.append(0.0)
+        weights = [max(0.0, float(raw_splits[idx - 1] or 0.0)) for idx in active]
+        if sum(weights) <= 0:
+            weights = [1.0] * len(active)
+        total_weight = sum(weights)
+
+        rebuilt = [0.0, 0.0, 0.0]
+        remaining = total
+        for idx, weight in list(zip(active, weights))[:-1]:
+            leg_qty = cls._round_qty_down(total * (weight / total_weight), step)
+            rebuilt[idx - 1] = leg_qty
+            remaining = max(0.0, remaining - leg_qty)
+        rebuilt[active[-1] - 1] = cls._round_qty_down(remaining, step)
+
+        active_qtys = [rebuilt[idx - 1] for idx in active if rebuilt[idx - 1] > 0]
+        if (
+            len(active_qtys) == len(active)
+            and min(active_qtys) >= min_leg
+            and abs(sum(rebuilt) - total) < (step + 1e-12)
+        ):
+            return rebuilt, None
+
+        strongest_idx = active[max(range(len(active)), key=lambda i: weights[i])]
+        compressed = [0.0, 0.0, 0.0]
+        compressed[strongest_idx - 1] = total
+        return compressed, (
+            f"Compressed rebuilt TP legs to TP{strongest_idx} because one or more remaining legs fell below Bitunix min qty {min_leg:.8f}."
         )
 
     @staticmethod

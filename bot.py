@@ -787,6 +787,14 @@ class PonchBot:
                 caption=self._public_signal_caption(sig, status_override=status_override),
                 chat_id=self._signal_chat_id(),
             )
+            if result is False:
+                time.sleep(0.35)
+                result = tg.edit_message_media(
+                    msg_id,
+                    chart_path,
+                    caption=self._public_signal_caption(sig, status_override=status_override),
+                    chat_id=self._signal_chat_id(),
+                )
             if result == "DELETED":
                 sig["msg_id"] = None
                 sig["trading_signal_msg_id"] = None
@@ -797,6 +805,8 @@ class PonchBot:
                     sig["msg_id"] = public_msg_id
                     sig["trading_signal_msg_id"] = public_msg_id
                     self._save_state()
+            elif result is False:
+                print(f"  [TG] Public signal chart refresh failed for signal {self._signal_id_value(sig)}.")
         finally:
             try:
                 import os
@@ -851,8 +861,12 @@ class PonchBot:
             return None
         tf, limit = self._signal_chart_timeframe(sig)
         try:
-            df = fetch_klines(interval=tf, limit=limit)
-            if df.empty:
+            symbol_name = str((sig.get("symbol") or (sig.get("meta") or {}).get("symbol") or SYMBOL)).upper()
+            live_price = close_price
+            if live_price is None:
+                live_price = self._current_market_price(sig.get("tf"), symbol=symbol_name)
+            df = self._snapshot_dataframe(sig, tf, limit, close_price=live_price)
+            if df is None or df.empty:
                 return None
             return generate_signal_setup_chart(
                 df,
@@ -862,11 +876,11 @@ class PonchBot:
                 tp1=float(sig.get("tp1", 0) or 0),
                 tp2=float(sig.get("tp2", 0) or 0),
                 tp3=float(sig.get("tp3", 0) or 0),
-                symbol=SYMBOL,
+                symbol=symbol_name,
                 timeframe=tf,
                 output_path=output_name,
                 title=title,
-                close_price=close_price,
+                close_price=live_price,
                 event_label=event_label,
             )
         except Exception as e:
@@ -932,11 +946,21 @@ class PonchBot:
                 caption=self._active_trade_snapshot_caption(sig, event_label=event_label, close_price=close_price),
                 chat_id=self._signal_chat_id(),
             )
+            if result is False:
+                time.sleep(0.35)
+                result = tg.edit_message_media(
+                    msg_id,
+                    chart_path,
+                    caption=self._active_trade_snapshot_caption(sig, event_label=event_label, close_price=close_price),
+                    chat_id=self._signal_chat_id(),
+                )
             if result == "DELETED":
                 sig["active_signal_msg_id"] = None
                 sig["active_snapshot_msg_id"] = None
                 self._save_state()
                 self._send_active_trade_snapshot(sig)
+            elif result is False:
+                print(f"  [TG] Active trade chart refresh failed for signal {self._signal_id_value(sig)}.")
         finally:
             try:
                 import os
@@ -2577,6 +2601,12 @@ class PonchBot:
 
     def _current_market_price(self, tf_hint=None, symbol=None):
         symbol_name = str(symbol or SYMBOL).upper()
+        try:
+            live_price = fetch_last_price(symbol_name)
+            if live_price and float(live_price) > 0:
+                return float(live_price)
+        except Exception:
+            pass
         preferred = []
         tf_name = str(tf_hint or "").strip()
         if tf_name and symbol_name == str(SYMBOL).upper():
@@ -2590,13 +2620,35 @@ class PonchBot:
                     return float(df.iloc[-1]["Close"])
             except Exception:
                 continue
-        try:
-            okx_price = fetch_last_price(symbol_name)
-            if okx_price and okx_price > 0:
-                return float(okx_price)
-        except Exception:
-            pass
         return None
+
+    def _snapshot_dataframe(self, sig, tf, limit, close_price=None):
+        symbol_name = str((sig or {}).get("symbol") or ((sig or {}).get("meta") or {}).get("symbol") or SYMBOL).upper()
+        df = None
+        cached = self.latest_data.get(tf) if symbol_name == str(SYMBOL).upper() else None
+        try:
+            if cached is not None and not cached.empty:
+                df = cached.tail(limit).copy()
+        except Exception:
+            df = None
+        if df is None or df.empty:
+            df = fetch_klines(symbol=symbol_name, interval=tf, limit=limit)
+        if df is None or df.empty:
+            return df
+        if close_price is not None:
+            try:
+                live_close = float(close_price)
+            except Exception:
+                live_close = 0.0
+            if live_close > 0:
+                idx = df.index[-1]
+                last_open = float(df.iloc[-1]["Open"] or 0)
+                last_high = float(df.iloc[-1]["High"] or 0)
+                last_low = float(df.iloc[-1]["Low"] or 0)
+                df.at[idx, "Close"] = live_close
+                df.at[idx, "High"] = max(last_high, last_open, live_close)
+                df.at[idx, "Low"] = min(last_low, last_open, live_close)
+        return df
 
     def _position_live_metrics(self, sig, current_price_override=None):
         sig = sig or {}
@@ -7605,6 +7657,19 @@ class PonchBot:
                     result.payload["same_side_add"] = True
                     result.payload["same_side_add_owner_signal_id"] = merged_owner_id
                     self._record_same_side_add_execution(merged_owner_sig, sig_obj)
+                    rebuild_result = self.trade_executor.rebuild_position_protection(
+                        merged_owner_sig,
+                        reason="same-side add merge",
+                    )
+                    if rebuild_result.accepted:
+                        merged_owner_sig["execution"] = rebuild_result.payload or (merged_owner_sig.get("execution") or {})
+                        print(f"  [TRADE] {rebuild_result.message}")
+                    else:
+                        print(f"  [TRADE] Protection rebuild skipped: {rebuild_result.message}")
+                    try:
+                        self.tracker.persist()
+                    except Exception:
+                        pass
                     self._refresh_public_signal_snapshot(merged_owner_sig)
                     self._refresh_active_trade_snapshot(merged_owner_sig, event_label="REINFORCED")
                 details = result.payload or {}
@@ -7636,6 +7701,7 @@ class PonchBot:
             print(
                 f"  [TRADE] Balance={float(details.get('balance_available', 0) or 0):.2f} "
                 f"risk_budget={float(details.get('risk_budget_usd', 0) or 0):.2f} "
+                f"configured_risk={float(details.get('configured_risk_budget_usd', 0) or 0):.2f} "
                 f"signal_size={float(details.get('signal_size_pct', 0) or 0):.2f}% "
                 f"qty={float(details.get('qty', 0) or 0):.6f} "
                 f"notional={float(details.get('notional', 0) or 0):.4f}"
@@ -7645,6 +7711,8 @@ class PonchBot:
                     f"  [TRADE] PositionMode={details.get('position_mode')} "
                     f"margin_mode={details.get('margin_mode')} "
                     f"leverage={int(details.get('leverage', 0) or 0)} "
+                    f"margin_budget={float(details.get('margin_budget_usd', 0) or 0):.2f} "
+                    f"usage={float(details.get('margin_usage_pct', 0) or 0) * 100:.1f}% "
                     f"risk_qty={float(details.get('risk_qty', 0) or 0):.6f} "
                     f"affordable_qty={float(details.get('affordable_qty', 0) or 0):.6f} "
                     f"affordable_notional={float(details.get('affordable_notional', 0) or 0):.4f}"

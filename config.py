@@ -4,6 +4,20 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def _env_pct_fraction(name: str, default: str) -> float:
+    raw = os.getenv(name, default)
+    try:
+        value = float(raw)
+    except Exception:
+        try:
+            value = float(default)
+        except Exception:
+            value = 0.0
+    if value > 1.0:
+        value = value / 100.0
+    return max(0.0, value)
+
 # --- TELEGRAM -------------------------------------------------------
 BOT_TOKEN      = os.getenv("BOT_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "").strip()
@@ -39,7 +53,9 @@ BITUNIX_DEFAULT_LEVERAGE = int(os.getenv("BITUNIX_DEFAULT_LEVERAGE", "50"))
 BITUNIX_POSITION_MODE = os.getenv("BITUNIX_POSITION_MODE", "ONE_WAY").strip().upper()
 BITUNIX_MAX_OPEN_POSITIONS = int(os.getenv("BITUNIX_MAX_OPEN_POSITIONS", "3"))
 BITUNIX_MAX_RISK_USD = float(os.getenv("BITUNIX_MAX_RISK_USD", "25"))
-BITUNIX_RISK_CAP_PCT = float(os.getenv("BITUNIX_RISK_CAP_PCT", "0.01"))
+BITUNIX_RISK_CAP_PCT = _env_pct_fraction("BITUNIX_RISK_CAP_PCT", "0.01")
+BITUNIX_MIN_DEPOSIT_USAGE_PCT = _env_pct_fraction("BITUNIX_MIN_DEPOSIT_USAGE_PCT", "0")
+BITUNIX_MAX_DEPOSIT_USAGE_PCT = min(1.0, _env_pct_fraction("BITUNIX_MAX_DEPOSIT_USAGE_PCT", "1.0"))
 BITUNIX_MIN_NOTIONAL_USD = float(os.getenv("BITUNIX_MIN_NOTIONAL_USD", "25"))
 BITUNIX_SCENARIO_TRADING_ENABLED = os.getenv("BITUNIX_SCENARIO_TRADING_ENABLED", "true").strip().lower() == "true"
 BITUNIX_SCENARIO_TRADING_MODE = os.getenv("BITUNIX_SCENARIO_TRADING_MODE", "short_term").strip().lower()
