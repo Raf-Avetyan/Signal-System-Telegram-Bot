@@ -689,8 +689,15 @@ def _scenario_mode_config(mode):
             "near_pick_min_usd": 500.0,
             "near_pick_max_usd": 1500.0,
             "near_pick_target_usd": 950.0,
+            "far_pick_min_usd": 900.0,
+            "far_pick_max_usd": 2200.0,
+            "far_pick_target_usd": 1550.0,
+            "far_pick_min_sep_usd": 450.0,
+            "far_pick_min_sep_pct": 0.35,
             "usable_entry_dist_pct": 1.75,
             "major_liq_min_dist_pct": 1.40,
+            "major_plan_max_dist_pct": 2.45,
+            "major_plan_max_usd": 2200.0,
             "tp_min_gap_pct": 0.00120,
             "tp_min_gap_atr": 0.16,
             "tp_min_gap_usd": 85.0,
@@ -708,8 +715,15 @@ def _scenario_mode_config(mode):
         "near_pick_min_usd": 1200.0,
         "near_pick_max_usd": 2800.0,
         "near_pick_target_usd": 1800.0,
+        "far_pick_min_usd": 1800.0,
+        "far_pick_max_usd": 3800.0,
+        "far_pick_target_usd": 2600.0,
+        "far_pick_min_sep_usd": 700.0,
+        "far_pick_min_sep_pct": 0.45,
         "usable_entry_dist_pct": 3.20,
         "major_liq_min_dist_pct": 2.20,
+        "major_plan_max_dist_pct": 5.50,
+        "major_plan_max_usd": 5000.0,
         "tp_min_gap_pct": 0.00160,
         "tp_min_gap_atr": 0.22,
         "tp_min_gap_usd": 140.0,
@@ -782,6 +796,15 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
     okx_oi = _safe_float((okx_ctx or {}).get("oi"))
 
     scenarios = []
+
+    def _major_plan_allowed(price):
+        dist_pct = _distance_pct(price, current_price)
+        dist_usd = abs(_safe_float(price) - current_price)
+        return (
+            dist_pct >= float(mode_cfg["major_liq_min_dist_pct"])
+            and dist_pct <= float(mode_cfg["major_plan_max_dist_pct"])
+            and dist_usd <= float(mode_cfg["major_plan_max_usd"])
+        )
 
     if planning_support:
         entry_mid = _safe_float(planning_support.get("price"))
@@ -1002,7 +1025,7 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
             }
         )
 
-    if next_support and _distance_pct(next_support.get("price"), current_price) >= mode_cfg["major_liq_min_dist_pct"]:
+    if next_support and _major_plan_allowed(next_support.get("price")):
         liq_price = _safe_float(next_support.get("price"))
         zone_half = max(liq_price * 0.00030, atr_1h * 0.05)
         entry_low = liq_price - zone_half
@@ -1110,7 +1133,7 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
             }
         )
 
-    if next_resistance and _distance_pct(next_resistance.get("price"), current_price) >= mode_cfg["major_liq_min_dist_pct"]:
+    if next_resistance and _major_plan_allowed(next_resistance.get("price")):
         liq_price = _safe_float(next_resistance.get("price"))
         zone_half = max(liq_price * 0.00030, atr_1h * 0.05)
         entry_low = liq_price - zone_half
@@ -1222,7 +1245,67 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
             ),
         )
 
-    if trend_bias_score >= 1.5:
+    def _select_far(rows, preferred_kinds, *, selected_row=None, expected_side_of_price=None, fallback_any_side=False):
+        if not rows:
+            return None
+        directional_rows = []
+        for row in rows:
+            entry_mid = (_safe_float(row.get("entry_low")) + _safe_float(row.get("entry_high"))) / 2.0
+            if expected_side_of_price == "below" and entry_mid >= current_price:
+                continue
+            if expected_side_of_price == "above" and entry_mid <= current_price:
+                continue
+            directional_rows.append(row)
+        if not directional_rows and fallback_any_side:
+            directional_rows = list(rows)
+        if not directional_rows:
+            return None
+
+        if selected_row is not None:
+            selected_mid = (_safe_float(selected_row.get("entry_low")) + _safe_float(selected_row.get("entry_high"))) / 2.0
+            selected_dist_pct = _distance_pct(selected_mid, current_price)
+            filtered = []
+            for row in directional_rows:
+                row_mid = (_safe_float(row.get("entry_low")) + _safe_float(row.get("entry_high"))) / 2.0
+                row_sep_usd = abs(row_mid - selected_mid)
+                row_sep_pct = abs(_distance_pct(row_mid, current_price) - selected_dist_pct)
+                if row_sep_usd >= float(mode_cfg["far_pick_min_sep_usd"]) or row_sep_pct >= float(mode_cfg["far_pick_min_sep_pct"]):
+                    filtered.append(row)
+            if filtered:
+                directional_rows = filtered
+
+        band_rows = [
+            row for row in directional_rows
+            if (
+                mode_cfg["min_dist_pct"] <= _entry_distance_pct(row) <= mode_cfg["max_dist_pct"]
+                and mode_cfg["far_pick_min_usd"] <= _entry_distance_usd(row) <= mode_cfg["far_pick_max_usd"]
+            )
+        ]
+        bounded_rows = [
+            row for row in directional_rows
+            if mode_cfg["min_dist_pct"] <= _entry_distance_pct(row) <= mode_cfg["max_dist_pct"]
+        ]
+        source_pool = band_rows or bounded_rows or directional_rows
+        preferred = [row for row in source_pool if row.get("kind") in preferred_kinds]
+        source = preferred or source_pool
+        return min(
+            source,
+            key=lambda row: (
+                abs(_entry_distance_usd(row) - mode_cfg["far_pick_target_usd"]),
+                abs(_entry_distance_pct(row) - mode_cfg["preferred_dist_pct"]),
+                -float(row.get("probability", 0.0)),
+                not row.get("trend_aligned", False),
+            ),
+        )
+
+    if str(mode_cfg.get("mode_name") or "").lower() == "short_term":
+        near_long = _select_near(long_candidates, {"pullback", "major_flush", "breakout"}, expected_side_of_price="below", fallback_any_side=True)
+        far_long = _select_far(long_candidates, {"breakout", "pullback", "major_flush"}, selected_row=near_long, expected_side_of_price="above", fallback_any_side=True)
+        near_short = _select_near(short_candidates, {"rejection", "major_squeeze", "breakdown"}, expected_side_of_price="above", fallback_any_side=True)
+        far_short = _select_far(short_candidates, {"breakdown", "rejection", "major_squeeze"}, selected_row=near_short, expected_side_of_price="below", fallback_any_side=True)
+        best_long = far_long or _select_best(long_candidates, {"pullback", "breakout", "major_flush"})
+        best_short = far_short or _select_best(short_candidates, {"rejection", "breakdown", "major_squeeze"})
+    elif trend_bias_score >= 1.5:
         best_long = _select_best(long_candidates, {"pullback", "breakout", "major_flush"})
         best_short = _select_best(short_candidates, {"rejection", "major_squeeze", "breakdown"})
         near_long = _select_near(long_candidates, {"pullback", "major_flush", "breakout"}, expected_side_of_price="below", fallback_any_side=True)
