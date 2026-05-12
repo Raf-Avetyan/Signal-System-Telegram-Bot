@@ -34,6 +34,7 @@ BITUNIX_LIMITS = {
 LIQUIDATION_HEATMAP_HISTORY_FILE = "liquidation_heatmap_history.json"
 LIQUIDATION_HEATMAP_HISTORY_MAX_POINTS = 192
 LIQUIDATION_HEATMAP_HISTORY_MIN_SECONDS = 300
+SCENARIO_PLAN_CACHE_FILE = "scenario_plan_cache.json"
 
 
 def _safe_float(value, default=0.0):
@@ -55,6 +56,32 @@ def _pct(current, reference):
 
 def _fmt_price(value):
     return f"{_safe_float(value):,.2f}"
+
+
+def _load_json_file(path, default):
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return default
+
+
+def _save_json_file(path, payload):
+    temp_path = f"{path}.tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+        if os.path.exists(path):
+            os.remove(path)
+        os.replace(temp_path, path)
+    except Exception:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception:
+            pass
 
 
 def _bias_value(bias_text):
@@ -704,6 +731,8 @@ def _scenario_mode_config(mode):
             "title": "BTC Short-Term Plans",
             "final_note": "Use only the plan whose short-term trigger prints first.",
             "execution_tf": "15m",
+            "sticky_plan_ttl_sec": 12 * 60 * 60,
+            "sticky_plan_max_dist_pct": 4.50,
         }
     return {
         "mode_name": "swing",
@@ -730,6 +759,8 @@ def _scenario_mode_config(mode):
         "title": "BTC Scenarios",
         "final_note": "Plan the long only if the long trigger prints. Plan the short only if the short trigger prints.",
         "execution_tf": "1h",
+        "sticky_plan_ttl_sec": 36 * 60 * 60,
+        "sticky_plan_max_dist_pct": 8.50,
     }
 
 
@@ -1348,7 +1379,59 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
         row["scenario_mode"] = str(mode or "swing")
         row["entry_mid"] = (_safe_float(row.get("entry_low")) + _safe_float(row.get("entry_high"))) / 2.0
     selected = sorted(selected, key=lambda row: row.get("probability", 0), reverse=True)
-    return selected[:max_scenarios]
+    return _apply_sticky_plan_cache(selected[:max_scenarios], current_price, mode_cfg)
+
+
+def _scenario_cache_key(row):
+    return f"{str(row.get('side') or '').upper()}::{str(row.get('title') or '').strip().upper()}"
+
+
+def _sticky_plan_valid(row, current_price, mode_cfg):
+    now_ts = time.time()
+    updated_at = float(row.get("_sticky_cached_at") or 0.0)
+    if updated_at > 0 and (now_ts - updated_at) > float(mode_cfg.get("sticky_plan_ttl_sec") or 0):
+        return False
+    side = str(row.get("side") or "").upper()
+    entry_low = _safe_float(row.get("entry_low"))
+    entry_high = _safe_float(row.get("entry_high"))
+    stop = _safe_float(row.get("stop"))
+    entry_mid = (_safe_float(row.get("entry_mid")) or ((entry_low + entry_high) / 2.0))
+    if entry_mid <= 0 or stop <= 0:
+        return False
+    if _distance_pct(entry_mid, current_price) > float(mode_cfg.get("sticky_plan_max_dist_pct") or 999.0):
+        return False
+    if side == "LONG":
+        if current_price <= entry_high:
+            return False
+        if current_price <= stop:
+            return False
+    elif side == "SHORT":
+        if current_price >= entry_low:
+            return False
+        if current_price >= stop:
+            return False
+    return True
+
+
+def _apply_sticky_plan_cache(selected, current_price, mode_cfg):
+    cache = _load_json_file(SCENARIO_PLAN_CACHE_FILE, {})
+    mode_key = str(mode_cfg.get("mode_name") or "swing")
+    mode_cache = dict(cache.get(mode_key) or {})
+    refreshed = []
+    new_mode_cache = {}
+    for row in list(selected or []):
+        row_copy = dict(row or {})
+        key = _scenario_cache_key(row_copy)
+        cached = dict(mode_cache.get(key) or {})
+        if cached and _sticky_plan_valid(cached, current_price, mode_cfg):
+            row_copy = cached
+        row_copy["entry_mid"] = (_safe_float(row_copy.get("entry_low")) + _safe_float(row_copy.get("entry_high"))) / 2.0
+        row_copy["_sticky_cached_at"] = time.time()
+        new_mode_cache[key] = row_copy
+        refreshed.append(row_copy)
+    cache[mode_key] = new_mode_cache
+    _save_json_file(SCENARIO_PLAN_CACHE_FILE, cache)
+    return refreshed
 
 
 def _scenario_html(idx, scenario):
