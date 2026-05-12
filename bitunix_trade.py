@@ -666,8 +666,17 @@ class TradeExecutor:
         return None
 
     @staticmethod
-    def _breakeven_lock_price(signal: Dict[str, Any]) -> float:
-        entry = float(signal.get("entry") or 0)
+    def _breakeven_lock_price(signal: Dict[str, Any], execution: Optional[Dict[str, Any]] = None) -> float:
+        execution = execution or {}
+        try:
+            entry = float(
+                execution.get("filled_entry_price")
+                or execution.get("entry")
+                or signal.get("entry")
+                or 0
+            )
+        except Exception:
+            entry = float(signal.get("entry") or 0)
         side = str(signal.get("side") or "").upper()
         buffer_pct = max(0.0, float(BREAKEVEN_FEE_BUFFER_PCT or 0.0))
         if entry <= 0:
@@ -1220,7 +1229,7 @@ class TradeExecutor:
                 execution["active"] = False
                 execution["sl_moved_to"] = None
                 return ExecutionResult(self.mode, True, "Take profit closed the full position.", execution)
-            new_sl = self._breakeven_lock_price(signal)
+            new_sl = self._breakeven_lock_price(signal, execution)
             self._update_position_stop(symbol, str(position_id), signal, execution, new_sl)
             signal["sl"] = new_sl
             execution["sl_moved_to"] = new_sl
