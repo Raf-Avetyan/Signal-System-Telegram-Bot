@@ -574,25 +574,132 @@ def _tight_plan_stop(entry_low, entry_high, current_price, atr_1h, side, nearby_
     return stop
 
 
+def _anchor_price(anchor):
+    if isinstance(anchor, dict):
+        return _safe_float(anchor.get("price"))
+    return _safe_float(anchor)
+
+
+def _nearest_above(reference_price, *anchors):
+    ref = _safe_float(reference_price)
+    candidates = []
+    for anchor in anchors:
+        price = _anchor_price(anchor)
+        if price > ref:
+            candidates.append(price)
+    return min(candidates) if candidates else 0.0
+
+
+def _nearest_below(reference_price, *anchors):
+    ref = _safe_float(reference_price)
+    candidates = []
+    for anchor in anchors:
+        price = _anchor_price(anchor)
+        if 0 < price < ref:
+            candidates.append(price)
+    return max(candidates) if candidates else 0.0
+
+
+def _scenario_tp_multipliers(kind, mode_cfg):
+    kind_name = str(kind or "").strip().lower()
+    mode_name = str(mode_cfg.get("mode_name") or "swing").strip().lower()
+    if mode_name == "short_term":
+        if kind_name in {"breakout", "breakdown"}:
+            return (0.95, 1.35, 1.85), (0.72, 1.05, 1.40)
+        if kind_name in {"major_flush", "major_squeeze"}:
+            return (1.10, 1.65, 2.25), (0.85, 1.25, 1.70)
+        return (0.95, 1.45, 2.00), (0.75, 1.15, 1.55)
+    if kind_name in {"breakout", "breakdown"}:
+        return (1.20, 2.20, 3.20), (1.00, 1.50, 2.20)
+    return (1.20, 2.00, 3.00), (0.95, 1.35, 2.00)
+
+
+def _normalize_targets(side, entry, tp1, tp2, tp3, current_price, atr_1h, mode_cfg):
+    side_name = str(side or "").upper()
+    min_gap = max(
+        current_price * float(mode_cfg.get("tp_min_gap_pct") or 0.00125),
+        atr_1h * float(mode_cfg.get("tp_min_gap_atr") or 0.18),
+        float(mode_cfg.get("tp_min_gap_usd") or 90.0),
+    )
+    entry_val = _safe_float(entry)
+    vals = [_safe_float(tp1), _safe_float(tp2), _safe_float(tp3)]
+    if side_name == "LONG":
+        vals[0] = max(vals[0], entry_val + min_gap)
+        vals[1] = max(vals[1], vals[0] + min_gap)
+        vals[2] = max(vals[2], vals[1] + min_gap)
+        return vals
+    vals[0] = min(vals[0], entry_val - min_gap)
+    vals[1] = min(vals[1], vals[0] - min_gap)
+    vals[2] = min(vals[2], vals[1] - min_gap)
+    return vals
+
+
+def _build_targets(side, entry, risk, current_price, atr_1h, mode_cfg, kind, primary_anchor=None, secondary_anchor=None, tertiary_anchor=None):
+    side_name = str(side or "").upper()
+    entry_val = _safe_float(entry)
+    risk_val = max(_safe_float(risk), max(atr_1h * 0.40, current_price * 0.0020))
+    caps, floors = _scenario_tp_multipliers(kind, mode_cfg)
+
+    if side_name == "LONG":
+        cap_targets = [entry_val + risk_val * mult for mult in caps]
+        floor_targets = [entry_val + risk_val * mult for mult in floors]
+        if str(mode_cfg.get("mode_name") or "swing").lower() == "short_term":
+            raw = [
+                min(_nearest_above(entry_val, primary_anchor, secondary_anchor, tertiary_anchor) or cap_targets[0], cap_targets[0]),
+                min(_nearest_above(cap_targets[0], secondary_anchor, tertiary_anchor, primary_anchor) or cap_targets[1], cap_targets[1]),
+                min(_nearest_above(cap_targets[1], tertiary_anchor, secondary_anchor, primary_anchor) or cap_targets[2], cap_targets[2]),
+            ]
+            raw = [max(raw[i], floor_targets[i]) for i in range(3)]
+        else:
+            raw = [
+                max(_anchor_price(primary_anchor), cap_targets[0]),
+                max(_anchor_price(secondary_anchor), cap_targets[1]),
+                max(_anchor_price(tertiary_anchor), cap_targets[2]),
+            ]
+        return _normalize_targets(side_name, entry_val, raw[0], raw[1], raw[2], current_price, atr_1h, mode_cfg)
+
+    cap_targets = [entry_val - risk_val * mult for mult in caps]
+    floor_targets = [entry_val - risk_val * mult for mult in floors]
+    if str(mode_cfg.get("mode_name") or "swing").lower() == "short_term":
+        raw = [
+            max(_nearest_below(entry_val, primary_anchor, secondary_anchor, tertiary_anchor) or cap_targets[0], cap_targets[0]),
+            max(_nearest_below(cap_targets[0], secondary_anchor, tertiary_anchor, primary_anchor) or cap_targets[1], cap_targets[1]),
+            max(_nearest_below(cap_targets[1], tertiary_anchor, secondary_anchor, primary_anchor) or cap_targets[2], cap_targets[2]),
+        ]
+        raw = [min(raw[i], floor_targets[i]) for i in range(3)]
+    else:
+        raw = [
+            min(_anchor_price(primary_anchor) or cap_targets[0], cap_targets[0]),
+            min(_anchor_price(secondary_anchor) or cap_targets[1], cap_targets[1]),
+            min(_anchor_price(tertiary_anchor) or cap_targets[2], cap_targets[2]),
+        ]
+    return _normalize_targets(side_name, entry_val, raw[0], raw[1], raw[2], current_price, atr_1h, mode_cfg)
+
+
 def _scenario_mode_config(mode):
     mode_name = str(mode or "swing").strip().lower()
     if mode_name == "short_term":
         return {
+            "mode_name": "short_term",
             "min_dist_pct": 0.55,
             "max_dist_pct": 2.10,
             "preferred_dist_pct": 0.95,
-            "near_pick_max_dist_pct": 1.30,
-            "near_pick_target_dist_pct": 0.85,
+            "near_pick_max_dist_pct": 1.90,
+            "near_pick_target_dist_pct": 1.10,
             "near_pick_min_usd": 500.0,
             "near_pick_max_usd": 1500.0,
             "near_pick_target_usd": 950.0,
             "usable_entry_dist_pct": 1.75,
             "major_liq_min_dist_pct": 1.40,
+            "tp_min_gap_pct": 0.00120,
+            "tp_min_gap_atr": 0.16,
+            "tp_min_gap_usd": 85.0,
             "title": "BTC Short-Term Plans",
             "final_note": "Use only the plan whose short-term trigger prints first.",
             "execution_tf": "15m",
         }
     return {
+        "mode_name": "swing",
         "min_dist_pct": 0.80,
         "max_dist_pct": 5.50,
         "preferred_dist_pct": 1.50,
@@ -603,6 +710,9 @@ def _scenario_mode_config(mode):
         "near_pick_target_usd": 1800.0,
         "usable_entry_dist_pct": 3.20,
         "major_liq_min_dist_pct": 2.20,
+        "tp_min_gap_pct": 0.00160,
+        "tp_min_gap_atr": 0.22,
+        "tp_min_gap_usd": 140.0,
         "title": "BTC Scenarios",
         "final_note": "Plan the long only if the long trigger prints. Plan the short only if the short trigger prints.",
         "execution_tf": "1h",
@@ -713,6 +823,18 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
             probability -= 5.0
         probability = max(40.0, min(84.0, probability))
         risk_style, risk_pct = _scenario_risk(probability, trend_aligned=overall_bias_score >= 0)
+        tp1, tp2, tp3 = _build_targets(
+            "LONG",
+            entry_mid,
+            risk,
+            current_price,
+            atr_1h,
+            mode_cfg,
+            "pullback",
+            planning_resistance,
+            next_resistance,
+            okx_far_above,
+        )
         scenarios.append(
             {
                 "title": "Long pullback plan",
@@ -722,9 +844,9 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
                 "entry_low": entry_low,
                 "entry_high": entry_high,
                 "stop": stop,
-                "tp1": _safe_float((planning_resistance or {}).get("price"), entry_mid + risk * 1.2),
-                "tp2": max(_safe_float((planning_resistance or {}).get("price"), entry_mid + risk * 1.2), entry_mid + risk * 2.0),
-                "tp3": max(_safe_float((next_resistance or {}).get("price"), entry_mid + risk * 2.2), entry_mid + risk * 3.0),
+                "tp1": tp1,
+                "tp2": tp2,
+                "tp3": tp3,
                 "risk_style": risk_style,
                 "risk_pct": risk_pct,
                 "trend_aligned": trend_bias_score >= 0,
@@ -781,6 +903,18 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
             probability -= 5.0
         probability = max(40.0, min(82.0, probability))
         risk_style, risk_pct = _scenario_risk(probability, trend_aligned=overall_bias_score <= 0)
+        tp1, tp2, tp3 = _build_targets(
+            "SHORT",
+            entry_mid,
+            risk,
+            current_price,
+            atr_1h,
+            mode_cfg,
+            "rejection",
+            planning_support,
+            next_support,
+            okx_far_below,
+        )
         scenarios.append(
             {
                 "title": "Short rejection plan",
@@ -790,9 +924,9 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
                 "entry_low": entry_low,
                 "entry_high": entry_high,
                 "stop": stop,
-                "tp1": _safe_float((planning_support or {}).get("price"), entry_mid - risk * 1.2),
-                "tp2": min(_safe_float((next_support or {}).get("price"), entry_mid - risk * 2.0), entry_mid - risk * 2.0),
-                "tp3": min(_safe_float((next_support or {}).get("price"), entry_mid - risk * 2.2), entry_mid - risk * 3.0),
+                "tp1": tp1,
+                "tp2": tp2,
+                "tp3": tp3,
                 "risk_style": risk_style,
                 "risk_pct": risk_pct,
                 "trend_aligned": trend_bias_score <= 0,
@@ -832,6 +966,18 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
             probability -= 6.0
         probability = max(34.0, min(76.0, probability))
         risk_style, risk_pct = _scenario_risk(probability, trend_aligned=overall_bias_score >= 0)
+        tp1, tp2, tp3 = _build_targets(
+            "LONG",
+            entry,
+            risk,
+            current_price,
+            atr_1h,
+            mode_cfg,
+            "breakout",
+            next_resistance,
+            okx_far_above,
+            top_above.get("level_price"),
+        )
         scenarios.append(
             {
                 "title": "Long breakout plan",
@@ -841,9 +987,9 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
                 "entry_low": entry,
                 "entry_high": entry,
                 "stop": stop,
-                "tp1": max(_safe_float((next_resistance or {}).get("price"), entry + risk * 1.2), entry + risk * 1.2),
-                "tp2": entry + risk * 2.2,
-                "tp3": entry + risk * 3.2,
+                "tp1": tp1,
+                "tp2": tp2,
+                "tp3": tp3,
                 "risk_style": risk_style,
                 "risk_pct": risk_pct,
                 "trend_aligned": trend_bias_score >= 0,
@@ -874,6 +1020,18 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
             probability += 2.0
         probability = max(38.0, min(74.0, probability))
         risk_style, risk_pct = _scenario_risk(probability, trend_aligned=trend_bias_score >= 0)
+        tp1, tp2, tp3 = _build_targets(
+            "LONG",
+            liq_price,
+            risk,
+            current_price,
+            atr_1h,
+            mode_cfg,
+            "major_flush",
+            planning_support,
+            planning_resistance,
+            next_resistance,
+        )
         scenarios.append(
             {
                 "title": "Long major liq flush plan",
@@ -883,9 +1041,9 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
                 "entry_low": entry_low,
                 "entry_high": entry_high,
                 "stop": stop,
-                "tp1": _safe_float((planning_support or {}).get("price"), liq_price + risk * 1.2),
-                "tp2": _safe_float((planning_resistance or {}).get("price"), liq_price + risk * 2.0),
-                "tp3": max(_safe_float((next_resistance or {}).get("price"), liq_price + risk * 3.0), liq_price + risk * 3.0),
+                "tp1": tp1,
+                "tp2": tp2,
+                "tp3": tp3,
                 "risk_style": risk_style,
                 "risk_pct": risk_pct,
                 "trend_aligned": trend_bias_score >= 0,
@@ -916,6 +1074,18 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
             probability -= 6.0
         probability = max(34.0, min(76.0, probability))
         risk_style, risk_pct = _scenario_risk(probability, trend_aligned=overall_bias_score <= 0)
+        tp1, tp2, tp3 = _build_targets(
+            "SHORT",
+            entry,
+            risk,
+            current_price,
+            atr_1h,
+            mode_cfg,
+            "breakdown",
+            next_support,
+            okx_far_below,
+            top_below.get("level_price"),
+        )
         scenarios.append(
             {
                 "title": "Short breakdown plan",
@@ -925,9 +1095,9 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
                 "entry_low": entry,
                 "entry_high": entry,
                 "stop": stop,
-                "tp1": min(_safe_float((next_support or {}).get("price"), entry - risk * 1.2), entry - risk * 1.2),
-                "tp2": entry - risk * 2.2,
-                "tp3": entry - risk * 3.2,
+                "tp1": tp1,
+                "tp2": tp2,
+                "tp3": tp3,
                 "risk_style": risk_style,
                 "risk_pct": risk_pct,
                 "trend_aligned": trend_bias_score <= 0,
@@ -958,6 +1128,18 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
             probability += 2.0
         probability = max(38.0, min(74.0, probability))
         risk_style, risk_pct = _scenario_risk(probability, trend_aligned=trend_bias_score <= 0)
+        tp1, tp2, tp3 = _build_targets(
+            "SHORT",
+            liq_price,
+            risk,
+            current_price,
+            atr_1h,
+            mode_cfg,
+            "major_squeeze",
+            planning_resistance,
+            planning_support,
+            next_support,
+        )
         scenarios.append(
             {
                 "title": "Short major liq squeeze plan",
@@ -967,9 +1149,9 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
                 "entry_low": entry_low,
                 "entry_high": entry_high,
                 "stop": stop,
-                "tp1": _safe_float((planning_resistance or {}).get("price"), liq_price - risk * 1.2),
-                "tp2": _safe_float((planning_support or {}).get("price"), liq_price - risk * 2.0),
-                "tp3": min(_safe_float((next_support or {}).get("price"), liq_price - risk * 3.0), liq_price - risk * 3.0),
+                "tp1": tp1,
+                "tp2": tp2,
+                "tp3": tp3,
                 "risk_style": risk_style,
                 "risk_pct": risk_pct,
                 "trend_aligned": trend_bias_score <= 0,
@@ -1001,7 +1183,7 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
             ),
         )
 
-    def _select_near(rows, preferred_kinds, *, expected_side_of_price):
+    def _select_near(rows, preferred_kinds, *, expected_side_of_price=None, fallback_any_side=False):
         if not rows:
             return None
         directional_rows = []
@@ -1012,6 +1194,8 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
             if expected_side_of_price == "above" and entry_mid <= current_price:
                 continue
             directional_rows.append(row)
+        if not directional_rows and fallback_any_side:
+            directional_rows = list(rows)
         if not directional_rows:
             return None
         band_rows = [
@@ -1040,19 +1224,19 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
 
     if trend_bias_score >= 1.5:
         best_long = _select_best(long_candidates, {"pullback", "breakout", "major_flush"})
-        best_short = _select_best(short_candidates, {"rejection", "major_squeeze"})
-        near_long = _select_near(long_candidates, {"pullback", "major_flush"}, expected_side_of_price="below")
-        near_short = _select_near(short_candidates, {"rejection", "major_squeeze"}, expected_side_of_price="above")
+        best_short = _select_best(short_candidates, {"rejection", "major_squeeze", "breakdown"})
+        near_long = _select_near(long_candidates, {"pullback", "major_flush", "breakout"}, expected_side_of_price="below", fallback_any_side=True)
+        near_short = _select_near(short_candidates, {"rejection", "major_squeeze", "breakdown"}, expected_side_of_price="above", fallback_any_side=True)
     elif trend_bias_score <= -1.5:
-        best_long = _select_best(long_candidates, {"pullback", "major_flush"})
+        best_long = _select_best(long_candidates, {"pullback", "major_flush", "breakout"})
         best_short = _select_best(short_candidates, {"breakdown", "rejection", "major_squeeze"})
-        near_long = _select_near(long_candidates, {"pullback", "major_flush"}, expected_side_of_price="below")
-        near_short = _select_near(short_candidates, {"rejection", "major_squeeze"}, expected_side_of_price="above")
+        near_long = _select_near(long_candidates, {"pullback", "major_flush", "breakout"}, expected_side_of_price="below", fallback_any_side=True)
+        near_short = _select_near(short_candidates, {"rejection", "major_squeeze", "breakdown"}, expected_side_of_price="above", fallback_any_side=True)
     else:
         best_long = _select_best(long_candidates, {"pullback", "breakout", "major_flush"})
         best_short = _select_best(short_candidates, {"rejection", "breakdown", "major_squeeze"})
-        near_long = _select_near(long_candidates, {"pullback", "major_flush"}, expected_side_of_price="below")
-        near_short = _select_near(short_candidates, {"rejection", "major_squeeze"}, expected_side_of_price="above")
+        near_long = _select_near(long_candidates, {"pullback", "major_flush", "breakout"}, expected_side_of_price="below", fallback_any_side=True)
+        near_short = _select_near(short_candidates, {"rejection", "major_squeeze", "breakdown"}, expected_side_of_price="above", fallback_any_side=True)
 
     selected = []
     if near_long:
