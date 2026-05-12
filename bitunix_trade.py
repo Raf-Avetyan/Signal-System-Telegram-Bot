@@ -965,9 +965,56 @@ class TradeExecutor:
         entry_side = plan["entry_side"]
         exit_side = plan["exit_side"]
         signal_id = signal.get("signal_id") or new_signal_id()
+        existing_positions = [pos for pos in self._pending_positions_list(symbol) if self._position_qty(pos) > 0]
+        same_side_position = self._match_position_side(existing_positions, str(signal.get("side") or ""))
+        same_side_add_allowed = bool(((signal.get("meta") or {}).get("same_side_add_allowed")))
+        if same_side_position:
+            if same_side_add_allowed:
+                meta = signal.get("meta") or {}
+                owner_qty = float(meta.get("same_side_owner_qty") or 0)
+                owner_entry = float(meta.get("same_side_owner_entry") or 0)
+                owner_stop = float(meta.get("same_side_owner_stop") or 0)
+                new_entry = float(signal.get("entry") or plan.get("entry") or 0)
+                new_qty = float(plan.get("qty") or 0)
+                total_qty = owner_qty + new_qty
+                if owner_qty <= 0 or owner_entry <= 0 or owner_stop <= 0 or new_entry <= 0 or new_qty <= 0 or total_qty <= 0:
+                    return ExecutionResult(
+                        self.mode,
+                        False,
+                        "Same-side add was requested, but the protected owner-position context is incomplete.",
+                        plan,
+                    )
+                projected_avg_entry = ((owner_entry * owner_qty) + (new_entry * new_qty)) / total_qty
+                if str(signal.get("side") or "").upper() == "LONG":
+                    projected_risk_usd = max(0.0, projected_avg_entry - owner_stop) * total_qty
+                else:
+                    projected_risk_usd = max(0.0, owner_stop - projected_avg_entry) * total_qty
+                plan["same_side_add_projected_avg_entry"] = projected_avg_entry
+                plan["same_side_add_projected_risk_usd"] = projected_risk_usd
+                if projected_risk_usd > float(plan.get("risk_budget_usd") or 0):
+                    return ExecutionResult(
+                        self.mode,
+                        False,
+                        "Same-side add failed the merged-position risk cap check.",
+                        plan,
+                    )
+            else:
+                existing_position_id = str(same_side_position.get("positionId") or same_side_position.get("id") or "").strip()
+                block_payload = dict(plan)
+                if existing_position_id:
+                    block_payload["existing_position_id"] = existing_position_id
+                return ExecutionResult(
+                    self.mode,
+                    False,
+                    f"Bitunix already has an open {signal['side']} {symbol} position. "
+                    f"Opening another would merge into the same exchange position, so it was skipped.",
+                    block_payload,
+                )
+            existing_position_id = str(same_side_position.get("positionId") or same_side_position.get("id") or "").strip()
+            if existing_position_id:
+                plan["existing_position_id"] = existing_position_id
         if str(plan.get("position_mode") or "").upper() == "ONE_WAY":
-            existing_positions = [pos for pos in self._pending_positions_list(symbol) if self._position_qty(pos) > 0]
-            if existing_positions:
+            if existing_positions and not same_side_add_allowed:
                 return ExecutionResult(
                     self.mode,
                     False,

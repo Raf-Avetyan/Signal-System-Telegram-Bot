@@ -204,6 +204,7 @@ class PonchBot:
         self.last_daily_update   = time.time()
         self.last_liq_heatmap_capture = 0.0
         self.last_scenario_trade_scan_at = 0.0
+        self.last_position_snapshot_refresh_slot = None
         self.last_update_id      = state.get("last_update_id", 0)
         self.last_command_check  = 0
 
@@ -249,13 +250,6 @@ class PonchBot:
         )
         for err in reconcile.get("errors", []):
             print(f"[TRADE] Reconcile detail: {err}")
-        if self._execution_chat_id() and not quiet_init:
-            startup_lines = self._build_execution_status_lines(
-                trade_check=trade_check,
-                reconcile=reconcile,
-                now=datetime.now(timezone.utc),
-            )
-            self._send_private_execution_notice("Bitunix Startup Check", startup_lines)
         self.last_oi_price = 0
         self.last_liq_alert_time = 0
         self.is_booting = True         # Start in quiet mode for first check
@@ -643,6 +637,14 @@ class PonchBot:
                 lines.append(f"Size: {float(size):.1f}%")
             except Exception:
                 lines.append(f"Size: {size}")
+        reinf_count = int(((sig.get("meta") or {}).get("reinforcement_count", 0)) or 0)
+        add_count = int(((sig.get("meta") or {}).get("same_side_add_count", 0)) or 0)
+        if reinf_count > 0:
+            lines.append(f"Reinforcement: {reinf_count}x")
+        if add_count > 0:
+            lines.append(f"Scale-ins: {add_count}x")
+        if (sig.get("meta") or {}).get("runner_bias_confirmed"):
+            lines.append("Bias: hold runner")
         if close_price is not None:
             lines.append(f"Current: {float(close_price):,.2f}")
         return f"{header} [{tf_label}]\n<blockquote>{chr(10).join(lines)}</blockquote>\n<pre>{levels_code}</pre>"
@@ -650,6 +652,33 @@ class PonchBot:
     def _public_signal_caption(self, sig, *, status_override="OPEN"):
         sig = sig or {}
         meta = sig.get("meta", {}) or {}
+        if meta.get("reinforcement_owner_signal_id"):
+            side = str(sig.get("side") or "").upper() or "BTC"
+            tf_label = self._signal_timeframe_label(sig)
+            side_emoji = "🟢" if side == "LONG" else "🔴"
+            owner_tf = meta.get("reinforcement_owner_tf") or "N/A"
+            action_line = (
+                "Action: controlled add into the protected live position."
+                if meta.get("same_side_add_allowed")
+                else "Action: confirmation only. No new separate trade will be opened."
+            )
+            note = str(meta.get("same_side_add_reason") or "Same-side confirmation while the main trade is already live.").strip()
+            levels_code = tg.get_signal_levels_code(
+                float(sig.get("entry", 0) or 0),
+                float(sig.get("sl", 0) or 0),
+                float(sig.get("tp1", 0) or 0),
+                float(sig.get("tp2", 0) or 0),
+                float(sig.get("tp3", 0) or 0),
+                status="OPEN",
+                initial_sl=sig.get("initial_sl", sig.get("sl")),
+            )
+            header = f"<b>{side_emoji} {side} REINFORCEMENT</b> [{tf_label}]"
+            body_lines = [
+                f"Existing trade: {side} [{owner_tf}]",
+                action_line,
+                note,
+            ]
+            return f"{header}\n<blockquote>{chr(10).join(body_lines)}</blockquote>\n<pre>{levels_code}</pre>"
         signal_type = str(sig.get("type") or "SCALP").upper()
         signal_html_type = signal_type if signal_type in {"SCALP", "STRONG", "EXTREME"} else "SCALP"
         tf_val = sig.get("tf")
@@ -679,7 +708,7 @@ class PonchBot:
             trigger_label=meta.get("trigger"),
         )
 
-    def _send_public_signal_snapshot(self, sig):
+    def _send_public_signal_snapshot(self, sig, *, status_override="OPEN"):
         if not sig or self.is_booting:
             return None
         side = str(sig.get("side") or "").upper() or "BTC"
@@ -688,7 +717,7 @@ class PonchBot:
             output_name=f"public_signal_{str(sig.get('signal_id') or 'sig')}.png",
             title=f"{side} SIGNAL",
         )
-        caption = self._public_signal_caption(sig, status_override="OPEN")
+        caption = self._public_signal_caption(sig, status_override=status_override)
         try:
             if chart_path:
                 sig["public_signal_is_photo"] = True
@@ -706,6 +735,68 @@ class PonchBot:
                 chat_id=self._signal_chat_id(),
                 message_thread_id=self._trading_signal_thread_id(),
             )
+        finally:
+            try:
+                import os
+                if chart_path and os.path.exists(chart_path):
+                    os.remove(chart_path)
+            except Exception:
+                pass
+
+    def _refresh_public_signal_snapshot(self, sig, *, close_price=None, event_label=None):
+        if not sig or self.is_booting:
+            return
+        if not self._is_current_public_signal(sig):
+            return
+        state = self._signal_effective_state(sig)
+        status_override = str(state.get("status") or "OPEN")
+        msg_id = self._public_signal_message_id(sig)
+        if msg_id <= 0:
+            resp = self._send_public_signal_snapshot(sig, status_override=status_override)
+            public_msg_id = (resp or {}).get("result", {}).get("message_id") if resp else None
+            if public_msg_id:
+                sig["msg_id"] = public_msg_id
+                sig["trading_signal_msg_id"] = public_msg_id
+                self._save_state()
+            return
+        if not sig.get("public_signal_is_photo"):
+            tg.update_signal_message(
+                self._signal_chat_id(),
+                msg_id,
+                sig,
+                use_caption=False,
+            )
+            return
+        side = str(sig.get("side") or "").upper() or "BTC"
+        title = f"{side} SIGNAL"
+        if event_label:
+            title = f"{str(event_label).upper()} UPDATE"
+        chart_path = self._generate_signal_snapshot_chart(
+            sig,
+            output_name=f"public_signal_refresh_{str(sig.get('signal_id') or 'sig')}.png",
+            close_price=close_price,
+            event_label=event_label,
+            title=title,
+        )
+        if not chart_path:
+            return
+        try:
+            result = tg.edit_message_media(
+                msg_id,
+                chart_path,
+                caption=self._public_signal_caption(sig, status_override=status_override),
+                chat_id=self._signal_chat_id(),
+            )
+            if result == "DELETED":
+                sig["msg_id"] = None
+                sig["trading_signal_msg_id"] = None
+                self._save_state()
+                resp = self._send_public_signal_snapshot(sig, status_override=status_override)
+                public_msg_id = (resp or {}).get("result", {}).get("message_id") if resp else None
+                if public_msg_id:
+                    sig["msg_id"] = public_msg_id
+                    sig["trading_signal_msg_id"] = public_msg_id
+                    self._save_state()
         finally:
             try:
                 import os
@@ -949,6 +1040,160 @@ class PonchBot:
                 return sig
         return None
 
+    def _find_active_primary_same_side_execution(self, side, symbol=None):
+        wanted_symbol = str(symbol or SYMBOL).upper()
+        wanted_side = str(side or "").upper()
+        if not wanted_side:
+            return None
+        for sig in self._active_primary_execution_signals():
+            sig_side = str(sig.get("side") or "").upper()
+            sig_symbol = str(sig.get("symbol") or (sig.get("meta") or {}).get("symbol") or SYMBOL).upper()
+            if sig_side == wanted_side and sig_symbol == wanted_symbol:
+                return sig
+        return None
+
+    def _signal_quality_score(self, sig):
+        meta = (sig or {}).get("meta") or {}
+        for raw in (meta.get("score"), meta.get("scenario_probability")):
+            try:
+                value = float(raw or 0)
+            except Exception:
+                value = 0.0
+            if value > 10:
+                value = value / 10.0
+            if value > 0:
+                return value
+        return 0.0
+
+    def _protected_stop_active(self, sig):
+        sig = sig or {}
+        side = str(sig.get("side") or "").upper()
+        entry = float(self._execution_effective_entry(sig) or 0)
+        execution = sig.get("execution") or {}
+        try:
+            stop_price = float(execution.get("sl_moved_to") or sig.get("sl") or sig.get("initial_sl") or 0)
+        except Exception:
+            stop_price = 0.0
+        if entry <= 0 or stop_price <= 0:
+            return False
+        tolerance = max(entry * 0.0002, 5.0)
+        if side == "LONG":
+            return stop_price >= (entry - tolerance)
+        if side == "SHORT":
+            return stop_price <= (entry + tolerance)
+        return False
+
+    def _same_side_entry_improvement(self, candidate_sig, owner_sig):
+        candidate_sig = candidate_sig or {}
+        owner_sig = owner_sig or {}
+        side = str(candidate_sig.get("side") or "").upper()
+        try:
+            candidate_entry = float(candidate_sig.get("entry") or 0)
+        except Exception:
+            candidate_entry = 0.0
+        owner_entry = float(self._execution_effective_entry(owner_sig) or 0)
+        if candidate_entry <= 0 or owner_entry <= 0:
+            return False, 0.0, 0.0
+        threshold = max(owner_entry * 0.0025, 150.0)
+        if side == "LONG":
+            improvement = owner_entry - candidate_entry
+        elif side == "SHORT":
+            improvement = candidate_entry - owner_entry
+        else:
+            improvement = 0.0
+        return improvement >= threshold, improvement, threshold
+
+    def _is_same_side_add_signal(self, sig, owner_sig=None):
+        meta = (sig or {}).get("meta") or {}
+        if not bool(meta.get("same_side_add_allowed")):
+            return False
+        owner_id = str(meta.get("same_side_owner_signal_id") or "").strip()
+        if not owner_id:
+            return False
+        if owner_sig is None:
+            return True
+        return owner_id == str(self._signal_id_value(owner_sig) or "").strip()
+
+    def _record_same_side_reinforcement(self, owner_sig, candidate_sig, *, add_candidate=False):
+        if not owner_sig or not candidate_sig:
+            return
+        meta = owner_sig.setdefault("meta", {})
+        execution = owner_sig.setdefault("execution", {})
+        now_text = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+        count = int(meta.get("reinforcement_count", 0) or 0) + 1
+        meta["reinforcement_count"] = count
+        meta["reinforcement_last_at"] = now_text
+        meta["reinforcement_last_tf"] = candidate_sig.get("tf")
+        meta["reinforcement_last_side"] = candidate_sig.get("side")
+        meta["reinforcement_last_score"] = round(self._signal_quality_score(candidate_sig), 1)
+        meta["runner_bias_confirmed"] = True
+        meta["confidence_reinforced"] = True
+        if add_candidate:
+            meta["same_side_add_candidate_count"] = int(meta.get("same_side_add_candidate_count", 0) or 0) + 1
+        execution["reinforcement_count"] = count
+
+    def _record_same_side_add_execution(self, owner_sig, candidate_sig):
+        if not owner_sig or not candidate_sig:
+            return
+        meta = owner_sig.setdefault("meta", {})
+        execution = owner_sig.setdefault("execution", {})
+        count = int(meta.get("same_side_add_count", 0) or 0) + 1
+        meta["same_side_add_count"] = count
+        meta["same_side_last_add_signal_id"] = self._signal_id_value(candidate_sig)
+        meta["same_side_last_add_tf"] = candidate_sig.get("tf")
+        meta["same_side_last_add_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+        execution["same_side_add_count"] = count
+
+    def _prepare_same_side_signal_behavior(self, sig, owner_sig):
+        if not sig or not owner_sig or self._is_hedge_signal(sig):
+            return "normal", None
+        owner_id = str(self._signal_id_value(owner_sig) or "").strip()
+        if not owner_id:
+            return "normal", None
+
+        meta = sig.setdefault("meta", {})
+        meta["reinforcement_only"] = True
+        meta["reinforcement_owner_signal_id"] = owner_id
+        meta["reinforcement_owner_tf"] = owner_sig.get("tf")
+
+        owner_tp1 = bool(owner_sig.get("tp1_hit"))
+        owner_protected = self._protected_stop_active(owner_sig)
+        candidate_quality = self._signal_quality_score(sig)
+        owner_quality = self._signal_quality_score(owner_sig)
+        better_ok, improvement, threshold = self._same_side_entry_improvement(sig, owner_sig)
+        owner_add_count = int(((owner_sig.get("meta") or {}).get("same_side_add_count", 0)) or 0)
+        owner_execution = owner_sig.get("execution") or {}
+        owner_stop = float(owner_execution.get("sl_moved_to") or owner_sig.get("sl") or owner_sig.get("initial_sl") or 0)
+        owner_qty = float(owner_execution.get("qty") or 0)
+        owner_entry = float(self._execution_effective_entry(owner_sig) or 0)
+
+        add_allowed = bool(
+            owner_add_count < 1
+            and (owner_tp1 or owner_protected)
+            and candidate_quality >= owner_quality
+            and better_ok
+            and owner_qty > 0
+            and owner_entry > 0
+            and owner_stop > 0
+        )
+
+        meta["same_side_owner_signal_id"] = owner_id
+        meta["same_side_owner_qty"] = owner_qty
+        meta["same_side_owner_entry"] = owner_entry
+        meta["same_side_owner_stop"] = owner_stop
+        meta["same_side_owner_quality"] = round(owner_quality, 1)
+        meta["same_side_candidate_quality"] = round(candidate_quality, 1)
+        meta["same_side_entry_improvement"] = round(improvement, 2)
+        meta["same_side_entry_threshold"] = round(threshold, 2)
+        meta["same_side_add_allowed"] = add_allowed
+        if add_allowed:
+            meta["same_side_add_reason"] = "Protected trade with a clearly better same-side entry."
+        else:
+            meta["same_side_add_reason"] = "Confirmation only. Existing trade stays primary."
+
+        self._record_same_side_reinforcement(owner_sig, sig, add_candidate=add_allowed)
+        return ("add" if add_allowed else "reinforcement"), owner_sig
+
     def _find_active_hedge_for_parent(self, parent_signal_id):
         parent_signal_id = str(parent_signal_id or "").strip()
         if not parent_signal_id:
@@ -1111,14 +1356,29 @@ class PonchBot:
         sig["signal_id"] = signal_id
         sig["signal_size_pct"] = size_pct
         sig["public_signal_is_photo"] = True
+        reinforcement_mode, owner_sig = self._prepare_same_side_signal_behavior(
+            sig,
+            self._find_active_primary_same_side_execution(side, SYMBOL),
+        )
         trading_resp = self._send_public_signal_snapshot(sig) if not self.is_booting else None
         public_msg_id = trading_resp.get("result", {}).get("message_id") if trading_resp else None
         sig["msg_id"] = public_msg_id
         sig["trading_signal_msg_id"] = public_msg_id
         sig["symbol"] = SYMBOL
-        self._send_active_trade_snapshot(sig)
         self._save_state()
-        self._execute_exchange_trade(sig)
+        if reinforcement_mode == "normal":
+            self._send_active_trade_snapshot(sig)
+            self._execute_exchange_trade(sig)
+        else:
+            self._refresh_public_signal_snapshot(owner_sig, event_label="REINFORCED")
+            self._refresh_active_trade_snapshot(owner_sig, event_label="REINFORCED")
+            if reinforcement_mode == "add":
+                self._execute_exchange_trade(sig)
+            else:
+                print(
+                    f"  [TRADE] Reinforcement only {sig.get('type')} {side}: "
+                    f"existing primary {owner_sig.get('side')} {owner_sig.get('tf')} remains the live trade"
+                )
         return True
 
     def _pick_smart_hedge_scenario(self, owner_sig, payload):
@@ -1236,7 +1496,6 @@ class PonchBot:
         active_exec = self._active_execution_signals()
         if active_exec:
             self._maybe_execute_smart_hedge(now, current_time)
-            return
 
         try:
             payload = build_btc_scenarios_payload(symbol=SYMBOL, mode=BITUNIX_SCENARIO_TRADING_MODE or "short_term")
@@ -2225,6 +2484,27 @@ class PonchBot:
         if reconcile.get("inactive_marked") or reconcile.get("state_updated"):
             self.tracker.persist()
             self._cleanup_finished_active_trade_cards()
+
+    def _refresh_position_snapshot_cards_if_due(self, now):
+        if self.is_booting:
+            return
+        active = self._active_execution_signals()
+        if not active:
+            self.last_position_snapshot_refresh_slot = now.strftime("%Y-%m-%d %H:%M")
+            return
+        slot_key = now.strftime("%Y-%m-%d %H:%M")
+        if self.last_position_snapshot_refresh_slot == slot_key:
+            return
+        self.last_position_snapshot_refresh_slot = slot_key
+        refreshed = 0
+        for sig in active:
+            symbol = str(sig.get("symbol") or (sig.get("meta") or {}).get("symbol") or SYMBOL).upper()
+            current_price = self._current_market_price(sig.get("tf"), symbol=symbol)
+            self._refresh_public_signal_snapshot(sig, close_price=current_price)
+            self._refresh_active_trade_snapshot(sig, close_price=current_price)
+            refreshed += 1
+        if refreshed:
+            print(f"  [TG] Refreshed {refreshed} active position chart card{'s' if refreshed != 1 else ''}.")
 
     def _active_execution_signals(self):
         active = []
@@ -6112,6 +6392,8 @@ class PonchBot:
                     except Exception:
                         self.divergence_map[tf_key] = set()
 
+        self._refresh_position_snapshot_cards_if_due(now)
+
         # 3.1 Market Alert (Fast Move)
         if "1h" in data:
             df_1h = data["1h"]
@@ -6351,13 +6633,22 @@ class PonchBot:
                         self.tracker.signals[-1]["signal_id"] = signal_id
                         self.tracker.signals[-1]["signal_size_pct"] = strong_size
                         self.tracker.signals[-1]["public_signal_is_photo"] = True
+                        reinforcement_mode, owner_sig = self._prepare_same_side_signal_behavior(
+                            self.tracker.signals[-1],
+                            self._find_active_primary_same_side_execution(ce["side"], SYMBOL),
+                        )
                         trading_resp = self._send_public_signal_snapshot(self.tracker.signals[-1]) if not self.is_booting else None
                         public_msg_id = trading_resp.get("result", {}).get("message_id") if trading_resp else None
                         self.tracker.signals[-1]["msg_id"] = public_msg_id
                         self.tracker.signals[-1]["trading_signal_msg_id"] = public_msg_id
-                        self._send_active_trade_snapshot(self.tracker.signals[-1])
+                        if reinforcement_mode == "normal":
+                            self._send_active_trade_snapshot(self.tracker.signals[-1])
+                        else:
+                            self._refresh_public_signal_snapshot(owner_sig, event_label="REINFORCED")
+                            self._refresh_active_trade_snapshot(owner_sig, event_label="REINFORCED")
                         self._record_signal_sent("STRONG", now=now)
-                        self._execute_exchange_trade(self.tracker.signals[-1])
+                        if reinforcement_mode in {"normal", "add"}:
+                            self._execute_exchange_trade(self.tracker.signals[-1])
                         self._save_state()
                         print(f"  [CONFLUENCE] STRONG {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
 
@@ -6384,13 +6675,22 @@ class PonchBot:
                         self.tracker.signals[-1]["signal_id"] = signal_id
                         self.tracker.signals[-1]["signal_size_pct"] = extreme_size
                         self.tracker.signals[-1]["public_signal_is_photo"] = True
+                        reinforcement_mode, owner_sig = self._prepare_same_side_signal_behavior(
+                            self.tracker.signals[-1],
+                            self._find_active_primary_same_side_execution(ce["side"], SYMBOL),
+                        )
                         trading_resp = self._send_public_signal_snapshot(self.tracker.signals[-1]) if not self.is_booting else None
                         public_msg_id = trading_resp.get("result", {}).get("message_id") if trading_resp else None
                         self.tracker.signals[-1]["msg_id"] = public_msg_id
                         self.tracker.signals[-1]["trading_signal_msg_id"] = public_msg_id
-                        self._send_active_trade_snapshot(self.tracker.signals[-1])
+                        if reinforcement_mode == "normal":
+                            self._send_active_trade_snapshot(self.tracker.signals[-1])
+                        else:
+                            self._refresh_public_signal_snapshot(owner_sig, event_label="REINFORCED")
+                            self._refresh_active_trade_snapshot(owner_sig, event_label="REINFORCED")
                         self._record_signal_sent("EXTREME", now=now)
-                        self._execute_exchange_trade(self.tracker.signals[-1])
+                        if reinforcement_mode in {"normal", "add"}:
+                            self._execute_exchange_trade(self.tracker.signals[-1])
                         self._save_state()
                         print(f"  [CONFLUENCE] EXTREME {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
 
@@ -7207,6 +7507,15 @@ class PonchBot:
             return
         symbol = str(sig_obj.get("symbol") or (sig_obj.get("meta") or {}).get("symbol") or SYMBOL).upper()
         side = str(sig_obj.get("side") or "").upper()
+        if not self._is_hedge_signal(sig_obj):
+            same_side_live = self._find_active_primary_same_side_execution(side, symbol)
+            if same_side_live and not self._is_same_side_add_signal(sig_obj, same_side_live):
+                print(
+                    f"  [TRADE] Skipped same-side auto-trade {sig_obj.get('type')} {side}: "
+                    f"active primary {same_side_live.get('side')} {same_side_live.get('tf')} already exists; "
+                    f"opening another would merge into the same Bitunix position"
+                )
+                return
         if self._hedge_mode_enabled() and not self._is_hedge_signal(sig_obj):
             opposite_live = self._find_active_primary_opposite_execution(side, symbol)
             if opposite_live:
@@ -7292,6 +7601,12 @@ class PonchBot:
                     f"owner_signal_id={merged_owner_id}"
                 )
                 result.payload = self._mark_execution_as_merge_shadow(result.payload, merged_owner_sig)
+                if self._is_same_side_add_signal(sig_obj, merged_owner_sig):
+                    result.payload["same_side_add"] = True
+                    result.payload["same_side_add_owner_signal_id"] = merged_owner_id
+                    self._record_same_side_add_execution(merged_owner_sig, sig_obj)
+                    self._refresh_public_signal_snapshot(merged_owner_sig)
+                    self._refresh_active_trade_snapshot(merged_owner_sig, event_label="REINFORCED")
                 details = result.payload or {}
         actual_size_pct = details.get("signal_size_pct")
         try:
@@ -8138,13 +8453,22 @@ class PonchBot:
                 self.tracker.signals[-1]["signal_id"] = signal_id
                 self.tracker.signals[-1]["signal_size_pct"] = dyn_size
                 self.tracker.signals[-1]["public_signal_is_photo"] = True
+                reinforcement_mode, owner_sig = self._prepare_same_side_signal_behavior(
+                    self.tracker.signals[-1],
+                    self._find_active_primary_same_side_execution(evt["side"], SYMBOL),
+                )
                 trading_resp = self._send_public_signal_snapshot(self.tracker.signals[-1]) if not self.is_booting else None
                 public_msg_id = trading_resp.get("result", {}).get("message_id") if trading_resp else None
                 self.tracker.signals[-1]["msg_id"] = public_msg_id
                 self.tracker.signals[-1]["trading_signal_msg_id"] = public_msg_id
-                self._send_active_trade_snapshot(self.tracker.signals[-1])
+                if reinforcement_mode == "normal":
+                    self._send_active_trade_snapshot(self.tracker.signals[-1])
+                else:
+                    self._refresh_public_signal_snapshot(owner_sig, event_label="REINFORCED")
+                    self._refresh_active_trade_snapshot(owner_sig, event_label="REINFORCED")
                 self._save_state()
-                self._execute_exchange_trade(self.tracker.signals[-1])
+                if reinforcement_mode in {"normal", "add"}:
+                    self._execute_exchange_trade(self.tracker.signals[-1])
 
             elif evt["type"] == "CLOSED":
                 if not self.is_booting:
