@@ -788,6 +788,10 @@ class PonchBot:
             return handled
 
         direct_action = self._apply_context_to_action(self._infer_basic_exec_action(prompt) or {}, prompt)
+        direct_action = self._apply_followup_to_pending_action(direct_action or {}, prompt) if direct_action else direct_action
+        if not direct_action:
+            inferred_action = self._infer_exec_suggestion_from_text(prompt)
+            direct_action = self._apply_context_to_action(inferred_action or {}, prompt) if inferred_action else None
         if direct_action and str(direct_action.get("action") or "").lower():
             direct_type = str(direct_action.get("action") or "").lower()
             if direct_type == "status":
@@ -3723,6 +3727,23 @@ class PonchBot:
             return None
         sig = active[0]
         signal_id = sig.get("signal_id") or ((sig.get("meta") or {}).get("signal_id")) or (((sig.get("execution") or {}).get("signal_id")))
+        reference = float(sig.get("entry") or 0)
+        price = self._extract_followup_price(text, reference=reference)
+        if price and any(
+            phrase in lower for phrase in [
+                "move it to", "set it to", "move this to", "set this to",
+                "move stop to", "set stop to", "move sl to", "set sl to",
+                "move stop", "set stop", "move sl", "set sl",
+            ]
+        ):
+            return {
+                "action": "move_sl",
+                "signal_id": signal_id,
+                "side": sig.get("side"),
+                "tf": sig.get("tf"),
+                "price": float(price),
+                "reason": "Recent conversation was about moving the active stop loss",
+            }
         if "close" in lower:
             return {
                 "action": "close_full",
@@ -5173,6 +5194,10 @@ class PonchBot:
                     return True
 
         direct_action = self._apply_context_to_action(self._infer_basic_exec_action(text) or {}, text)
+        direct_action = self._apply_followup_to_pending_action(direct_action or {}, text) if direct_action else direct_action
+        if not direct_action:
+            inferred_action = self._infer_exec_suggestion_from_text(text)
+            direct_action = self._apply_context_to_action(inferred_action or {}, text) if inferred_action else None
         if direct_action and str(direct_action.get("action") or "").lower():
             direct_type = str(direct_action.get("action") or "").lower()
             if direct_type == "status":
