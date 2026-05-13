@@ -5551,6 +5551,108 @@ class PonchBot:
                 best = item
         return best
 
+    def _get_stop_liquidity_hazard_reason(self, evt, tf, df):
+        if not LIQ_POOL_ALERT_ENABLED:
+            return ""
+        book = getattr(self, "last_order_book", None)
+        if not isinstance(book, dict):
+            return ""
+        try:
+            if df is None or df.empty:
+                return ""
+        except Exception:
+            return ""
+
+        side = str((evt or {}).get("side") or "").upper()
+        if side not in {"LONG", "SHORT"}:
+            return ""
+        try:
+            entry = float((evt or {}).get("entry") or 0)
+            stop = float((evt or {}).get("sl") or 0)
+            close = float(df.iloc[-1].get("Close", entry) or entry)
+            atr_val = float(df.iloc[-1].get("ATR", 0) or 0)
+        except Exception:
+            return ""
+        risk = abs(entry - stop)
+        if entry <= 0 or stop <= 0 or risk <= 0 or atr_val <= 0 or close <= 0:
+            return ""
+
+        try:
+            rows = detect_liquidity_candidates(
+                order_book=book,
+                price=float(close),
+                atr=float(atr_val),
+                timeframe=str(tf or "5m"),
+                max_distance_atr_mult=max(float(LIQ_POOL_MAX_DISTANCE_ATR_MULT.get(tf, 1.5) or 1.5) * 2.2, 2.0),
+                bucket_pct=max(float(LIQ_POOL_AGG_WINDOW_PCT_BY_TF.get(tf, 0.0) or 0.0), 0.02),
+            )
+        except Exception:
+            rows = []
+
+        structural = []
+        for row in list(getattr(self, "last_liq_candidates", []) or []):
+            try:
+                structural.append({
+                    "side": row.get("side"),
+                    "level_price": float(row.get("level_price") or 0),
+                    "size_usd": float(row.get("size_usd") or 0),
+                })
+            except Exception:
+                continue
+        rows.extend(structural)
+
+        danger_side = "SHORT" if side == "LONG" else "LONG"
+        min_liq_usd = max(float(LIQ_POOL_MIN_USD or 0) * 0.80, 8_000_000.0)
+        stop_band = max(risk * 0.22, atr_val * 0.16, close * 0.00055)
+        sweep_gap = max(risk * 0.28, atr_val * 0.20, close * 0.0008)
+        best = None
+
+        for row in rows:
+            if str(row.get("side") or "").upper() != danger_side:
+                continue
+            try:
+                px = float(row.get("level_price") or 0)
+                usd = float(row.get("size_usd") or 0)
+            except Exception:
+                continue
+            if px <= 0 or usd < min_liq_usd:
+                continue
+
+            if side == "LONG":
+                in_stop_zone = (stop - stop_band) <= px <= (stop + stop_band)
+                pre_sweep_zone = stop <= px < (entry - sweep_gap)
+            else:
+                in_stop_zone = (stop - stop_band) <= px <= (stop + stop_band)
+                pre_sweep_zone = (entry + sweep_gap) < px <= stop
+
+            if not (in_stop_zone or pre_sweep_zone):
+                continue
+
+            score = usd
+            if in_stop_zone:
+                score *= 1.25
+            if best is None or score > best["score"]:
+                best = {
+                    "price": px,
+                    "size_usd": usd,
+                    "score": score,
+                    "kind": "stop_zone" if in_stop_zone else "pre_sweep",
+                }
+
+        if not best:
+            return ""
+
+        price_text = f"{float(best['price']):,.2f}"
+        if best["kind"] == "stop_zone":
+            return (
+                f"stop parked near major {'downside' if side == 'LONG' else 'upside'} liquidity "
+                f"({price_text}, ${best['size_usd']/1e6:.1f}M)"
+            )
+        return (
+            f"likely {'downside' if side == 'LONG' else 'upside'} sweep remains first "
+            f"({price_text}, ${best['size_usd']/1e6:.1f}M)"
+        )
+
     def _is_unstable_impulse(self, data, side):
         """
         Block counter-impulse confluence entries:
@@ -8327,6 +8429,12 @@ class PonchBot:
                 if late_confirm_reason:
                     self._record_signal_block("late_confirm", now=now)
                     print(f"  [SCALP] Blocked {tf} {side}: {late_confirm_reason}")
+                    continue
+
+                stop_liq_hazard = self._get_stop_liquidity_hazard_reason(evt, tf, df)
+                if stop_liq_hazard and not rsi_pullback_override:
+                    self._record_signal_block("stop_liquidity_hazard", now=now)
+                    print(f"  [SCALP] Blocked {tf} {side}: {stop_liq_hazard}")
                     continue
 
                 # Hard local-trend reversal guard (hierarchical source):
