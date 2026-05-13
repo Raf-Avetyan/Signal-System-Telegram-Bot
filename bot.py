@@ -787,11 +787,115 @@ class PonchBot:
                 self._append_general_group_memory(message, role="assistant", text="Sent BTC short-term trading plans.")
             return handled
 
-        direct_action = self._apply_context_to_action(self._infer_basic_exec_action(prompt) or {}, prompt)
-        direct_action = self._apply_followup_to_pending_action(direct_action or {}, prompt) if direct_action else direct_action
-        if not direct_action:
-            inferred_action = self._infer_exec_suggestion_from_text(prompt)
-            direct_action = self._apply_context_to_action(inferred_action or {}, prompt) if inferred_action else None
+        if not GEMINI_API_KEY:
+            direct_action = self._fallback_exec_action_from_text(prompt)
+            if direct_action and str(direct_action.get("action") or "").lower():
+                direct_type = str(direct_action.get("action") or "").lower()
+                if direct_type == "status":
+                    self.runtime_exec_reply_target = {
+                        "chat_id": chat_id,
+                        "message_thread_id": message_thread_id,
+                        "reply_to_message_id": reply_to_message_id,
+                    }
+                    try:
+                        self._apply_private_exec_action(direct_action)
+                    finally:
+                        self.runtime_exec_reply_target = None
+                    return True
+                need_more = self._needs_exec_clarification(direct_action)
+                if need_more:
+                    self.pending_exec_action = {
+                        "created_at": time.time(),
+                        "chat_id": str(chat_id or ""),
+                        "thread_id": str(self._normalized_signal_thread_id(chat_id, message_thread_id) or ""),
+                        "user_id": str((from_obj.get("id") or "")),
+                        "action": direct_action,
+                        "mode": "clarify",
+                        "scope": "general",
+                        "source_text": prompt,
+                    }
+                    self._save_state()
+                    self._send_text_chunks(
+                        chat_id,
+                        need_more,
+                        reply_to_message_id=reply_to_message_id,
+                        message_thread_id=message_thread_id,
+                    )
+                    return True
+                _ask_group_exec_confirm(direct_action, source_text=prompt)
+                return True
+            self._send_text_chunks(
+                chat_id,
+                "I’m here, but the Gemini key is missing in the bot config right now.",
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=message_thread_id,
+            )
+            return True
+
+        if self._looks_like_chart_question(prompt):
+            try:
+                answer = self._build_symbol_chart_chat_answer(prompt, fallback_symbol=fallback_symbol)
+            except Exception as e:
+                answer = f"I tried to load that chart from Bitunix/OKX, but it failed this time: {e}"
+            self._send_text_chunks(
+                chat_id,
+                answer,
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=message_thread_id,
+            )
+            self._remember_group_chat_context(
+                message,
+                prompt=prompt,
+                answer=answer,
+                symbol=self._extract_symbol_from_text(prompt) or fallback_symbol or "",
+            )
+            self._append_general_group_memory(message, role="assistant", text=answer)
+            return True
+
+        parsed = parse_gemini_trade_instruction(
+            GEMINI_API_KEY,
+            GEMINI_MODEL,
+            prompt,
+            self._build_gemini_trade_context(),
+        )
+        parsed = self._apply_context_to_action(parsed or {}, prompt) if parsed else parsed
+        action_type = str((parsed or {}).get("action") or "unsupported").lower()
+        if action_type not in {"", "unsupported"}:
+            if action_type == "status":
+                self.runtime_exec_reply_target = {
+                    "chat_id": chat_id,
+                    "message_thread_id": message_thread_id,
+                    "reply_to_message_id": reply_to_message_id,
+                }
+                try:
+                    self._apply_private_exec_action(parsed)
+                finally:
+                    self.runtime_exec_reply_target = None
+                return True
+            need_more = self._needs_exec_clarification(parsed)
+            if need_more:
+                self.pending_exec_action = {
+                    "created_at": time.time(),
+                    "chat_id": str(chat_id or ""),
+                    "thread_id": str(self._normalized_signal_thread_id(chat_id, message_thread_id) or ""),
+                    "user_id": str((from_obj.get("id") or "")),
+                    "action": parsed,
+                    "mode": "clarify",
+                    "scope": "general",
+                    "source_text": prompt,
+                }
+                self._save_state()
+                self._send_text_chunks(
+                    chat_id,
+                    need_more,
+                    reply_to_message_id=reply_to_message_id,
+                    message_thread_id=message_thread_id,
+                )
+                return True
+            _ask_group_exec_confirm(parsed, source_text=prompt)
+            return True
+
+        direct_action = self._fallback_exec_action_from_text(prompt)
         if direct_action and str(direct_action.get("action") or "").lower():
             direct_type = str(direct_action.get("action") or "").lower()
             if direct_type == "status":
@@ -826,35 +930,6 @@ class PonchBot:
                 )
                 return True
             _ask_group_exec_confirm(direct_action, source_text=prompt)
-            return True
-
-        if not GEMINI_API_KEY:
-            self._send_text_chunks(
-                chat_id,
-                "I’m here, but the Gemini key is missing in the bot config right now.",
-                reply_to_message_id=reply_to_message_id,
-                message_thread_id=message_thread_id,
-            )
-            return True
-
-        if self._looks_like_chart_question(prompt):
-            try:
-                answer = self._build_symbol_chart_chat_answer(prompt, fallback_symbol=fallback_symbol)
-            except Exception as e:
-                answer = f"I tried to load that chart from Bitunix/OKX, but it failed this time: {e}"
-            self._send_text_chunks(
-                chat_id,
-                answer,
-                reply_to_message_id=reply_to_message_id,
-                message_thread_id=message_thread_id,
-            )
-            self._remember_group_chat_context(
-                message,
-                prompt=prompt,
-                answer=answer,
-                symbol=self._extract_symbol_from_text(prompt) or fallback_symbol or "",
-            )
-            self._append_general_group_memory(message, role="assistant", text=answer)
             return True
 
         reply_anchor = ""
@@ -3205,6 +3280,8 @@ class PonchBot:
         if not normalized:
             return None
         raw_lower = str(clean_text or "").lower()
+        has_stop_words = ("stop loss" in raw_lower) or re.search(r"\bsl\b", raw_lower)
+        has_stop_change_verb = any(word in raw_lower for word in ["move", "set", "change", "update"])
         if self._intent_has_any_normalized(normalized, [
             "tp split", "tp splits", "take profit split", "take profit splits",
             "partials", "tp percentages", "take profit percentages",
@@ -3240,7 +3317,7 @@ class PonchBot:
             return {"action": "cancel_tp", "tp_index": 3}
         if self._intent_has_any_normalized(normalized, ["cancel take profit", "cancel take profits", "cancel tp", "remove tp", "remove take profit"]):
             return {"action": "cancel_tp"}
-        if self._intent_has_any_normalized(normalized, ["set stop loss", "move stop loss", "change stop loss", "set sl", "move sl", "change sl"]):
+        if self._intent_has_any_normalized(normalized, ["set stop loss", "move stop loss", "change stop loss", "set sl", "move sl", "change sl"]) or (has_stop_words and has_stop_change_verb):
             return {"action": "move_sl"}
         if any(word in raw_lower for word in ["close", "take off", "reduce", "trim"]) and any(mark in raw_lower for mark in ["%", "percent", "half", "quarter", "third"]):
             action = {"action": "close_partial"}
@@ -3753,6 +3830,14 @@ class PonchBot:
                 "reason": "Recent conversation was about closing the active position",
             }
         return None
+
+    def _fallback_exec_action_from_text(self, text):
+        direct_action = self._apply_context_to_action(self._infer_basic_exec_action(text) or {}, text)
+        direct_action = self._apply_followup_to_pending_action(direct_action or {}, text) if direct_action else direct_action
+        if not direct_action:
+            inferred_action = self._infer_exec_suggestion_from_text(text)
+            direct_action = self._apply_context_to_action(inferred_action or {}, text) if inferred_action else None
+        return direct_action
 
     @staticmethod
     def _safe_float_text(value, decimals=2, default="n/a"):
@@ -5193,36 +5278,31 @@ class PonchBot:
                     _ask_to_confirm(locally_updated, chat_id, source_text=pending_source or text)
                     return True
 
-        direct_action = self._apply_context_to_action(self._infer_basic_exec_action(text) or {}, text)
-        direct_action = self._apply_followup_to_pending_action(direct_action or {}, text) if direct_action else direct_action
-        if not direct_action:
-            inferred_action = self._infer_exec_suggestion_from_text(text)
-            direct_action = self._apply_context_to_action(inferred_action or {}, text) if inferred_action else None
-        if direct_action and str(direct_action.get("action") or "").lower():
-            direct_type = str(direct_action.get("action") or "").lower()
-            if direct_type == "status":
-                self.last_exec_suggested_action = None
-                self._save_state()
-                self._apply_private_exec_action(direct_action)
-                return True
-            need_more = self._needs_exec_clarification(direct_action)
-            if need_more:
-                self._remember_exec_suggestion(direct_action)
-                self.pending_exec_action = {
-                    "created_at": time.time(),
-                    "chat_id": chat_id,
-                    "action": direct_action,
-                    "mode": "clarify",
-                    "source_text": text,
-                }
-                self._save_state()
-                self._send_private_execution_notice("Exec Control", [need_more], icon="⚠️")
-                return True
-            self._remember_exec_suggestion(direct_action)
-            _ask_to_confirm(direct_action, chat_id, source_text=text)
-            return True
-
         if not GEMINI_API_KEY:
+            direct_action = self._fallback_exec_action_from_text(text)
+            if direct_action and str(direct_action.get("action") or "").lower():
+                direct_type = str(direct_action.get("action") or "").lower()
+                if direct_type == "status":
+                    self.last_exec_suggested_action = None
+                    self._save_state()
+                    self._apply_private_exec_action(direct_action)
+                    return True
+                need_more = self._needs_exec_clarification(direct_action)
+                if need_more:
+                    self._remember_exec_suggestion(direct_action)
+                    self.pending_exec_action = {
+                        "created_at": time.time(),
+                        "chat_id": chat_id,
+                        "action": direct_action,
+                        "mode": "clarify",
+                        "source_text": text,
+                    }
+                    self._save_state()
+                    self._send_private_execution_notice("Exec Control", [need_more], icon="⚠️")
+                    return True
+                self._remember_exec_suggestion(direct_action)
+                _ask_to_confirm(direct_action, chat_id, source_text=text)
+                return True
             self._send_private_execution_notice("Exec Control", ["GEMINI_API_KEY is missing in .env."], icon="⚠️")
             return True
 
@@ -5247,9 +5327,30 @@ class PonchBot:
 
         action_type = str(parsed.get("action") or "unsupported").lower()
         if action_type == "unsupported":
-            inferred = self._infer_exec_suggestion_from_text(text)
-            if inferred:
-                self._remember_exec_suggestion(inferred)
+            direct_action = self._fallback_exec_action_from_text(text)
+            if direct_action and str(direct_action.get("action") or "").lower():
+                direct_type = str(direct_action.get("action") or "").lower()
+                if direct_type == "status":
+                    self.last_exec_suggested_action = None
+                    self._save_state()
+                    self._apply_private_exec_action(direct_action)
+                    return True
+                need_more = self._needs_exec_clarification(direct_action)
+                if need_more:
+                    self._remember_exec_suggestion(direct_action)
+                    self.pending_exec_action = {
+                        "created_at": time.time(),
+                        "chat_id": chat_id,
+                        "action": direct_action,
+                        "mode": "clarify",
+                        "source_text": text,
+                    }
+                    self._save_state()
+                    self._send_private_execution_notice("Exec Control", [need_more], icon="⚠️")
+                    return True
+                self._remember_exec_suggestion(direct_action)
+                _ask_to_confirm(direct_action, chat_id, source_text=text)
+                return True
             answer = None
             try:
                 answer = self._ask_private_chat_question(text)
