@@ -710,7 +710,7 @@ class PonchBot:
             locally_updated = self._apply_followup_to_pending_action(pending_action, prompt)
             local_changed = json.dumps(locally_updated, sort_keys=True, default=str) != json.dumps(pending_action, sort_keys=True, default=str)
             if pending_mode == "clarify":
-                if lower in {"no", "n", "cancel", "stop"}:
+                if self._looks_like_negative_text(prompt):
                     self.pending_exec_action = None
                     self._save_state()
                     self._send_text_chunks(
@@ -750,7 +750,7 @@ class PonchBot:
                     message_thread_id=message_thread_id,
                 )
                 return True
-            if lower in {"yes", "y", "confirm", "do it", "execute"}:
+            if self._looks_like_affirmative_text(prompt):
                 action = dict((self.pending_exec_action or {}).get("action") or {})
                 self.pending_exec_action = None
                 self._save_state()
@@ -764,7 +764,7 @@ class PonchBot:
                 finally:
                     self.runtime_exec_reply_target = None
                 return True
-            if lower in {"no", "n", "cancel", "stop"}:
+            if self._looks_like_negative_text(prompt):
                 self.pending_exec_action = None
                 self._save_state()
                 self._send_text_chunks(
@@ -3262,6 +3262,24 @@ class PonchBot:
             return {"action": "status", "reason": text}
         return None
 
+    def _looks_like_affirmative_text(self, text):
+        lower = str(text or "").strip().lower()
+        if not lower:
+            return False
+        exact = {"yes", "y", "ok", "okay", "ok do", "okay do", "do it", "yes do", "do", "continue", "confirm", "execute"}
+        if lower in exact:
+            return True
+        return bool(re.match(r"^(yes|ok|okay|confirm|execute|do it)\b", lower))
+
+    def _looks_like_negative_text(self, text):
+        lower = str(text or "").strip().lower()
+        if not lower:
+            return False
+        exact = {"no", "n", "cancel", "stop"}
+        if lower in exact:
+            return True
+        return bool(re.match(r"^(no|cancel|stop)\b", lower))
+
     def _send_signal_debug_summary(self):
         now = datetime.now(timezone.utc)
         stats = self._ensure_signal_debug_day(now)
@@ -4997,8 +5015,7 @@ class PonchBot:
             _ask_to_confirm(action, chat_id, source_text=text)
             return True
 
-        affirmative_only = {"yes", "y", "ok", "okay", "ok do", "okay do", "do it", "yes do", "do", "continue"}
-        if lower in affirmative_only and not self.pending_exec_action:
+        if self._looks_like_affirmative_text(text) and not self.pending_exec_action:
             suggested = self._recent_exec_suggestion()
             if suggested:
                 _ask_to_confirm(suggested, chat_id, source_text=text)
@@ -5056,7 +5073,7 @@ class PonchBot:
                 local_changed = json.dumps(locally_updated, sort_keys=True, default=str) != json.dumps(pending_action, sort_keys=True, default=str)
 
                 if pending_mode == "clarify":
-                    if lower in {"no", "n", "cancel", "stop"}:
+                    if self._looks_like_negative_text(text):
                         self.pending_exec_action = None
                         self._save_state()
                         self._send_private_execution_notice("Exec Control", ["Pending request cancelled."], icon="❌")
@@ -5128,13 +5145,13 @@ class PonchBot:
                     _ask_to_confirm(parsed, chat_id, source_text=combined_text)
                     return True
 
-                if lower in {"yes", "y", "confirm", "do it", "execute"}:
+                if self._looks_like_affirmative_text(text):
                     action = self.pending_exec_action.get("action") or {}
                     self.pending_exec_action = None
                     self._save_state()
                     self._apply_private_exec_action(action)
                     return True
-                if lower in {"no", "n", "cancel", "stop"}:
+                if self._looks_like_negative_text(text):
                     self.pending_exec_action = None
                     self._save_state()
                     self._send_private_execution_notice("Exec Control", ["Pending action cancelled."], icon="❌")
