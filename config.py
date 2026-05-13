@@ -38,6 +38,11 @@ SIGNAL_BLOCKED_THREAD_IDS = tuple(
 EXECUTION_UPDATES_PRIVATE_ONLY = os.getenv("EXECUTION_UPDATES_PRIVATE_ONLY", "true").strip().lower() == "true"
 PRIVATE_EXEC_AI_CONTROL_ENABLED = os.getenv("PRIVATE_EXEC_AI_CONTROL_ENABLED", "true").strip().lower() == "true"
 PRIVATE_EXEC_CONFIRM_TIMEOUT_SEC = int(os.getenv("PRIVATE_EXEC_CONFIRM_TIMEOUT_SEC", "180"))
+BOT_MENTION_ALIASES = tuple(
+    part.strip().lstrip("@").lower()
+    for part in os.getenv("BOT_MENTION_ALIASES", "mrponchvvip_bot,mrponch").split(",")
+    if part.strip()
+)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip()
 

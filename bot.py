@@ -25,6 +25,7 @@ from config import (
     SIGNAL_CHAT_ID, SIGNAL_TRADING_THREAD_ID, SIGNAL_GENERAL_THREAD_ID,
     SIGNAL_SESSIONS_THREAD_ID, SIGNAL_ACTIVE_TRADES_THREAD_ID,
     SIGNAL_SCENARIOS_THREAD_ID, SIGNAL_SUCCESS_TRADES_THREAD_ID, SIGNAL_BLOCKED_THREAD_IDS,
+    BOT_MENTION_ALIASES,
     FAST_MOVE_THRESHOLD, FAST_MOVE_WINDOW, FAST_MOVE_COOLDOWN,
     BITUNIX_REG_LINK, INVITE_LINK, COMMAND_POLL_INTERVAL,
     BITUNIX_SCENARIO_TRADING_ENABLED, BITUNIX_SCENARIO_TRADING_MODE,
@@ -382,6 +383,91 @@ class PonchBot:
         if not signal_chat or current_chat != signal_chat or not blocked_threads:
             return False
         return current_thread in blocked_threads
+
+    def _bot_mention_aliases(self):
+        aliases = []
+        for alias in (BOT_MENTION_ALIASES or ()):
+            norm = str(alias or "").strip().lstrip("@").lower()
+            if norm and norm not in aliases:
+                aliases.append(norm)
+        if not aliases:
+            aliases = ["mrponchvvip_bot", "mrponch"]
+        return tuple(aliases)
+
+    def _extract_group_mention_prompt(self, message):
+        chat_type = str(((message or {}).get("chat") or {}).get("type") or "").strip().lower()
+        if chat_type not in {"group", "supergroup"}:
+            return ""
+        text = str((message or {}).get("text") or "").strip()
+        if not text or text.startswith("/"):
+            return ""
+
+        found = False
+        cleaned = text
+        for alias in self._bot_mention_aliases():
+            pattern = rf"(?<!\w)@{re.escape(alias)}\b"
+            if re.search(pattern, cleaned, flags=re.IGNORECASE):
+                cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+                found = True
+
+        if not found:
+            return ""
+
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" \n\t,:-")
+        return cleaned
+
+    def _handle_group_mention_message(self, message):
+        prompt = self._extract_group_mention_prompt(message)
+        if prompt == "" and not any(
+            re.search(rf"(?<!\w)@{re.escape(alias)}\b", str((message or {}).get("text") or ""), flags=re.IGNORECASE)
+            for alias in self._bot_mention_aliases()
+        ):
+            return False
+
+        chat_obj = message.get("chat") or {}
+        chat_id = chat_obj.get("id")
+        message_thread_id = message.get("message_thread_id")
+        reply_to_message_id = message.get("message_id")
+
+        if not self._is_specific_signal_topic(chat_id, message_thread_id, self._general_thread_id()):
+            self._silence_restricted_command(message)
+            return True
+
+        if not GEMINI_API_KEY:
+            self._send_text_chunks(
+                chat_id,
+                "I’m here, but the Gemini key is missing in the bot config right now.",
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=message_thread_id,
+            )
+            return True
+
+        if not prompt:
+            self._send_text_chunks(
+                chat_id,
+                "I’m here. Mention me with your question and I’ll answer in this group.",
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=message_thread_id,
+            )
+            return True
+
+        group_context = (
+            f"Group mention chat title: {chat_obj.get('title') or 'Unknown'}\n"
+            f"Thread id: {self._normalized_signal_thread_id(chat_id, message_thread_id)}\n\n"
+            f"{self._build_gemini_trade_context()}"
+        )
+        answer = self._ask_private_chat_question(prompt, context_text=group_context)
+        answer = str(answer or "").strip()
+        if not answer:
+            answer = "I couldn’t form a clean answer this time. Send it again a little more simply and I’ll retry."
+
+        self._send_text_chunks(
+            chat_id,
+            answer,
+            reply_to_message_id=reply_to_message_id,
+            message_thread_id=message_thread_id,
+        )
+        return True
 
     def _is_chat_admin_user(self, chat_id, user_id):
         try:
@@ -7993,6 +8079,10 @@ class PonchBot:
                         reply_to_message_id=reply_to_message_id,
                         message_thread_id=message_thread_id,
                     )
+
+            elif self._handle_group_mention_message(message):
+                self._save_state()
+                continue
 
             elif text.isdigit():
                 # User sent their UID
