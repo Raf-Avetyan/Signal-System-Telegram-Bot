@@ -490,7 +490,7 @@ class PonchBot:
         if not lower:
             return False
 
-        exact_names = list(self._bot_mention_aliases()) + ["ponch", "mr ponch", "big yahoo", "yahoo"]
+        exact_names = list(self._bot_mention_aliases()) + ["ponch", "mr ponch", "big yahoo", "yahoo", "big dog"]
         if any(re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", lower) for alias in exact_names):
             return True
 
@@ -505,6 +505,7 @@ class PonchBot:
             r"\bb[i1]g\s+y[a@]h+o+o?\b",
             r"\bb[i1]gy[a@]h+o+o?\b",
             r"\by[a@]h+o+o?\b",
+            r"\bb[i1]g\s+d[o0]g+\b",
         ]
         return any(re.search(pattern, lower, flags=re.IGNORECASE) for pattern in fuzzy_patterns)
 
