@@ -469,6 +469,99 @@ class PonchBot:
         )
         return True
 
+    def _should_answer_general_group_message(self, message):
+        text = str((message or {}).get("text") or "").strip()
+        if not text or text.startswith("/"):
+            return False
+
+        if self._extract_group_mention_prompt(message):
+            return True
+
+        reply_to = (message or {}).get("reply_to_message") or {}
+        reply_from = (reply_to.get("from") or {})
+        if bool(reply_from.get("is_bot")):
+            return True
+
+        lower = text.lower().strip()
+        if "?" in text:
+            return True
+
+        aliases = list(self._bot_mention_aliases()) + ["ponch", "mr ponch"]
+        if any(re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", lower) for alias in aliases):
+            return True
+
+        start_cues = (
+            "what", "why", "how", "when", "where", "who", "which",
+            "can you", "could you", "would you", "do you", "did you", "are you",
+            "is it", "should i", "can i", "tell me", "show me", "help me",
+            "explain", "check", "analyze", "analyse", "look at", "thoughts on",
+            "opinion on", "give me", "please check", "please explain",
+        )
+        if any(lower.startswith(cue) for cue in start_cues):
+            return True
+
+        direct_cues = (" you ", " your ", " u ", " ur ")
+        if any(cue in f" {lower} " for cue in direct_cues):
+            question_verbs = (
+                "think", "see", "know", "check", "help", "explain", "analyze",
+                "analyse", "tell", "show", "say", "mean", "prefer",
+            )
+            if any(verb in lower for verb in question_verbs):
+                return True
+
+        return False
+
+    def _handle_general_group_chat_message(self, message):
+        chat_obj = message.get("chat") or {}
+        chat_id = chat_obj.get("id")
+        message_thread_id = message.get("message_thread_id")
+        reply_to_message_id = message.get("message_id")
+        from_obj = message.get("from") or {}
+        if bool(from_obj.get("is_bot")):
+            return False
+        if not self._is_specific_signal_topic(chat_id, message_thread_id, self._general_thread_id()):
+            return False
+
+        text = str(message.get("text") or "").strip()
+        if not self._should_answer_general_group_message(message):
+            return False
+
+        prompt = self._extract_group_mention_prompt(message) or text
+        if not prompt:
+            return False
+
+        if not GEMINI_API_KEY:
+            self._send_text_chunks(
+                chat_id,
+                "I’m here, but the Gemini key is missing in the bot config right now.",
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=message_thread_id,
+            )
+            return True
+
+        group_context = (
+            "You are answering inside the Mr. Ponch Telegram general discussion topic. "
+            "Reply naturally and conversationally, like a helpful trading assistant in group chat. "
+            "Keep answers clear and not too long. "
+            "If the topic is politics, religion, ethnicity, nationality, or identity, stay neutral, respectful, and factual. "
+            "Do not express partisan loyalty, hatred, or favoritism.\n\n"
+            f"Group chat title: {chat_obj.get('title') or 'Unknown'}\n"
+            f"Thread id: {self._normalized_signal_thread_id(chat_id, message_thread_id)}\n\n"
+            f"{self._build_gemini_trade_context()}"
+        )
+        answer = self._ask_private_chat_question(prompt, context_text=group_context)
+        answer = str(answer or "").strip()
+        if not answer:
+            answer = "I couldn’t form a clean answer this time. Send it again a little more simply and I’ll retry."
+
+        self._send_text_chunks(
+            chat_id,
+            answer,
+            reply_to_message_id=reply_to_message_id,
+            message_thread_id=message_thread_id,
+        )
+        return True
+
     def _is_chat_admin_user(self, chat_id, user_id):
         try:
             cache_key = (str(chat_id or "").strip(), str(user_id or "").strip())
@@ -8081,6 +8174,10 @@ class PonchBot:
                     )
 
             elif self._handle_group_mention_message(message):
+                self._save_state()
+                continue
+
+            elif self._handle_general_group_chat_message(message):
                 self._save_state()
                 continue
 
