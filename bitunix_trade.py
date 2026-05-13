@@ -2314,6 +2314,47 @@ class TradeExecutor:
         signal[f"tp{single_tp_index}"] = float(new_price)
         return ExecutionResult(self.mode, True, f"Set take profit to {float(new_price):.2f}.", execution)
 
+    def manual_set_tp_splits(self, signal: Dict[str, Any], splits: List[float]) -> ExecutionResult:
+        self._refresh_state()
+        execution = (signal or {}).get("execution") or {}
+        if not execution or not execution.get("active"):
+            return ExecutionResult(self.mode, False, "No active exchange execution found for this signal.", {})
+
+        raw = [float(x or 0) for x in list(splits or [])[:3]]
+        if len(raw) != 3 or any(x <= 0 for x in raw):
+            return ExecutionResult(self.mode, False, "TP split needs three positive values, for example 20/30/50.", execution)
+        total = sum(raw)
+        if total <= 0:
+            return ExecutionResult(self.mode, False, "TP split total must be greater than zero.", execution)
+
+        normalized = [float(x / total) for x in raw]
+        execution["tp_splits"] = normalized
+        execution["tp_mode"] = "LIMIT_CLOSE"
+
+        if self.mode != "live":
+            qty = float(execution.get("qty") or 0)
+            rules = self._get_symbol_rules(str(execution.get("symbol") or signal.get("symbol") or SYMBOL).upper())
+            rebuilt_tp_qtys, warning = self._split_qty_for_indices(
+                qty,
+                active_indices=[1, 2, 3],
+                min_base_qty=float(rules.get("min_base_qty") or BITUNIX_MIN_BASE_QTY),
+                step=float(rules.get("qty_step") or BITUNIX_QTY_STEP),
+                splits=tuple(normalized),
+            )
+            execution["tp_qtys"] = rebuilt_tp_qtys
+            if warning:
+                execution.setdefault("protection_warnings", []).append(warning)
+            split_text = "/".join(str(int(round(x * 100))) for x in normalized)
+            return ExecutionResult(self.mode, True, f"Demo TP split updated to {split_text}.", execution)
+
+        result = self.rebuild_position_protection(signal, reason="manual TP split change")
+        if result.payload:
+            result.payload["tp_splits"] = normalized
+        split_text = "/".join(str(int(round(x * 100))) for x in normalized)
+        if result.accepted:
+            result.message = f"Updated TP split to {split_text} and rebuilt remaining close orders."
+        return result
+
     def manual_cancel_tp(self, signal: Dict[str, Any], tp_index: int) -> ExecutionResult:
         self._refresh_state()
         execution = (signal or {}).get("execution") or {}

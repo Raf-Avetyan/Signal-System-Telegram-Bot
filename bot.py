@@ -184,6 +184,7 @@ class PonchBot:
         self.pending_exec_action = state.get("pending_exec_action")
         self.last_exec_suggested_action = state.get("last_exec_suggested_action")
         self.private_exec_focus = state.get("private_exec_focus", {})
+        self.group_chat_contexts = state.get("group_chat_contexts", {})
         self.private_todo_items = state.get("private_todo_items", [])
         self.signal_debug_stats = state.get("signal_debug_stats", {})
         self.last_scalp_open_alert = state.get("last_scalp_open_alert", {})
@@ -505,6 +506,35 @@ class PonchBot:
             r"\bb[i1]gy[a@]h+o+o?\b",
         ]
         return any(re.search(pattern, lower, flags=re.IGNORECASE) for pattern in fuzzy_patterns)
+
+    def _group_context_key(self, message):
+        chat_id = str(((message or {}).get("chat") or {}).get("id") or "")
+        thread_id = str(self._normalized_signal_thread_id(((message or {}).get("chat") or {}).get("id"), (message or {}).get("message_thread_id")) or "")
+        user_id = str(((message or {}).get("from") or {}).get("id") or "")
+        return f"{chat_id}:{thread_id}:{user_id}"
+
+    def _recent_group_chat_context(self, message):
+        key = self._group_context_key(message)
+        ctx = dict((self.group_chat_contexts or {}).get(key) or {})
+        ts = float(ctx.get("updated_at") or 0)
+        if not ts or (time.time() - ts) > 3600:
+            if key in (self.group_chat_contexts or {}):
+                self.group_chat_contexts.pop(key, None)
+                self._save_state()
+            return {}
+        return ctx
+
+    def _remember_group_chat_context(self, message, *, prompt=None, answer=None, symbol=None):
+        key = self._group_context_key(message)
+        payload = {
+            "updated_at": time.time(),
+            "prompt": str(prompt or "").strip(),
+            "answer": str(answer or "").strip(),
+            "symbol": str(symbol or "").strip().upper(),
+            "message_id": (message or {}).get("message_id"),
+        }
+        self.group_chat_contexts[key] = payload
+        self._save_state()
 
     def _handle_general_group_chat_message(self, message):
         chat_obj = message.get("chat") or {}
@@ -2699,6 +2729,12 @@ class PonchBot:
             "dont": "do not",
             "doesnt": "does not",
             "wont": "will not",
+            "stop lose": "stop loss",
+            "stoplose": "stop loss",
+            "set stop lose": "set stop loss",
+            "move stop lose": "move stop loss",
+            "stp loss": "stop loss",
+            "stp": "stop",
             "singals": "signals",
             "singal": "signal",
             "baalnce": "balance",
@@ -2708,6 +2744,7 @@ class PonchBot:
             "poisition": "position",
             "poistion": "position",
             "psoition": "position",
+            "posiition": "position",
             "contructions": "constructions",
             "markettwits": "markettwits",
         }
@@ -2770,6 +2807,136 @@ class PonchBot:
             if signal_words and (no_output or timing_words):
                 return True
         return False
+
+    def _sanitize_exec_text(self, text):
+        clean = str(text or "").strip()
+        if not clean:
+            return clean
+        replacements = {
+            "stop lose": "stop loss",
+            "stoplose": "stop loss",
+            "set stop lose": "set stop loss",
+            "move stop lose": "move stop loss",
+            "posiition": "position",
+            "posiiton": "position",
+            "poisition": "position",
+            "poistion": "position",
+            "psoition": "position",
+        }
+        lowered = clean.lower()
+        for src, dst in replacements.items():
+            lowered = lowered.replace(src, dst)
+        return lowered
+
+    def _looks_like_bitcoin_plans_request(self, text):
+        normalized = self._normalize_intent_text(text)
+        if not normalized:
+            return False
+        phrases = [
+            "bitcoin plans", "btc plans", "give me bitcoin plans", "give me btc plans",
+            "bitcoin scenarios", "btc scenarios", "bitcoin plan", "btc plan",
+            "plans for bitcoin", "plans for btc", "give me bitcoin scenario", "give me btc scenario",
+        ]
+        return self._intent_has_any_normalized(normalized, phrases)
+
+    def _extract_tp_split_values(self, text):
+        raw_text = str(text or "").strip().lower()
+        if not raw_text:
+            return None
+        compact = raw_text.replace("%", "")
+        slash_match = re.search(r'(\d{1,3}(?:[.,]\d+)?)\s*[/\\-]\s*(\d{1,3}(?:[.,]\d+)?)\s*[/\\-]\s*(\d{1,3}(?:[.,]\d+)?)', compact)
+        values = None
+        if slash_match:
+            values = [float(slash_match.group(i).replace(",", ".")) for i in range(1, 4)]
+        else:
+            nums = re.findall(r'(?<!\w)(\d{1,3}(?:[.,]\d+)?)(?:\s*%?)', compact)
+            picked = []
+            for token in nums:
+                try:
+                    value = float(token.replace(",", "."))
+                except Exception:
+                    continue
+                if 0 < value <= 100:
+                    picked.append(value)
+                if len(picked) == 3:
+                    break
+            if len(picked) == 3:
+                values = picked
+        if not values or len(values) != 3:
+            return None
+        total = sum(values)
+        if total <= 0:
+            return None
+        if total <= 1.01:
+            return [float(v) for v in values]
+        return [float(v / total) for v in values]
+
+    def _infer_basic_exec_action(self, text):
+        clean_text = self._sanitize_exec_text(text)
+        normalized = self._normalize_intent_text(clean_text)
+        if not normalized:
+            return None
+        raw_lower = str(clean_text or "").lower()
+        if self._intent_has_any_normalized(normalized, [
+            "tp split", "tp splits", "take profit split", "take profit splits",
+            "partials", "tp percentages", "take profit percentages",
+        ]):
+            splits = self._extract_tp_split_values(clean_text)
+            action = {"action": "set_tp_split"}
+            if splits:
+                action["splits"] = splits
+            return action
+        if self._intent_has_any_normalized(normalized, ["rebuild protection", "refresh protection", "rebuild tp orders", "refresh tp orders"]):
+            return {"action": "rebuild_protection"}
+        if self._intent_has_any_normalized(normalized, ["set one take profit", "single take profit", "single tp", "one tp"]):
+            return {"action": "set_single_tp"}
+        if self._intent_has_any_normalized(normalized, ["move stop to tp1", "set stop to tp1", "sl to tp1"]):
+            return {"action": "move_sl_tp", "tp_index": 1}
+        if self._intent_has_any_normalized(normalized, ["move stop to tp2", "set stop to tp2", "sl to tp2"]):
+            return {"action": "move_sl_tp", "tp_index": 2}
+        if self._intent_has_any_normalized(normalized, ["move stop to entry", "set stop to entry", "stop to entry", "move sl to entry"]):
+            return {"action": "move_sl_entry"}
+        if self._intent_has_any_normalized(normalized, ["move stop to breakeven", "set stop to breakeven", "move sl to breakeven", "break even stop"]):
+            return {"action": "move_sl_entry"}
+        if self._intent_has_any_normalized(normalized, ["set tp1", "move tp1", "change tp1"]):
+            return {"action": "set_tp", "tp_index": 1}
+        if self._intent_has_any_normalized(normalized, ["set tp2", "move tp2", "change tp2"]):
+            return {"action": "set_tp", "tp_index": 2}
+        if self._intent_has_any_normalized(normalized, ["set tp3", "move tp3", "change tp3"]):
+            return {"action": "set_tp", "tp_index": 3}
+        if self._intent_has_any_normalized(normalized, ["cancel tp1", "remove tp1", "delete tp1"]):
+            return {"action": "cancel_tp", "tp_index": 1}
+        if self._intent_has_any_normalized(normalized, ["cancel tp2", "remove tp2", "delete tp2"]):
+            return {"action": "cancel_tp", "tp_index": 2}
+        if self._intent_has_any_normalized(normalized, ["cancel tp3", "remove tp3", "delete tp3"]):
+            return {"action": "cancel_tp", "tp_index": 3}
+        if self._intent_has_any_normalized(normalized, ["cancel take profit", "cancel take profits", "cancel tp", "remove tp", "remove take profit"]):
+            return {"action": "cancel_tp"}
+        if self._intent_has_any_normalized(normalized, ["set stop loss", "move stop loss", "change stop loss", "set sl", "move sl", "change sl"]):
+            return {"action": "move_sl"}
+        if any(word in raw_lower for word in ["close", "take off", "reduce", "trim"]) and any(mark in raw_lower for mark in ["%", "percent", "half", "quarter", "third"]):
+            action = {"action": "close_partial"}
+            if "half" in raw_lower:
+                action["fraction"] = 0.5
+            elif "quarter" in raw_lower:
+                action["fraction"] = 0.25
+            elif "third" in raw_lower:
+                action["fraction"] = 1.0 / 3.0
+            else:
+                match = re.search(r'(\d+(?:[.,]\d+)?)\s*%', raw_lower)
+                if not match:
+                    match = re.search(r'(\d+(?:[.,]\d+)?)\s*(?:percent)', raw_lower)
+                if match:
+                    try:
+                        action["fraction"] = max(0.0, min(1.0, float(match.group(1).replace(",", ".")) / 100.0))
+                    except Exception:
+                        pass
+            return action
+        if self._intent_has_any_normalized(normalized, ["close position", "close my position", "close this position", "close trade", "close this trade"]):
+            return {"action": "close_full"}
+        if self._intent_has_any_normalized(normalized, ["open positions", "show my positions", "show open positions"]):
+            return {"action": "status", "reason": text}
+        return None
 
     def _send_signal_debug_summary(self):
         now = datetime.now(timezone.utc)
@@ -3085,8 +3252,8 @@ class PonchBot:
         )
         return ("?" in text_str) or any(cue in lower for cue in chart_cues)
 
-    def _build_symbol_chart_chat_answer(self, text):
-        symbol = self._extract_symbol_from_text(text)
+    def _build_symbol_chart_chat_answer(self, text, fallback_symbol=None):
+        symbol = self._extract_symbol_from_text(text) or str(fallback_symbol or "").strip().upper()
         if not symbol:
             return ""
         payload = build_btc_scenarios_payload(symbol=symbol, mode="short_term")
@@ -3754,10 +3921,20 @@ class PonchBot:
             if int(action.get("tp_index") or 0) not in {1, 2, 3}:
                 return f"Set take profit to {float(action.get('price') or 0):.2f}"
             return f"Set TP{int(action.get('tp_index') or 0)} to {float(action.get('price') or 0):.2f}"
+        if kind == "set_single_tp":
+            return f"Set one take profit to {float(action.get('price') or 0):.2f}"
+        if kind == "set_tp_split":
+            splits = list(action.get("splits") or [])
+            if len(splits) == 3:
+                pct_text = "/".join(f"{int(round(float(x) * 100))}" for x in splits)
+                return f"Change TP split to {pct_text}"
+            return "Change TP split"
         if kind == "cancel_tp":
             if int(action.get("tp_index") or 0) not in {1, 2, 3}:
                 return "Cancel all take profits"
             return f"Cancel TP{int(action.get('tp_index') or 0)}"
+        if kind == "move_sl_tp":
+            return f"Move stop to TP{int(action.get('tp_index') or 0)}"
         if kind == "close_full":
             return "Close full position"
         if kind == "close_partial":
@@ -3804,6 +3981,8 @@ class PonchBot:
             if side in {"LONG", "SHORT"}:
                 return f"Cancel all take profits on all {side.lower()} positions"
             return "Cancel all take profits on all open positions"
+        if kind == "rebuild_protection":
+            return "Rebuild the live stop and take-profit protection"
         return str(action.get("reason") or "Unsupported action")
 
     def _extract_followup_price(self, text, reference=None):
@@ -3903,6 +4082,16 @@ class PonchBot:
             if price:
                 action["price"] = price
 
+        if action.get("action") == "set_single_tp":
+            price = self._extract_followup_price(text, reference=reference)
+            if price:
+                action["price"] = price
+
+        if action.get("action") == "set_tp_split":
+            splits = self._extract_tp_split_values(text)
+            if splits:
+                action["splits"] = splits
+
         if action.get("action") == "close_partial":
             match = re.search(r'(\d+(?:[.,]\d+)?)\s*%', lower)
             if match:
@@ -3940,7 +4129,7 @@ class PonchBot:
                 return "Which tracked signal do you want to open? Send the ID, or say the side and timeframe."
             return None
 
-        if action_type in {"move_sl_entry", "move_sl", "set_tp", "cancel_tp", "close_full", "close_partial", "status"}:
+        if action_type in {"move_sl_entry", "move_sl", "set_tp", "set_single_tp", "set_tp_split", "cancel_tp", "close_full", "close_partial", "status", "move_sl_tp", "rebuild_protection"}:
             if not self._resolve_signal_for_action(action, allow_unexecuted=False):
                 if len(active) > 1:
                     return "Which open position do you mean? Send the ID, or say the side and timeframe."
@@ -3973,6 +4162,25 @@ class PonchBot:
                 if len(active_indices) <= 1:
                     return None
                 return "Which target do you want to change: TP1, TP2, or TP3?"
+            return None
+
+        if action_type == "set_single_tp":
+            if action.get("price") in (None, "", 0, 0.0, "0"):
+                return "What take-profit price do you want?"
+            return None
+
+        if action_type == "set_tp_split":
+            splits = list(action.get("splits") or [])
+            if len(splits) != 3:
+                return "What TP split do you want? For example: 20/30/50."
+            return None
+
+        if action_type == "move_sl_tp":
+            if int(action.get("tp_index") or 0) not in {1, 2, 3}:
+                return "Which target should I use for the stop: TP1, TP2, or TP3?"
+            return None
+
+        if action_type == "rebuild_protection":
             return None
 
         if action_type == "close_partial":
@@ -4180,6 +4388,17 @@ class PonchBot:
 
         if action_type == "move_sl_entry":
             result = self.trade_executor.manual_move_stop(sig, float(sig.get("entry") or 0))
+        elif action_type == "move_sl_tp":
+            tp_index = int(action.get("tp_index") or 0)
+            tp_price = float(sig.get(f"tp{tp_index}") or 0)
+            if tp_index not in {1, 2, 3} or tp_price <= 0:
+                self._send_private_execution_notice(
+                    "Exec Control",
+                    ["I could not find a valid TP level to use for that stop move."],
+                    icon="⚠️",
+                )
+                return False
+            result = self.trade_executor.manual_move_stop(sig, tp_price)
         elif action_type == "move_sl":
             if action.get("price") in (None, "", 0, 0.0, "0"):
                 self._send_private_execution_notice(
@@ -4230,10 +4449,34 @@ class PonchBot:
                 result = self.trade_executor.manual_cancel_all_tps(sig)
             else:
                 result = self.trade_executor.manual_cancel_tp(sig, tp_index)
+        elif action_type == "set_single_tp":
+            if action.get("price") in (None, "", 0, 0.0, "0"):
+                self._send_private_execution_notice(
+                    "Exec Control",
+                    [
+                        "I understood a single take-profit change, but no valid price was found.",
+                        "Please say the exact price, for example: set one tp to 67120",
+                    ],
+                    icon="⚠️",
+                )
+                return False
+            result = self.trade_executor.manual_set_single_tp(sig, float(action.get("price")))
+        elif action_type == "set_tp_split":
+            splits = list(action.get("splits") or [])
+            if len(splits) != 3:
+                self._send_private_execution_notice(
+                    "Exec Control",
+                    ["I need three TP split values, for example: 20/30/50."],
+                    icon="⚠️",
+                )
+                return False
+            result = self.trade_executor.manual_set_tp_splits(sig, splits)
         elif action_type == "close_full":
             result = self.trade_executor.manual_close_position(sig, 1.0)
         elif action_type == "close_partial":
             result = self.trade_executor.manual_close_position(sig, float(action.get("fraction") or 0))
+        elif action_type == "rebuild_protection":
+            result = self.trade_executor.rebuild_position_protection(sig, reason="manual refresh")
         else:
             self._send_private_execution_notice("Exec Control", [f"Unsupported action: {action_type}"], icon="вљ пёЏ")
             return False
@@ -4354,6 +4597,14 @@ class PonchBot:
         if self._intent_has_phrase_in_normalized(normalized, "today") and self._intent_has_any_normalized(normalized, today_pnl_words):
             self._send_today_pnl_answer()
             return True
+
+        if self._looks_like_bitcoin_plans_request(text):
+            return self._handle_btc_market_command(
+                chat_id=(message.get("chat") or {}).get("id"),
+                reply_to_message_id=message.get("message_id"),
+                message_thread_id=message.get("message_thread_id"),
+                mode="short_term",
+            )
 
         if self._looks_like_balance_only_text(lower):
             self._send_simple_balance_answer()
@@ -4579,6 +4830,31 @@ class PonchBot:
                         return True
                     _ask_to_confirm(locally_updated, chat_id, source_text=pending_source or text)
                     return True
+
+        direct_action = self._apply_context_to_action(self._infer_basic_exec_action(text) or {}, text)
+        if direct_action and str(direct_action.get("action") or "").lower():
+            direct_type = str(direct_action.get("action") or "").lower()
+            if direct_type == "status":
+                self.last_exec_suggested_action = None
+                self._save_state()
+                self._apply_private_exec_action(direct_action)
+                return True
+            need_more = self._needs_exec_clarification(direct_action)
+            if need_more:
+                self._remember_exec_suggestion(direct_action)
+                self.pending_exec_action = {
+                    "created_at": time.time(),
+                    "chat_id": chat_id,
+                    "action": direct_action,
+                    "mode": "clarify",
+                    "source_text": text,
+                }
+                self._save_state()
+                self._send_private_execution_notice("Exec Control", [need_more], icon="⚠️")
+                return True
+            self._remember_exec_suggestion(direct_action)
+            _ask_to_confirm(direct_action, chat_id, source_text=text)
+            return True
 
         if not GEMINI_API_KEY:
             self._send_private_execution_notice("Exec Control", ["GEMINI_API_KEY is missing in .env."], icon="⚠️")
@@ -7058,6 +7334,7 @@ class PonchBot:
                 "pending_exec_action": self.pending_exec_action,
                 "last_exec_suggested_action": self.last_exec_suggested_action,
                 "private_exec_focus": self.private_exec_focus,
+                "group_chat_contexts": self.group_chat_contexts,
                 "private_todo_items": self.private_todo_items,
                 "signal_debug_stats": self.signal_debug_stats,
                 "last_scalp_open_alert": self.last_scalp_open_alert,
