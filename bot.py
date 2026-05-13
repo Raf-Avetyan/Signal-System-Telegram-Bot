@@ -172,6 +172,7 @@ class PonchBot:
         self.last_education_post_date = state.get("last_education_post_date")
         self.last_education_post_slot = state.get("last_education_post_slot")
         self.last_today_wins_batch_date = state.get("last_today_wins_batch_date")
+        self.pending_stop_liq_watches = state.get("pending_stop_liq_watches", {})
         self.scenario_trade_cooldowns = state.get("scenario_trade_cooldowns", {})
         if not self.last_education_post_slot and self.last_education_post_date:
             self.last_education_post_slot = f"{self.last_education_post_date} 08"
@@ -5551,31 +5552,129 @@ class PonchBot:
                 best = item
         return best
 
-    def _get_stop_liquidity_hazard_reason(self, evt, tf, df):
-        if not LIQ_POOL_ALERT_ENABLED:
+    def _stop_liq_watch_key(self, tf, side, symbol=None):
+        symbol_name = str(symbol or SYMBOL).upper()
+        return f"{symbol_name}:{str(tf or '').lower()}:{str(side or '').upper()}"
+
+    def _prune_stop_liq_watches(self, now):
+        now = now or datetime.now(timezone.utc)
+        ts_now = now.timestamp()
+        watches = dict(getattr(self, "pending_stop_liq_watches", {}) or {})
+        changed = False
+        for key, watch in list(watches.items()):
+            try:
+                expires_at = float((watch or {}).get("expires_at") or 0)
+            except Exception:
+                expires_at = 0.0
+            if expires_at and expires_at < ts_now:
+                watches.pop(key, None)
+                changed = True
+        if changed:
+            self.pending_stop_liq_watches = watches
+            self._save_state()
+
+    def _register_stop_liq_watch(self, evt, tf, hazard, now):
+        hazard = hazard or {}
+        evt = evt or {}
+        side = str(evt.get("side") or "").upper()
+        if side not in {"LONG", "SHORT"}:
+            return
+        symbol_name = str(evt.get("symbol") or (evt.get("meta") or {}).get("symbol") or SYMBOL).upper()
+        key = self._stop_liq_watch_key(tf, side, symbol_name)
+        expiry_hours = {"5m": 6, "15m": 10, "1h": 18, "4h": 30}
+        expires_at = now + timedelta(hours=int(expiry_hours.get(str(tf), 8)))
+        self.pending_stop_liq_watches[key] = {
+            "symbol": symbol_name,
+            "tf": str(tf),
+            "side": side,
+            "watch_price": float(hazard.get("price") or 0),
+            "entry": float(evt.get("entry") or 0),
+            "stop": float(evt.get("sl") or 0),
+            "kind": str(hazard.get("kind") or ""),
+            "size_usd": float(hazard.get("size_usd") or 0),
+            "created_at": now.isoformat(),
+            "expires_at": expires_at.timestamp(),
+            "reason": str(hazard.get("reason") or ""),
+        }
+        self._save_state()
+
+    def _stop_liq_watch_trigger_note(self, evt, tf, df, now):
+        self._prune_stop_liq_watches(now)
+        evt = evt or {}
+        side = str(evt.get("side") or "").upper()
+        if side not in {"LONG", "SHORT"}:
             return ""
-        book = getattr(self, "last_order_book", None)
-        if not isinstance(book, dict):
+        symbol_name = str(evt.get("symbol") or (evt.get("meta") or {}).get("symbol") or SYMBOL).upper()
+        key = self._stop_liq_watch_key(tf, side, symbol_name)
+        watch = dict((getattr(self, "pending_stop_liq_watches", {}) or {}).get(key) or {})
+        if not watch:
             return ""
         try:
-            if df is None or df.empty:
+            if df is None or df.empty or len(df) < 3:
                 return ""
         except Exception:
             return ""
+        watch_price = float(watch.get("watch_price") or 0)
+        entry = float(watch.get("entry") or evt.get("entry") or 0)
+        stop = float(watch.get("stop") or evt.get("sl") or 0)
+        atr_val = float(df.iloc[-1].get("ATR", 0) or 0)
+        if watch_price <= 0 or entry <= 0 or stop <= 0 or atr_val <= 0:
+            return ""
+        risk = abs(entry - stop)
+        if risk <= 0:
+            return ""
+
+        recent = df.tail(3)
+        curr = recent.iloc[-1]
+        prev = recent.iloc[-2]
+        open_now = float(curr.get("Open", 0) or 0)
+        close_now = float(curr.get("Close", 0) or 0)
+        high_now = float(curr.get("High", close_now) or close_now)
+        low_now = float(curr.get("Low", close_now) or close_now)
+        prev_close = float(prev.get("Close", close_now) or close_now)
+        sweep_buffer = max(risk * 0.06, atr_val * 0.08, close_now * 0.00022)
+        reclaim_buffer = max(risk * 0.10, atr_val * 0.10, close_now * 0.00030)
+
+        if side == "LONG":
+            swept = float(recent["Low"].min()) <= (watch_price + sweep_buffer)
+            reclaimed = close_now >= (watch_price + reclaim_buffer) and close_now > open_now and close_now >= prev_close
+        else:
+            swept = float(recent["High"].max()) >= (watch_price - sweep_buffer)
+            reclaimed = close_now <= (watch_price - reclaim_buffer) and close_now < open_now and close_now <= prev_close
+
+        if not (swept and reclaimed):
+            return ""
+
+        self.pending_stop_liq_watches.pop(key, None)
+        self._save_state()
+        kind = str(watch.get("kind") or "sweep")
+        return f"liquidity watch cleared after {kind.replace('_', ' ')} at {watch_price:,.2f}"
+
+    def _get_stop_liquidity_hazard(self, evt, tf, df):
+        if not LIQ_POOL_ALERT_ENABLED:
+            return None
+        book = getattr(self, "last_order_book", None)
+        if not isinstance(book, dict):
+            return None
+        try:
+            if df is None or df.empty:
+                return None
+        except Exception:
+            return None
 
         side = str((evt or {}).get("side") or "").upper()
         if side not in {"LONG", "SHORT"}:
-            return ""
+            return None
         try:
             entry = float((evt or {}).get("entry") or 0)
             stop = float((evt or {}).get("sl") or 0)
             close = float(df.iloc[-1].get("Close", entry) or entry)
             atr_val = float(df.iloc[-1].get("ATR", 0) or 0)
         except Exception:
-            return ""
+            return None
         risk = abs(entry - stop)
         if entry <= 0 or stop <= 0 or risk <= 0 or atr_val <= 0 or close <= 0:
-            return ""
+            return None
 
         try:
             rows = detect_liquidity_candidates(
@@ -5640,18 +5739,20 @@ class PonchBot:
                 }
 
         if not best:
-            return ""
+            return None
 
         price_text = f"{float(best['price']):,.2f}"
         if best["kind"] == "stop_zone":
-            return (
+            best["reason"] = (
                 f"stop parked near major {'downside' if side == 'LONG' else 'upside'} liquidity "
                 f"({price_text}, ${best['size_usd']/1e6:.1f}M)"
             )
-        return (
+            return best
+        best["reason"] = (
             f"likely {'downside' if side == 'LONG' else 'upside'} sweep remains first "
             f"({price_text}, ${best['size_usd']/1e6:.1f}M)"
         )
+        return best
 
     def _is_unstable_impulse(self, data, side):
         """
@@ -6497,6 +6598,7 @@ class PonchBot:
                 "last_education_post_date": self.last_education_post_date,
                 "last_education_post_slot": self.last_education_post_slot,
                 "last_today_wins_batch_date": self.last_today_wins_batch_date,
+                "pending_stop_liq_watches": self.pending_stop_liq_watches,
                 "scenario_trade_cooldowns": self.scenario_trade_cooldowns,
                 "education_post_index": self.education_post_index,
                 "pending_exec_action": self.pending_exec_action,
@@ -6608,6 +6710,7 @@ class PonchBot:
         """One iteration of the main loop."""
         now = datetime.now(timezone.utc)
         current_time = time.time()
+        self._prune_stop_liq_watches(now)
         print(f"\n[{now.strftime('%H:%M:%S')} UTC] Fetching data...")
 
         # 1. Update Levels if new day
@@ -8431,10 +8534,17 @@ class PonchBot:
                     print(f"  [SCALP] Blocked {tf} {side}: {late_confirm_reason}")
                     continue
 
-                stop_liq_hazard = self._get_stop_liquidity_hazard_reason(evt, tf, df)
-                if stop_liq_hazard and not rsi_pullback_override:
+                liq_watch_note = self._stop_liq_watch_trigger_note(evt, tf, df, now)
+                if liq_watch_note:
+                    score += 1
+                    reasons.append("Sweep Reclaim Watch")
+                    print(f"  [SCALP] Allowed {tf} {side}: {liq_watch_note}")
+
+                stop_liq_hazard = self._get_stop_liquidity_hazard(evt, tf, df)
+                if stop_liq_hazard and not rsi_pullback_override and not liq_watch_note:
+                    self._register_stop_liq_watch(evt, tf, stop_liq_hazard, now)
                     self._record_signal_block("stop_liquidity_hazard", now=now)
-                    print(f"  [SCALP] Blocked {tf} {side}: {stop_liq_hazard}")
+                    print(f"  [SCALP] Blocked {tf} {side}: {stop_liq_hazard.get('reason')}")
                     continue
 
                 # Hard local-trend reversal guard (hierarchical source):
