@@ -483,33 +483,8 @@ class PonchBot:
             return True
 
         lower = text.lower().strip()
-        if "?" in text:
-            return True
-
-        aliases = list(self._bot_mention_aliases()) + ["ponch", "mr ponch"]
-        if any(re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", lower) for alias in aliases):
-            return True
-
-        start_cues = (
-            "what", "why", "how", "when", "where", "who", "which",
-            "can you", "could you", "would you", "do you", "did you", "are you",
-            "is it", "should i", "can i", "tell me", "show me", "help me",
-            "explain", "check", "analyze", "analyse", "look at", "thoughts on",
-            "opinion on", "give me", "please check", "please explain",
-        )
-        if any(lower.startswith(cue) for cue in start_cues):
-            return True
-
-        direct_cues = (" you ", " your ", " u ", " ur ")
-        if any(cue in f" {lower} " for cue in direct_cues):
-            question_verbs = (
-                "think", "see", "know", "check", "help", "explain", "analyze",
-                "analyse", "tell", "show", "say", "mean", "prefer",
-            )
-            if any(verb in lower for verb in question_verbs):
-                return True
-
-        return False
+        name_cues = list(self._bot_mention_aliases()) + ["ponch", "mr ponch", "big yahoo"]
+        return any(re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", lower) for alias in name_cues)
 
     def _handle_general_group_chat_message(self, message):
         chat_obj = message.get("chat") or {}
@@ -534,6 +509,19 @@ class PonchBot:
             self._send_text_chunks(
                 chat_id,
                 "I’m here, but the Gemini key is missing in the bot config right now.",
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=message_thread_id,
+            )
+            return True
+
+        if self._looks_like_chart_question(prompt):
+            try:
+                answer = self._build_symbol_chart_chat_answer(prompt)
+            except Exception as e:
+                answer = f"I tried to load that chart from Bitunix/OKX, but it failed this time: {e}"
+            self._send_text_chunks(
+                chat_id,
+                answer,
                 reply_to_message_id=reply_to_message_id,
                 message_thread_id=message_thread_id,
             )
@@ -3041,19 +3029,103 @@ class PonchBot:
             return match.group(1)
         aliases = {
             "BTC": "BTCUSDT",
+            "BITCOIN": "BTCUSDT",
             "ETH": "ETHUSDT",
+            "ETHEREUM": "ETHUSDT",
             "SOL": "SOLUSDT",
+            "SOLANA": "SOLUSDT",
             "XRP": "XRPUSDT",
+            "RIPPLE": "XRPUSDT",
             "DOGE": "DOGEUSDT",
             "BNB": "BNBUSDT",
             "ADA": "ADAUSDT",
+            "CARDANO": "ADAUSDT",
             "AVAX": "AVAXUSDT",
+            "AVALANCHE": "AVAXUSDT",
             "LINK": "LINKUSDT",
+            "CHAINLINK": "LINKUSDT",
         }
         for key, value in aliases.items():
             if re.search(rf"\b{key}\b", raw):
                 return value
         return None
+
+    def _looks_like_chart_question(self, text):
+        text_str = str(text or "").strip()
+        if not text_str:
+            return False
+        symbol = self._extract_symbol_from_text(text_str)
+        if not symbol:
+            return False
+        lower = text_str.lower()
+        chart_cues = (
+            "chart", "analysis", "analyse", "analyze", "think about", "thoughts on",
+            "what do you think", "bullish", "bearish", "long", "short", "support",
+            "resistance", "trend", "setup", "entry", "pump", "dump", "move", "direction",
+        )
+        return ("?" in text_str) or any(cue in lower for cue in chart_cues)
+
+    def _build_symbol_chart_chat_answer(self, text):
+        symbol = self._extract_symbol_from_text(text)
+        if not symbol:
+            return ""
+        payload = build_btc_scenarios_payload(symbol=symbol, mode="short_term")
+        tf_map = payload.get("tf_map") or {}
+        funding_ctx = payload.get("funding_ctx") or {}
+        ticker_ctx = payload.get("ticker_ctx") or {}
+        book_ctx = payload.get("book_ctx") or {}
+        scenarios = list(payload.get("scenarios") or [])
+        root = str(symbol).replace("USDT", "")
+
+        longs = [row for row in scenarios if str(row.get("side") or "").upper() == "LONG"]
+        shorts = [row for row in scenarios if str(row.get("side") or "").upper() == "SHORT"]
+        best_long = max(longs, key=lambda row: float(row.get("probability") or 0), default=None)
+        best_short = max(shorts, key=lambda row: float(row.get("probability") or 0), default=None)
+
+        bias_1h = str((tf_map.get("1h") or {}).get("bias") or "n/a")
+        bias_4h = str((tf_map.get("4h") or {}).get("bias") or "n/a")
+        bias_1d = str((tf_map.get("1d") or {}).get("bias") or "n/a")
+        day_change = float((ticker_ctx.get("day_change_pct") or 0.0))
+        current_price = float(payload.get("current_price") or 0.0)
+        funding_rate = float(payload.get("funding_rate") or 0.0)
+        funding_bias = str(funding_ctx.get("bias") or "flat")
+        top_above = str(book_ctx.get("above_text") or "n/a")
+        top_below = str(book_ctx.get("below_text") or "n/a")
+
+        def _scenario_line(label, row):
+            if not row:
+                return f"{label}: n/a"
+            entry_low = float(row.get("entry_low") or 0.0)
+            entry_high = float(row.get("entry_high") or 0.0)
+            entry_text = f"{entry_low:,.2f}-{entry_high:,.2f}" if abs(entry_high - entry_low) > 1e-9 else f"{entry_low:,.2f}"
+            side_note = "with trend" if row.get("trend_aligned") else "counter-trend"
+            return (
+                f"{label}: {str(row.get('title') or '').upper()} | "
+                f"entry {entry_text} | chance {float(row.get('probability') or 0):.0f}% | {side_note}"
+            )
+
+        bias_line = "mixed"
+        if "bullish" in bias_4h.lower() and "bullish" in bias_1h.lower():
+            bias_line = "bullish intraday bias"
+        elif "bearish" in bias_4h.lower() and "bearish" in bias_1h.lower():
+            bias_line = "bearish intraday bias"
+
+        lines = [
+            f"<b>{root} quick chart read</b>",
+            (
+                "<blockquote>"
+                f"Price: {current_price:,.2f}\n"
+                f"Funding: {funding_rate:+.6f}% ({funding_bias})\n"
+                f"1H: {bias_1h} | 4H: {bias_4h} | 1D: {bias_1d}\n"
+                f"24H: {day_change:+.2f}%"
+                "</blockquote>"
+            ),
+            f"Bias: <b>{bias_line}</b>",
+            f"Liquidity: above {top_above} | below {top_below}",
+            f"<blockquote>{_scenario_line('Long plan', best_long)}</blockquote>",
+            f"<blockquote>{_scenario_line('Short plan', best_short)}</blockquote>",
+        ]
+        return "\n".join(lines)
 
     def _extract_manual_preset(self, text):
         lower = str(text or "").lower()

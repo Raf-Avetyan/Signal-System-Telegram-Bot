@@ -342,25 +342,25 @@ def _liquidity_context(book, current_price, atr_1h):
     }
 
 
-def _okx_liquidation_context(current_price, atr_1h, levels):
+def _okx_liquidation_context(current_price, atr_1h, levels, symbol=SYMBOL):
     try:
-        order_book = fetch_okx_order_book(depth=400)
+        order_book = fetch_okx_order_book(symbol=symbol, depth=400)
     except Exception:
         order_book = None
     try:
-        liquidation_orders = fetch_liquidation_orders(limit=100)
+        liquidation_orders = fetch_liquidation_orders(symbol=symbol, limit=100)
     except Exception:
         liquidation_orders = []
     try:
-        oi_value = _safe_float(fetch_open_interest())
+        oi_value = _safe_float(fetch_open_interest(symbol=symbol))
     except Exception:
         oi_value = 0.0
     try:
-        liquidation_value = _safe_float(fetch_liquidations())
+        liquidation_value = _safe_float(fetch_liquidations(symbol=symbol))
     except Exception:
         liquidation_value = 0.0
     try:
-        funding_rate = _safe_float(fetch_okx_funding_rate())
+        funding_rate = _safe_float(fetch_okx_funding_rate(symbol=symbol))
     except Exception:
         funding_rate = 0.0
 
@@ -1641,7 +1641,7 @@ def build_liquidation_map_snapshot(symbol=SYMBOL):
     funding_ctx = _funding_context(funding_rate_raw, funding_history)
     ticker_ctx = _ticker_context(ticker)
     liq_ctx = _liquidity_context(book, current_price, atr_1h)
-    okx_ctx = _okx_liquidation_context(current_price, atr_1h, levels)
+    okx_ctx = _okx_liquidation_context(current_price, atr_1h, levels, symbol=symbol)
     liq_map = build_liquidation_map(
         current_price=current_price,
         levels=levels,
