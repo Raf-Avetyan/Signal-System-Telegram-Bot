@@ -482,9 +482,29 @@ class PonchBot:
         if bool(reply_from.get("is_bot")):
             return True
 
-        lower = text.lower().strip()
-        name_cues = list(self._bot_mention_aliases()) + ["ponch", "mr ponch", "big yahoo"]
-        return any(re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", lower) for alias in name_cues)
+        return self._contains_general_bot_name(text)
+
+    def _contains_general_bot_name(self, text):
+        lower = str(text or "").lower().strip()
+        if not lower:
+            return False
+
+        exact_names = list(self._bot_mention_aliases()) + ["ponch", "mr ponch", "big yahoo"]
+        if any(re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", lower) for alias in exact_names):
+            return True
+
+        fuzzy_patterns = [
+            r"\bmr\s*p[o0]n+c+h?\b",
+            r"\bmrp[o0]n+c+h?\b",
+            r"\bp[o0]n+c+h?\b",
+            r"\bmr\s*p[o0]n+h\b",
+            r"\bp[o0]n+h\b",
+            r"\bp[o0]n+s+h\b",
+            r"\bp[uo]n+c+h\b",
+            r"\bb[i1]g\s+y[a@]h+o+o?\b",
+            r"\bb[i1]gy[a@]h+o+o?\b",
+        ]
+        return any(re.search(pattern, lower, flags=re.IGNORECASE) for pattern in fuzzy_patterns)
 
     def _handle_general_group_chat_message(self, message):
         chat_obj = message.get("chat") or {}
