@@ -62,6 +62,9 @@ from config import (
     TP_LIQUIDITY_MIN_USD, TP_LIQUIDITY_BAND_PCT,
     FALLING_KNIFE_FILTER_ENABLED, FALLING_KNIFE_LOOKBACK_5M, FALLING_KNIFE_LOOKBACK_15M,
     FALLING_KNIFE_MOVE_PCT_5M, FALLING_KNIFE_MOVE_PCT_15M,
+    FAST_EXPANSION_GUARD_ENABLED, FAST_EXPANSION_LOOKBACK_5M, FAST_EXPANSION_LOOKBACK_15M,
+    FAST_EXPANSION_MOVE_PCT_5M, FAST_EXPANSION_MOVE_PCT_15M,
+    FAST_EXPANSION_VOLUME_MULT, FAST_EXPANSION_BODY_ATR, FAST_EXPANSION_EMA2_ATR,
     LIQ_POOL_REPORT_TIMEFRAMES, LIQ_POOL_MIN_USD_BY_TF, LIQ_POOL_MIN_DISTANCE_PCT_BY_TF,
     LIQ_POOL_TARGET_DISTANCE_PCT_BY_TF, LIQ_POOL_LEVEL_DEDUP_GAP_PCT,
     LIQ_POOL_PROGRESSIVE_MIN_STEP_PCT,
@@ -5682,7 +5685,7 @@ class PonchBot:
                 price=float(close),
                 atr=float(atr_val),
                 timeframe=str(tf or "5m"),
-                max_distance_atr_mult=max(float(LIQ_POOL_MAX_DISTANCE_ATR_MULT.get(tf, 1.5) or 1.5) * 2.2, 2.0),
+                max_distance_atr_mult=max(float(LIQ_POOL_MAX_DISTANCE_ATR_MULT.get(tf, 1.5) or 1.5) * 3.2, 3.0),
                 bucket_pct=max(float(LIQ_POOL_AGG_WINDOW_PCT_BY_TF.get(tf, 0.0) or 0.0), 0.02),
             )
         except Exception:
@@ -5704,7 +5707,40 @@ class PonchBot:
         min_liq_usd = max(float(LIQ_POOL_MIN_USD or 0) * 0.80, 8_000_000.0)
         stop_band = max(risk * 0.22, atr_val * 0.16, close * 0.00055)
         sweep_gap = max(risk * 0.28, atr_val * 0.20, close * 0.0008)
+        magnet_floor = max(risk * 0.35, atr_val * 0.30, close * 0.0018)
+        magnet_ceiling = max(risk * 2.2, atr_val * 3.8, close * 0.0125)
+        recent_move_thr = 0.30 if str(tf) == "5m" else (0.55 if str(tf) == "15m" else 0.75)
         best = None
+
+        recent_move_pct = 0.0
+        directional_pressure = False
+        volume_mult = 1.0
+        try:
+            lookback = 3 if str(tf) == "5m" else 2
+            if len(df) >= lookback + 1:
+                prev_close = float(df["Close"].iloc[-(lookback + 1)] or 0)
+                close_now = float(df["Close"].iloc[-1] or 0)
+                if prev_close > 0 and close_now > 0:
+                    recent_move_pct = (close_now / prev_close - 1.0) * 100.0
+                c1 = float(df["Close"].iloc[-1] or close_now)
+                c2 = float(df["Close"].iloc[-2] or c1)
+                c3 = float(df["Close"].iloc[-3] or c2) if len(df) >= 3 else c2
+                o1 = float(df["Open"].iloc[-1] or c1)
+                o2 = float(df["Open"].iloc[-2] or c2)
+                o3 = float(df["Open"].iloc[-3] or c3) if len(df) >= 3 else c3
+                red_count = int(c1 < o1) + int(c2 < o2) + int(c3 < o3)
+                green_count = int(c1 > o1) + int(c2 > o2) + int(c3 > o3)
+                if side == "LONG":
+                    directional_pressure = recent_move_pct <= -abs(recent_move_thr) and (c1 < c2 or red_count >= 2)
+                else:
+                    directional_pressure = recent_move_pct >= abs(recent_move_thr) and (c1 > c2 or green_count >= 2)
+            if "Volume" in df.columns and len(df) >= 21:
+                vol_now = float(df["Volume"].iloc[-1] or 0)
+                vol_avg = float(df["Volume"].iloc[-21:-1].mean() or 0)
+                if vol_now > 0 and vol_avg > 0:
+                    volume_mult = vol_now / vol_avg
+        except Exception:
+            directional_pressure = False
 
         for row in rows:
             if str(row.get("side") or "").upper() != danger_side:
@@ -5720,22 +5756,28 @@ class PonchBot:
             if side == "LONG":
                 in_stop_zone = (stop - stop_band) <= px <= (stop + stop_band)
                 pre_sweep_zone = stop <= px < (entry - sweep_gap)
+                magnet_zone = directional_pressure and (close - magnet_ceiling) <= px <= (close - magnet_floor)
             else:
                 in_stop_zone = (stop - stop_band) <= px <= (stop + stop_band)
                 pre_sweep_zone = (entry + sweep_gap) < px <= stop
+                magnet_zone = directional_pressure and (close + magnet_floor) <= px <= (close + magnet_ceiling)
 
-            if not (in_stop_zone or pre_sweep_zone):
+            if not (in_stop_zone or pre_sweep_zone or magnet_zone):
                 continue
 
             score = usd
             if in_stop_zone:
                 score *= 1.25
+            if magnet_zone:
+                score *= 1.15
+                if volume_mult >= 1.4:
+                    score *= 1.08
             if best is None or score > best["score"]:
                 best = {
                     "price": px,
                     "size_usd": usd,
                     "score": score,
-                    "kind": "stop_zone" if in_stop_zone else "pre_sweep",
+                    "kind": "stop_zone" if in_stop_zone else ("pre_sweep" if pre_sweep_zone else "magnet"),
                 }
 
         if not best:
@@ -5746,6 +5788,13 @@ class PonchBot:
             best["reason"] = (
                 f"stop parked near major {'downside' if side == 'LONG' else 'upside'} liquidity "
                 f"({price_text}, ${best['size_usd']/1e6:.1f}M)"
+            )
+            return best
+        if best["kind"] == "magnet":
+            move_text = f"{recent_move_pct:+.2f}%"
+            best["reason"] = (
+                f"major {'downside' if side == 'LONG' else 'upside'} liquidity still below the move "
+                f"({price_text}, ${best['size_usd']/1e6:.1f}M) after {move_text}"
             )
             return best
         best["reason"] = (
@@ -5799,6 +5848,107 @@ class PonchBot:
                     return True, f"{tf} impulse {move_pct:+.2f}% (no top)"
 
         return False, ""
+
+    def _get_fast_move_volume_guard(self, data, side, preferred_tf=None):
+        """
+        Be careful around sudden expansions with heavy volume.
+        Blocks:
+        - same-direction late chase after a fast pump/dump
+        - immediate counter-trend catches before any cooling / base appears
+        """
+        if not FAST_EXPANSION_GUARD_ENABLED:
+            return ""
+        if not isinstance(data, dict):
+            return ""
+
+        cfg_checks = [
+            ("5m", int(FAST_EXPANSION_LOOKBACK_5M), float(FAST_EXPANSION_MOVE_PCT_5M)),
+            ("15m", int(FAST_EXPANSION_LOOKBACK_15M), float(FAST_EXPANSION_MOVE_PCT_15M)),
+        ]
+        checks = []
+        if preferred_tf in {"5m", "15m"}:
+            for tf_name, lookback, move_thr in cfg_checks:
+                if tf_name == preferred_tf:
+                    checks.append((tf_name, lookback, move_thr))
+                    break
+        for tf_name, lookback, move_thr in cfg_checks:
+            if tf_name != preferred_tf:
+                checks.append((tf_name, lookback, move_thr))
+
+        for tf_name, lookback, move_thr in checks:
+            df = data.get(tf_name)
+            if df is None or df.empty or len(df) < max(lookback + 1, 22):
+                continue
+            if "Volume" not in df.columns:
+                continue
+
+            curr = df.iloc[-1]
+            prev = df.iloc[-(lookback + 1)]
+            curr_close = float(curr.get("Close", 0) or 0)
+            prev_close = float(prev.get("Close", 0) or 0)
+            curr_open = float(curr.get("Open", curr_close) or curr_close)
+            if curr_close <= 0 or prev_close <= 0:
+                continue
+
+            curr_vol = float(curr.get("Volume", 0) or 0)
+            avg_vol = float(df["Volume"].iloc[-21:-1].mean() or 0)
+            if curr_vol <= 0 or avg_vol <= 0:
+                continue
+            vol_mult = curr_vol / avg_vol
+            if vol_mult < float(FAST_EXPANSION_VOLUME_MULT):
+                continue
+
+            move_pct = (curr_close / prev_close - 1.0) * 100.0
+            if abs(move_pct) < abs(move_thr):
+                continue
+
+            atr_val = float(curr.get("ATR", 0) or 0)
+            if atr_val <= 0:
+                atr_val = max(curr_close * 0.002, 1.0)
+            body_atr = abs(curr_close - curr_open) / atr_val
+            ema2 = float(curr.get("EMA2", curr_close) or curr_close)
+            stretch_atr = abs(curr_close - ema2) / atr_val
+            if (
+                body_atr < float(FAST_EXPANSION_BODY_ATR)
+                and stretch_atr < float(FAST_EXPANSION_EMA2_ATR)
+            ):
+                continue
+
+            c1 = float(df["Close"].iloc[-1])
+            c2 = float(df["Close"].iloc[-2])
+            c3 = float(df["Close"].iloc[-3])
+            o1 = float(df["Open"].iloc[-1])
+            o2 = float(df["Open"].iloc[-2])
+            o3 = float(df["Open"].iloc[-3])
+            green_count = int(c1 > o1) + int(c2 > o2) + int(c3 > o3)
+            red_count = int(c1 < o1) + int(c2 < o2) + int(c3 < o3)
+
+            if move_pct > 0:
+                if not (curr_close > curr_open or green_count >= 2):
+                    continue
+                started_cooling = (c1 < c2) or (curr_close < curr_open and c2 <= c3)
+                move_label = "pump"
+                impulse_side = "LONG"
+            else:
+                if not (curr_close < curr_open or red_count >= 2):
+                    continue
+                started_cooling = (c1 > c2) or (curr_close > curr_open and c2 >= c3)
+                move_label = "dump"
+                impulse_side = "SHORT"
+
+            if side == impulse_side:
+                return (
+                    f"fast {move_label} chase on {tf_name}: {move_pct:+.2f}% "
+                    f"with {vol_mult:.1f}x volume"
+                )
+
+            if not started_cooling:
+                return (
+                    f"fast {move_label} on {tf_name}: wait for pullback/base "
+                    f"after {move_pct:+.2f}% with {vol_mult:.1f}x volume"
+                )
+
+        return ""
 
     def _get_opposite_divergence_note(self, side):
         """Return note when any tracked timeframe has opposite-side RSI divergence."""
@@ -6929,6 +7079,12 @@ class PonchBot:
                     if impulse_blocked:
                         self._record_signal_block("confluence_unstable_impulse", now=now)
                         print(f"  [CONFLUENCE] Blocked {side} {ce['type']}: {impulse_note}")
+                        continue
+
+                    fast_move_note = self._get_fast_move_volume_guard(data, side, preferred_tf="5m")
+                    if fast_move_note:
+                        self._record_signal_block("confluence_fast_move_volume", now=now)
+                        print(f"  [CONFLUENCE] Blocked {side} {ce['type']}: {fast_move_note}")
                         continue
 
                     # 2. Momentum exhaustion guard: avoid SHORT when RSI already very low
@@ -8526,6 +8682,12 @@ class PonchBot:
                 if impulse_blocked:
                     self._record_signal_block("unstable_impulse", now=now)
                     print(f"  [SCALP] Blocked {tf} {side}: {impulse_note}")
+                    continue
+
+                fast_move_note = self._get_fast_move_volume_guard(self.latest_data or {}, side, preferred_tf=tf)
+                if fast_move_note:
+                    self._record_signal_block("fast_move_volume", now=now)
+                    print(f"  [SCALP] Blocked {tf} {side}: {fast_move_note}")
                     continue
 
                 late_confirm_reason = self._get_late_confirm_reason(tf, side, df)

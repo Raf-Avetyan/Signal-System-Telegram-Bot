@@ -418,6 +418,16 @@ FALLING_KNIFE_LOOKBACK_15M = 4     # 60 min window
 FALLING_KNIFE_MOVE_PCT_5M = 0.7    # block longs if <= -0.7% without stabilization (shorts vice versa)
 FALLING_KNIFE_MOVE_PCT_15M = 1.0   # block longs if <= -1.0% without stabilization (shorts vice versa)
 
+# Fast pump/dump + heavy-volume safety filter
+FAST_EXPANSION_GUARD_ENABLED = True
+FAST_EXPANSION_LOOKBACK_5M = 3      # inspect last 15m for sudden move
+FAST_EXPANSION_LOOKBACK_15M = 2     # inspect last 30m for sudden move
+FAST_EXPANSION_MOVE_PCT_5M = 0.45   # sudden move threshold for 5m context
+FAST_EXPANSION_MOVE_PCT_15M = 0.70  # sudden move threshold for 15m context
+FAST_EXPANSION_VOLUME_MULT = 1.8    # current volume vs rolling average
+FAST_EXPANSION_BODY_ATR = 0.70      # current body stretch vs ATR
+FAST_EXPANSION_EMA2_ATR = 1.10      # current distance from EMA2 vs ATR
+
 # --- SIGNAL POINTS --------------------------------------------------
 # Trade signal points by entry level
 SIGNAL_POINTS = {
