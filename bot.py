@@ -185,6 +185,7 @@ class PonchBot:
         self.last_exec_suggested_action = state.get("last_exec_suggested_action")
         self.private_exec_focus = state.get("private_exec_focus", {})
         self.group_chat_contexts = state.get("group_chat_contexts", {})
+        self.general_group_memory_file = "general_group_memory.md"
         self.private_todo_items = state.get("private_todo_items", [])
         self.signal_debug_stats = state.get("signal_debug_stats", {})
         self.last_scalp_open_alert = state.get("last_scalp_open_alert", {})
@@ -429,6 +430,9 @@ class PonchBot:
         chat_id = chat_obj.get("id")
         message_thread_id = message.get("message_thread_id")
         reply_to_message_id = message.get("message_id")
+        original_text = str((message.get("text") or "").strip())
+        if self._is_specific_signal_topic(chat_id, message_thread_id, self._general_thread_id()) and original_text:
+            self._append_general_group_memory(message, role="user", text=original_text)
 
         if not self._is_specific_signal_topic(chat_id, message_thread_id, self._general_thread_id()):
             self._silence_restricted_command(message)
@@ -450,13 +454,53 @@ class PonchBot:
                 reply_to_message_id=reply_to_message_id,
                 message_thread_id=message_thread_id,
             )
+            self._append_general_group_memory(message, role="assistant", text="I’m here. Mention me with your question and I’ll answer in this group.")
             return True
+
+        recent_ctx = self._recent_group_chat_context(message)
+        fallback_symbol = str(recent_ctx.get("symbol") or "").strip().upper() or None
+
+        if self._looks_like_bitcoin_plans_request(prompt):
+            handled = self._handle_btc_market_command(
+                chat_id=chat_id,
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=message_thread_id,
+                mode="short_term",
+            )
+            if handled:
+                self._remember_group_chat_context(message, prompt=prompt, answer="btc plans", symbol="BTCUSDT")
+                self._append_general_group_memory(message, role="assistant", text="Sent BTC short-term trading plans.")
+            return handled
+
+        if self._looks_like_chart_question(prompt):
+            try:
+                answer = self._build_symbol_chart_chat_answer(prompt, fallback_symbol=fallback_symbol)
+            except Exception as e:
+                answer = f"I tried to load that chart from Bitunix/OKX, but it failed this time: {e}"
+            self._send_text_chunks(
+                chat_id,
+                answer,
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=message_thread_id,
+            )
+            self._remember_group_chat_context(
+                message,
+                prompt=prompt,
+                answer=answer,
+                symbol=self._extract_symbol_from_text(prompt) or fallback_symbol or "",
+            )
+            self._append_general_group_memory(message, role="assistant", text=answer)
+            return True
+
+        memory_excerpt = self._read_general_group_memory_tail()
 
         group_context = (
             f"Group mention chat title: {chat_obj.get('title') or 'Unknown'}\n"
             f"Thread id: {self._normalized_signal_thread_id(chat_id, message_thread_id)}\n\n"
             f"{self._build_gemini_trade_context()}"
         )
+        if memory_excerpt:
+            group_context += f"\n\nRecent group markdown memory:\n{memory_excerpt}"
         answer = self._ask_private_chat_question(prompt, context_text=group_context)
         answer = str(answer or "").strip()
         if not answer:
@@ -468,6 +512,8 @@ class PonchBot:
             reply_to_message_id=reply_to_message_id,
             message_thread_id=message_thread_id,
         )
+        self._remember_group_chat_context(message, prompt=prompt, answer=answer, symbol=fallback_symbol or "")
+        self._append_general_group_memory(message, role="assistant", text=answer)
         return True
 
     def _should_answer_general_group_message(self, message):
@@ -538,6 +584,50 @@ class PonchBot:
         self.group_chat_contexts[key] = payload
         self._save_state()
 
+    def _append_general_group_memory(self, message, *, role, text):
+        body = str(text or "").strip()
+        if not body:
+            return
+        try:
+            msg = message or {}
+            from_obj = msg.get("from") or {}
+            first = str(from_obj.get("first_name") or "").strip()
+            last = str(from_obj.get("last_name") or "").strip()
+            username = str(from_obj.get("username") or "").strip()
+            actor = "Bot" if role == "assistant" else "User"
+            name = " ".join(part for part in [first, last] if part).strip() or actor
+            if username:
+                name = f"{name} (@{username})"
+            msg_dt = datetime.fromtimestamp(float(msg.get("date") or time.time()), timezone.utc).astimezone(self.local_tz)
+            stamp = msg_dt.strftime("%Y-%m-%d %H:%M")
+            clean_body = body.replace("\r\n", "\n").replace("\r", "\n").strip()
+            entry = (
+                f"\n## {stamp}\n"
+                f"**{actor}: {name}**\n\n"
+                f"{clean_body}\n"
+            )
+            with open(self.general_group_memory_file, "a", encoding="utf-8") as fh:
+                fh.write(entry)
+        except Exception:
+            pass
+
+    def _read_general_group_memory_tail(self, max_chars=6000):
+        try:
+            path = self.general_group_memory_file
+            if not os.path.exists(path):
+                return ""
+            size = os.path.getsize(path)
+            read_bytes = max_chars * 4
+            if size <= read_bytes:
+                with open(path, "r", encoding="utf-8") as fh:
+                    return fh.read().strip()
+            with open(path, "rb") as fh:
+                fh.seek(max(0, size - read_bytes))
+                data = fh.read()
+            return data.decode("utf-8", errors="ignore").strip()
+        except Exception:
+            return ""
+
     def _handle_general_group_chat_message(self, message):
         chat_obj = message.get("chat") or {}
         chat_id = chat_obj.get("id")
@@ -550,6 +640,8 @@ class PonchBot:
             return False
 
         text = str(message.get("text") or "").strip()
+        if text:
+            self._append_general_group_memory(message, role="user", text=text)
         if not self._should_answer_general_group_message(message):
             return False
 
@@ -559,6 +651,7 @@ class PonchBot:
 
         recent_ctx = self._recent_group_chat_context(message)
         fallback_symbol = str(recent_ctx.get("symbol") or "").strip().upper() or None
+        memory_excerpt = self._read_general_group_memory_tail()
 
         if self._looks_like_bitcoin_plans_request(prompt):
             handled = self._handle_btc_market_command(
@@ -569,6 +662,7 @@ class PonchBot:
             )
             if handled:
                 self._remember_group_chat_context(message, prompt=prompt, answer="btc plans", symbol="BTCUSDT")
+                self._append_general_group_memory(message, role="assistant", text="Sent BTC short-term trading plans.")
             return handled
 
         if not GEMINI_API_KEY:
@@ -597,6 +691,7 @@ class PonchBot:
                 answer=answer,
                 symbol=self._extract_symbol_from_text(prompt) or fallback_symbol or "",
             )
+            self._append_general_group_memory(message, role="assistant", text=answer)
             return True
 
         reply_anchor = ""
@@ -623,6 +718,8 @@ class PonchBot:
             f"{self._build_gemini_trade_context()}"
             f"{reply_anchor}"
         )
+        if memory_excerpt:
+            group_context += f"\n\nRecent group markdown memory:\n{memory_excerpt}"
         answer = self._ask_private_chat_question(prompt, context_text=group_context)
         answer = str(answer or "").strip()
         if not answer:
@@ -635,6 +732,7 @@ class PonchBot:
             message_thread_id=message_thread_id,
         )
         self._remember_group_chat_context(message, prompt=prompt, answer=answer, symbol=fallback_symbol or "")
+        self._append_general_group_memory(message, role="assistant", text=answer)
         return True
 
     def _is_chat_admin_user(self, chat_id, user_id):
