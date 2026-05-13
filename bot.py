@@ -186,6 +186,7 @@ class PonchBot:
         self.private_exec_focus = state.get("private_exec_focus", {})
         self.group_chat_contexts = state.get("group_chat_contexts", {})
         self.general_group_memory_file = "general_group_memory.md"
+        self.runtime_exec_reply_target = None
         self.private_todo_items = state.get("private_todo_items", [])
         self.signal_debug_stats = state.get("signal_debug_stats", {})
         self.last_scalp_open_alert = state.get("last_scalp_open_alert", {})
@@ -584,6 +585,16 @@ class PonchBot:
         self.group_chat_contexts[key] = payload
         self._save_state()
 
+    def _matches_general_pending_action(self, message):
+        pending = self.pending_exec_action or {}
+        if str((pending.get("scope") or "")).lower() != "general":
+            return False
+        return (
+            str(pending.get("chat_id") or "") == str(((message.get("chat") or {}).get("id")) or "")
+            and str(pending.get("thread_id") or "") == str(self._normalized_signal_thread_id(((message.get("chat") or {}).get("id")), message.get("message_thread_id")) or "")
+            and str(pending.get("user_id") or "") == str(((message.get("from") or {}).get("id")) or "")
+        )
+
     def _append_general_group_memory(self, message, *, role, text):
         body = str(text or "").strip()
         if not body:
@@ -652,6 +663,71 @@ class PonchBot:
         recent_ctx = self._recent_group_chat_context(message)
         fallback_symbol = str(recent_ctx.get("symbol") or "").strip().upper() or None
         memory_excerpt = self._read_general_group_memory_tail()
+        lower = prompt.lower().strip()
+
+        def _ask_group_exec_confirm(action_obj, source_text=None):
+            action_text = self._preview_exec_action(action_obj).strip().rstrip(".")
+            lines = [
+                f"I can do that. {action_text}.",
+                "If you want me to go ahead, reply YES. If you changed your mind, reply NO.",
+            ]
+            self.pending_exec_action = {
+                "created_at": time.time(),
+                "chat_id": str(chat_id or ""),
+                "thread_id": str(self._normalized_signal_thread_id(chat_id, message_thread_id) or ""),
+                "user_id": str((from_obj.get("id") or "")),
+                "action": action_obj,
+                "mode": "confirm",
+                "scope": "general",
+                "source_text": source_text or prompt,
+            }
+            self._save_state()
+            self.runtime_exec_reply_target = {
+                "chat_id": chat_id,
+                "message_thread_id": message_thread_id,
+                "reply_to_message_id": reply_to_message_id,
+            }
+            try:
+                self._send_private_execution_notice("Confirm Exec Action", lines, icon="🤖")
+            finally:
+                self.runtime_exec_reply_target = None
+
+        if self._matches_general_pending_action(message):
+            expired = (time.time() - float((self.pending_exec_action or {}).get("created_at") or 0)) > max(30, PRIVATE_EXEC_CONFIRM_TIMEOUT_SEC)
+            if expired:
+                self.pending_exec_action = None
+                self._save_state()
+                self._send_text_chunks(
+                    chat_id,
+                    "Pending action expired. Send the request again.",
+                    reply_to_message_id=reply_to_message_id,
+                    message_thread_id=message_thread_id,
+                )
+                return True
+            if lower in {"yes", "y", "confirm", "do it", "execute"}:
+                action = dict((self.pending_exec_action or {}).get("action") or {})
+                self.pending_exec_action = None
+                self._save_state()
+                self.runtime_exec_reply_target = {
+                    "chat_id": chat_id,
+                    "message_thread_id": message_thread_id,
+                    "reply_to_message_id": reply_to_message_id,
+                }
+                try:
+                    self._apply_private_exec_action(action)
+                finally:
+                    self.runtime_exec_reply_target = None
+                return True
+            if lower in {"no", "n", "cancel", "stop"}:
+                self.pending_exec_action = None
+                self._save_state()
+                self._send_text_chunks(
+                    chat_id,
+                    "Pending action cancelled.",
+                    reply_to_message_id=reply_to_message_id,
+                    message_thread_id=message_thread_id,
+                )
+                return True
 
         if self._looks_like_bitcoin_plans_request(prompt):
             handled = self._handle_btc_market_command(
@@ -664,6 +740,43 @@ class PonchBot:
                 self._remember_group_chat_context(message, prompt=prompt, answer="btc plans", symbol="BTCUSDT")
                 self._append_general_group_memory(message, role="assistant", text="Sent BTC short-term trading plans.")
             return handled
+
+        direct_action = self._apply_context_to_action(self._infer_basic_exec_action(prompt) or {}, prompt)
+        if direct_action and str(direct_action.get("action") or "").lower():
+            direct_type = str(direct_action.get("action") or "").lower()
+            if direct_type == "status":
+                self.runtime_exec_reply_target = {
+                    "chat_id": chat_id,
+                    "message_thread_id": message_thread_id,
+                    "reply_to_message_id": reply_to_message_id,
+                }
+                try:
+                    self._apply_private_exec_action(direct_action)
+                finally:
+                    self.runtime_exec_reply_target = None
+                return True
+            need_more = self._needs_exec_clarification(direct_action)
+            if need_more:
+                self.pending_exec_action = {
+                    "created_at": time.time(),
+                    "chat_id": str(chat_id or ""),
+                    "thread_id": str(self._normalized_signal_thread_id(chat_id, message_thread_id) or ""),
+                    "user_id": str((from_obj.get("id") or "")),
+                    "action": direct_action,
+                    "mode": "clarify",
+                    "scope": "general",
+                    "source_text": prompt,
+                }
+                self._save_state()
+                self._send_text_chunks(
+                    chat_id,
+                    need_more,
+                    reply_to_message_id=reply_to_message_id,
+                    message_thread_id=message_thread_id,
+                )
+                return True
+            _ask_group_exec_confirm(direct_action, source_text=prompt)
+            return True
 
         if not GEMINI_API_KEY:
             self._send_text_chunks(
@@ -2539,6 +2652,23 @@ class PonchBot:
         return False
 
     def _send_private_execution_notice(self, title, lines=None, icon="🔐"):
+        target = self.runtime_exec_reply_target or {}
+        if target.get("chat_id"):
+            body_lines = [str(line) for line in (lines or []) if line is not None and str(line).strip() and str(line).strip() != "None"]
+            title_text = str(title or "").strip()
+            if title_text and title_text not in {"Exec Control", "Confirm Exec Action", "Exec Action Result"}:
+                body_lines.insert(0, title_text)
+            if not body_lines:
+                body_lines = [title_text] if title_text else []
+            if body_lines:
+                tg.send(
+                    "\n".join(body_lines),
+                    chat_id=target.get("chat_id"),
+                    parse_mode="HTML",
+                    reply_to_message_id=target.get("reply_to_message_id"),
+                    message_thread_id=target.get("message_thread_id"),
+                )
+            return
         exec_chat = self._execution_chat_id()
         if not exec_chat:
             return
@@ -2698,6 +2828,19 @@ class PonchBot:
         return "\n".join(rendered).strip()
 
     def _send_private_execution_answer(self, text):
+        target = self.runtime_exec_reply_target or {}
+        if target.get("chat_id"):
+            answer = self._format_private_answer_for_telegram(text)
+            if not answer:
+                return
+            tg.send(
+                answer,
+                chat_id=target.get("chat_id"),
+                parse_mode="HTML",
+                reply_to_message_id=target.get("reply_to_message_id"),
+                message_thread_id=target.get("message_thread_id"),
+            )
+            return
         exec_chat = self._execution_chat_id()
         if not exec_chat:
             return
