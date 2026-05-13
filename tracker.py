@@ -263,12 +263,15 @@ class SignalTracker:
         p_high = high if high is not None else current_price
         p_low = low if low is not None else current_price
 
-        # Clear new-this-tick set each call
-        self._new_this_tick.clear()
+        # Freshly logged signals should sit out one outcome pass so they cannot
+        # instantly fire TP/SL from the same wick that created them.
+        new_this_tick = set(self._new_this_tick)
 
         terminal_statuses = {"SL", "TP3", "CLOSED", "ENTRY_CLOSE", "PROFIT_SL"}
 
-        for sig in self.signals:
+        for idx, sig in enumerate(self.signals):
+            if idx in new_this_tick:
+                continue
             if sig["status"] in terminal_statuses:
                 continue
 
@@ -430,6 +433,8 @@ class SignalTracker:
                     changed = True
                     events.append({"type": "SL", "sig": sig})
                 continue
+
+        self._new_this_tick.clear()
 
         if changed:
             self._save()
