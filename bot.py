@@ -3094,6 +3094,9 @@ class PonchBot:
         funding_ctx = payload.get("funding_ctx") or {}
         ticker_ctx = payload.get("ticker_ctx") or {}
         book_ctx = payload.get("book_ctx") or {}
+        liq_ctx = payload.get("liq_ctx") or {}
+        okx_ctx = payload.get("okx_ctx") or {}
+        liq_map = payload.get("liq_map") or {}
         scenarios = list(payload.get("scenarios") or [])
         root = str(symbol).replace("USDT", "")
 
@@ -3111,6 +3114,36 @@ class PonchBot:
         funding_bias = str(funding_ctx.get("bias") or "flat")
         top_above = str(book_ctx.get("above_text") or "n/a")
         top_below = str(book_ctx.get("below_text") or "n/a")
+
+        def _liq_text_from_row(row):
+            if not row:
+                return "n/a"
+            price = float(row.get("level_price") or row.get("price") or 0.0)
+            size_usd = float(row.get("size_usd") or 0.0)
+            bucket = str(row.get("bucket") or "").strip().lower()
+            bucket_tag = f" {bucket}" if bucket else ""
+            if price <= 0:
+                return "n/a"
+            if size_usd > 0:
+                return f"{price:,.2f} (${size_usd/1e6:.1f}M{bucket_tag})"
+            return f"{price:,.2f}{bucket_tag}"
+
+        if top_above == "n/a":
+            top_above = (
+                _liq_text_from_row(liq_ctx.get("top_above"))
+                if liq_ctx.get("top_above")
+                else _liq_text_from_row(okx_ctx.get("mid_above") or okx_ctx.get("far_above"))
+            )
+            if top_above == "n/a":
+                top_above = _liq_text_from_row(((liq_map.get("short_liq_zones") or [])[:1] or [None])[0])
+        if top_below == "n/a":
+            top_below = (
+                _liq_text_from_row(liq_ctx.get("top_below"))
+                if liq_ctx.get("top_below")
+                else _liq_text_from_row(okx_ctx.get("mid_below") or okx_ctx.get("far_below"))
+            )
+            if top_below == "n/a":
+                top_below = _liq_text_from_row(((liq_map.get("long_liq_zones") or [])[:1] or [None])[0])
 
         def _scenario_line(label, row):
             if not row:
