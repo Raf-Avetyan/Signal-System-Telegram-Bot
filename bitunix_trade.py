@@ -2180,6 +2180,27 @@ class TradeExecutor:
         execution["sl_moved_to"] = new_sl
         return ExecutionResult(self.mode, True, f"Moved SL to {new_sl:.2f}.", execution)
 
+    def manual_move_stop_to_breakeven(self, signal: Dict[str, Any]) -> ExecutionResult:
+        self._refresh_state()
+        execution = (signal or {}).get("execution") or {}
+        if not execution or not execution.get("active"):
+            return ExecutionResult(self.mode, False, "No active exchange execution found for this signal.", {})
+        new_sl = self._breakeven_lock_price(signal, execution)
+        if new_sl <= 0:
+            return ExecutionResult(self.mode, False, "Protected breakeven price is invalid.", execution)
+        symbol = execution.get("symbol")
+        position_id = execution.get("position_id")
+        if not symbol or not position_id:
+            return ExecutionResult(self.mode, False, "Missing exchange position reference.", execution)
+        if self.mode != "live":
+            signal["sl"] = new_sl
+            execution["sl_moved_to"] = new_sl
+            return ExecutionResult(self.mode, True, "Demo stop moved to protected breakeven.", execution)
+        self._update_position_stop(symbol, str(position_id), signal, execution, new_sl)
+        signal["sl"] = new_sl
+        execution["sl_moved_to"] = new_sl
+        return ExecutionResult(self.mode, True, f"Moved SL to protected breakeven at {new_sl:.2f}.", execution)
+
     def manual_set_tp(self, signal: Dict[str, Any], tp_index: int, new_price: float) -> ExecutionResult:
         self._refresh_state()
         execution = (signal or {}).get("execution") or {}

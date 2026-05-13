@@ -3302,7 +3302,7 @@ class PonchBot:
         if self._intent_has_any_normalized(normalized, ["move stop to entry", "set stop to entry", "stop to entry", "move sl to entry"]):
             return {"action": "move_sl_entry"}
         if self._intent_has_any_normalized(normalized, ["move stop to breakeven", "set stop to breakeven", "move sl to breakeven", "break even stop"]):
-            return {"action": "move_sl_entry"}
+            return {"action": "move_sl_breakeven"}
         if self._intent_has_any_normalized(normalized, ["set tp1", "move tp1", "change tp1"]):
             return {"action": "set_tp", "tp_index": 1}
         if self._intent_has_any_normalized(normalized, ["set tp2", "move tp2", "change tp2"]):
@@ -4363,6 +4363,8 @@ class PonchBot:
         kind = str(action.get("action") or "").lower()
         if kind == "move_sl_entry":
             return "Move stop to breakeven/entry"
+        if kind == "move_sl_breakeven":
+            return "Move stop to protected breakeven"
         if kind == "move_sl":
             return f"Move stop to {float(action.get('price') or 0):.2f}"
         if kind == "set_tp":
@@ -4577,7 +4579,7 @@ class PonchBot:
                 return "Which tracked signal do you want to open? Send the ID, or say the side and timeframe."
             return None
 
-        if action_type in {"move_sl_entry", "move_sl", "set_tp", "set_single_tp", "set_tp_split", "cancel_tp", "close_full", "close_partial", "status", "move_sl_tp", "rebuild_protection"}:
+        if action_type in {"move_sl_entry", "move_sl_breakeven", "move_sl", "set_tp", "set_single_tp", "set_tp_split", "cancel_tp", "close_full", "close_partial", "status", "move_sl_tp", "rebuild_protection"}:
             if not self._resolve_signal_for_action(action, allow_unexecuted=False):
                 if len(active) > 1:
                     return "Which open position do you mean? Send the ID, or say the side and timeframe."
@@ -4595,6 +4597,9 @@ class PonchBot:
         if action_type == "move_sl":
             if action.get("price") in (None, "", 0, 0.0, "0"):
                 return "What stop-loss price do you want?"
+            return None
+
+        if action_type == "move_sl_breakeven":
             return None
 
         if action_type == "set_tp":
@@ -4836,6 +4841,8 @@ class PonchBot:
 
         if action_type == "move_sl_entry":
             result = self.trade_executor.manual_move_stop(sig, float(sig.get("entry") or 0))
+        elif action_type == "move_sl_breakeven":
+            result = self.trade_executor.manual_move_stop_to_breakeven(sig)
         elif action_type == "move_sl_tp":
             tp_index = int(action.get("tp_index") or 0)
             tp_price = float(sig.get(f"tp{tp_index}") or 0)
