@@ -555,6 +555,20 @@ class PonchBot:
         if not prompt:
             return False
 
+        recent_ctx = self._recent_group_chat_context(message)
+        fallback_symbol = str(recent_ctx.get("symbol") or "").strip().upper() or None
+
+        if self._looks_like_bitcoin_plans_request(prompt):
+            handled = self._handle_btc_market_command(
+                chat_id=chat_id,
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=message_thread_id,
+                mode="short_term",
+            )
+            if handled:
+                self._remember_group_chat_context(message, prompt=prompt, answer="btc plans", symbol="BTCUSDT")
+            return handled
+
         if not GEMINI_API_KEY:
             self._send_text_chunks(
                 chat_id,
@@ -566,7 +580,7 @@ class PonchBot:
 
         if self._looks_like_chart_question(prompt):
             try:
-                answer = self._build_symbol_chart_chat_answer(prompt)
+                answer = self._build_symbol_chart_chat_answer(prompt, fallback_symbol=fallback_symbol)
             except Exception as e:
                 answer = f"I tried to load that chart from Bitunix/OKX, but it failed this time: {e}"
             self._send_text_chunks(
@@ -575,7 +589,26 @@ class PonchBot:
                 reply_to_message_id=reply_to_message_id,
                 message_thread_id=message_thread_id,
             )
+            self._remember_group_chat_context(
+                message,
+                prompt=prompt,
+                answer=answer,
+                symbol=self._extract_symbol_from_text(prompt) or fallback_symbol or "",
+            )
             return True
+
+        reply_anchor = ""
+        reply_to = message.get("reply_to_message") or {}
+        if bool((reply_to.get("from") or {}).get("is_bot")):
+            prev_prompt = str(recent_ctx.get("prompt") or "").strip()
+            prev_answer = str(recent_ctx.get("answer") or "").strip()
+            if prev_prompt or prev_answer:
+                reply_anchor = (
+                    "\n\nThe user is replying to one of your earlier group messages. "
+                    "Use this recent context if it helps:\n"
+                    f"Earlier user prompt: {prev_prompt or 'N/A'}\n"
+                    f"Your earlier answer: {prev_answer or 'N/A'}\n"
+                )
 
         group_context = (
             "You are answering inside the Mr. Ponch Telegram general discussion topic. "
@@ -586,6 +619,7 @@ class PonchBot:
             f"Group chat title: {chat_obj.get('title') or 'Unknown'}\n"
             f"Thread id: {self._normalized_signal_thread_id(chat_id, message_thread_id)}\n\n"
             f"{self._build_gemini_trade_context()}"
+            f"{reply_anchor}"
         )
         answer = self._ask_private_chat_question(prompt, context_text=group_context)
         answer = str(answer or "").strip()
@@ -598,6 +632,7 @@ class PonchBot:
             reply_to_message_id=reply_to_message_id,
             message_thread_id=message_thread_id,
         )
+        self._remember_group_chat_context(message, prompt=prompt, answer=answer, symbol=fallback_symbol or "")
         return True
 
     def _is_chat_admin_user(self, chat_id, user_id):
