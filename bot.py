@@ -12,6 +12,7 @@ import json
 import re
 import html
 import requests
+from zoneinfo import ZoneInfo
 
 from config import (
     BOT_TOKEN,
@@ -149,6 +150,7 @@ class PonchBot:
         self.session_data = {}         # { "LONDON_2024-03-15": {"open": 70000, "levels": set()} }
         self.session_history = {}      # { "ASIA": "Asia recap text" }
         self.state_file = "bot_state.json"
+        self.local_tz = ZoneInfo("Asia/Yerevan")
         
         state = self._load_state()
         self.daily_report_msg_id = state.get("daily_report_msg_id")
@@ -169,6 +171,7 @@ class PonchBot:
         self.last_liquidation_map_date = state.get("last_liquidation_map_date")
         self.last_education_post_date = state.get("last_education_post_date")
         self.last_education_post_slot = state.get("last_education_post_slot")
+        self.last_today_wins_batch_date = state.get("last_today_wins_batch_date")
         self.scenario_trade_cooldowns = state.get("scenario_trade_cooldowns", {})
         if not self.last_education_post_slot and self.last_education_post_date:
             self.last_education_post_slot = f"{self.last_education_post_date} 08"
@@ -1618,6 +1621,124 @@ class PonchBot:
                     os.remove(chart_path)
             except Exception:
                 pass
+
+    def _signal_logged_local_date(self, sig):
+        sig = sig or {}
+        raw_logged = sig.get("logged_at") or sig.get("closed_at") or sig.get("timestamp")
+        dt = None
+        if raw_logged:
+            raw_text = str(raw_logged).strip()
+            for candidate in (raw_text, raw_text.replace("Z", "+00:00")):
+                try:
+                    dt = datetime.fromisoformat(candidate)
+                    break
+                except Exception:
+                    continue
+            if dt is None:
+                for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+                    try:
+                        dt = datetime.strptime(raw_text, fmt)
+                        break
+                    except Exception:
+                        continue
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(self.local_tz).date()
+
+    def _send_today_wins_batch_card(self, sig, batch_date_key):
+        if not sig:
+            return False
+        target_chat = self._signal_chat_id()
+        target_thread = self._success_trades_thread_id()
+        if not target_chat or target_thread <= 0:
+            return False
+
+        status = str(sig.get("status") or "OPEN").upper()
+        if status == "TP3":
+            outcome_label = "Full Target Win"
+            note = "Finished the full target sequence during the day."
+        elif status == "PROFIT_SL":
+            outcome_label = "Protected Win"
+            note = "Locked profit on the stop after targets were reached."
+        elif status == "ENTRY_CLOSE":
+            outcome_label = "Managed Win"
+            note = "Touched targets and later closed flat on the runner."
+        elif status == "SL":
+            outcome_label = "Partial Win"
+            note = "Paid at least TP1 before the stop closed the rest."
+        elif bool(sig.get("tp2_hit")):
+            outcome_label = "TP2 Reached"
+            note = "Reached TP2 during the day and stayed on the winners list."
+        else:
+            outcome_label = "TP1 Reached"
+            note = "Reached TP1 during the day and qualifies for Today’s Wins."
+
+        outcome_key, r_mult = self.tracker._metric_outcome(sig)
+        if outcome_key == "open":
+            r_mult = 0.0
+        symbol = str(sig.get("symbol") or (sig.get("meta") or {}).get("symbol") or SYMBOL).upper()
+        live_price = self._current_market_price(sig.get("tf"), symbol=symbol)
+        chart_path = self._generate_signal_snapshot_chart(
+            sig,
+            output_name=f"today_wins_{str(sig.get('signal_id') or 'sig')}.png",
+            close_price=float(live_price or sig.get("tp2") or sig.get("tp1") or sig.get("entry") or 0),
+            event_label="TODAY WIN",
+            title="TODAY'S WIN",
+        )
+        try:
+            caption = self._success_trade_caption(sig, outcome_label, r_mult, note, close_price=live_price)
+            resp = None
+            if chart_path:
+                resp = tg.send_photo(
+                    chart_path,
+                    caption=caption,
+                    chat_id=target_chat,
+                    message_thread_id=target_thread,
+                )
+            else:
+                resp = tg.send(
+                    caption,
+                    parse_mode="HTML",
+                    chat_id=target_chat,
+                    message_thread_id=target_thread,
+                )
+            if resp:
+                sig["today_wins_batch_date"] = batch_date_key
+                self._save_state()
+                return True
+            return False
+        finally:
+            try:
+                import os
+                if chart_path and os.path.exists(chart_path):
+                    os.remove(chart_path)
+            except Exception:
+                pass
+
+    def _send_today_wins_batch(self, now_utc):
+        now_utc = now_utc.astimezone(timezone.utc) if now_utc.tzinfo else now_utc.replace(tzinfo=timezone.utc)
+        target_local_date = (now_utc.astimezone(self.local_tz) - timedelta(days=1)).date()
+        batch_date_key = target_local_date.isoformat()
+        winners = []
+        for sig in list(self.tracker.signals or []):
+            if not bool(sig.get("tp1_hit")):
+                continue
+            if str(sig.get("today_wins_batch_date") or "").strip() == batch_date_key:
+                continue
+            sig_local_date = self._signal_logged_local_date(sig)
+            if sig_local_date != target_local_date:
+                continue
+            winners.append(sig)
+        winners.sort(key=lambda s: str(s.get("logged_at") or s.get("timestamp") or ""))
+        sent = 0
+        for sig in winners:
+            if self._send_today_wins_batch_card(sig, batch_date_key):
+                sent += 1
+        self.last_today_wins_batch_date = batch_date_key
+        self._save_state()
+        return sent
 
     def _member_education_posts(self):
         return [
@@ -6273,6 +6394,7 @@ class PonchBot:
                 "last_liquidation_map_date": self.last_liquidation_map_date,
                 "last_education_post_date": self.last_education_post_date,
                 "last_education_post_slot": self.last_education_post_slot,
+                "last_today_wins_batch_date": self.last_today_wins_batch_date,
                 "scenario_trade_cooldowns": self.scenario_trade_cooldowns,
                 "education_post_index": self.education_post_index,
                 "pending_exec_action": self.pending_exec_action,
@@ -6388,6 +6510,13 @@ class PonchBot:
 
         # 1. Update Levels if new day
         self._update_levels_if_needed(now)
+
+        now_local = now.astimezone(self.local_tz)
+        if now_local.hour == 0 and now_local.minute == 0:
+            batch_key = (now_local.date() - timedelta(days=1)).isoformat()
+            if self.last_today_wins_batch_date != batch_key:
+                sent_today_wins = self._send_today_wins_batch(now)
+                print(f"  [TG] Today Wins midnight batch: {sent_today_wins} signal{'s' if sent_today_wins != 1 else ''}.")
 
         # 1.5 Scheduled Daily Summary (12:00 PM Local / 08:00 UTC)
         if now.hour == 8 and now.minute == 0:
