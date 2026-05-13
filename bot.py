@@ -704,6 +704,52 @@ class PonchBot:
                     message_thread_id=message_thread_id,
                 )
                 return True
+            pending_mode = str((self.pending_exec_action or {}).get("mode") or "confirm").lower()
+            pending_action = dict((self.pending_exec_action or {}).get("action") or {})
+            pending_source = str((self.pending_exec_action or {}).get("source_text") or "")
+            locally_updated = self._apply_followup_to_pending_action(pending_action, prompt)
+            local_changed = json.dumps(locally_updated, sort_keys=True, default=str) != json.dumps(pending_action, sort_keys=True, default=str)
+            if pending_mode == "clarify":
+                if lower in {"no", "n", "cancel", "stop"}:
+                    self.pending_exec_action = None
+                    self._save_state()
+                    self._send_text_chunks(
+                        chat_id,
+                        "Pending action cancelled.",
+                        reply_to_message_id=reply_to_message_id,
+                        message_thread_id=message_thread_id,
+                    )
+                    return True
+                if local_changed:
+                    need_more = self._needs_exec_clarification(locally_updated)
+                    if need_more:
+                        self.pending_exec_action = {
+                            "created_at": time.time(),
+                            "chat_id": str(chat_id or ""),
+                            "thread_id": str(self._normalized_signal_thread_id(chat_id, message_thread_id) or ""),
+                            "user_id": str((from_obj.get("id") or "")),
+                            "action": locally_updated,
+                            "mode": "clarify",
+                            "scope": "general",
+                            "source_text": pending_source or prompt,
+                        }
+                        self._save_state()
+                        self._send_text_chunks(
+                            chat_id,
+                            need_more,
+                            reply_to_message_id=reply_to_message_id,
+                            message_thread_id=message_thread_id,
+                        )
+                        return True
+                    _ask_group_exec_confirm(locally_updated, source_text=pending_source or prompt)
+                    return True
+                self._send_text_chunks(
+                    chat_id,
+                    "I still need the missing detail for that action.",
+                    reply_to_message_id=reply_to_message_id,
+                    message_thread_id=message_thread_id,
+                )
+                return True
             if lower in {"yes", "y", "confirm", "do it", "execute"}:
                 action = dict((self.pending_exec_action or {}).get("action") or {})
                 self.pending_exec_action = None
