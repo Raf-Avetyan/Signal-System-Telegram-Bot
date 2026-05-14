@@ -511,9 +511,11 @@ class PonchBot:
         memory_excerpt = self._read_general_group_memory_tail()
 
         group_context = (
+            "You are answering inside the Mr. Ponch Telegram general discussion topic. "
+            "Treat normal symbol questions as market analysis requests. "
+            "Do not mention the user's live balance, open positions, leverage, margin mode, or Bitunix account status unless the user explicitly asks about their account or positions.\n\n"
             f"Group mention chat title: {chat_obj.get('title') or 'Unknown'}\n"
-            f"Thread id: {self._normalized_signal_thread_id(chat_id, message_thread_id)}\n\n"
-            f"{self._build_gemini_trade_context()}"
+            f"Thread id: {self._normalized_signal_thread_id(chat_id, message_thread_id)}"
         )
         if memory_excerpt:
             group_context += f"\n\nRecent group markdown memory:\n{memory_excerpt}"
@@ -679,6 +681,12 @@ class PonchBot:
         fallback_symbol = str(recent_ctx.get("symbol") or "").strip().upper() or None
         memory_excerpt = self._read_general_group_memory_tail()
         lower = prompt.lower().strip()
+        explicit_account_request = any((
+            self._looks_like_account_status_text(lower),
+            self._looks_like_balance_only_text(lower),
+            self._looks_like_open_positions_text(lower),
+            self._looks_like_account_mode_text(lower),
+        ))
 
         def _ask_group_exec_confirm(action_obj, source_text=None):
             action_text = self._preview_exec_action(action_obj).strip().rstrip(".")
@@ -807,16 +815,20 @@ class PonchBot:
             if direct_action and str(direct_action.get("action") or "").lower():
                 direct_type = str(direct_action.get("action") or "").lower()
                 if direct_type == "status":
-                    self.runtime_exec_reply_target = {
-                        "chat_id": chat_id,
-                        "message_thread_id": message_thread_id,
-                        "reply_to_message_id": reply_to_message_id,
-                    }
-                    try:
-                        self._apply_private_exec_action(direct_action)
-                    finally:
-                        self.runtime_exec_reply_target = None
-                    return True
+                    if not explicit_account_request:
+                        direct_action = None
+                    else:
+                        self.runtime_exec_reply_target = {
+                            "chat_id": chat_id,
+                            "message_thread_id": message_thread_id,
+                            "reply_to_message_id": reply_to_message_id,
+                        }
+                        try:
+                            self._apply_private_exec_action(direct_action)
+                        finally:
+                            self.runtime_exec_reply_target = None
+                        return True
+            if direct_action and str(direct_action.get("action") or "").lower():
                 need_more = self._needs_exec_clarification(direct_action)
                 if need_more:
                     self.pending_exec_action = {
@@ -877,16 +889,20 @@ class PonchBot:
         action_type = str((parsed or {}).get("action") or "unsupported").lower()
         if action_type not in {"", "unsupported"}:
             if action_type == "status":
-                self.runtime_exec_reply_target = {
-                    "chat_id": chat_id,
-                    "message_thread_id": message_thread_id,
-                    "reply_to_message_id": reply_to_message_id,
-                }
-                try:
-                    self._apply_private_exec_action(parsed)
-                finally:
-                    self.runtime_exec_reply_target = None
-                return True
+                if explicit_account_request:
+                    self.runtime_exec_reply_target = {
+                        "chat_id": chat_id,
+                        "message_thread_id": message_thread_id,
+                        "reply_to_message_id": reply_to_message_id,
+                    }
+                    try:
+                        self._apply_private_exec_action(parsed)
+                    finally:
+                        self.runtime_exec_reply_target = None
+                    return True
+                parsed = None
+                action_type = "unsupported"
+        if parsed and action_type not in {"", "unsupported"}:
             need_more = self._needs_exec_clarification(parsed)
             if need_more:
                 self.pending_exec_action = {
@@ -914,16 +930,19 @@ class PonchBot:
         if direct_action and str(direct_action.get("action") or "").lower():
             direct_type = str(direct_action.get("action") or "").lower()
             if direct_type == "status":
-                self.runtime_exec_reply_target = {
-                    "chat_id": chat_id,
-                    "message_thread_id": message_thread_id,
-                    "reply_to_message_id": reply_to_message_id,
-                }
-                try:
-                    self._apply_private_exec_action(direct_action)
-                finally:
-                    self.runtime_exec_reply_target = None
-                return True
+                if explicit_account_request:
+                    self.runtime_exec_reply_target = {
+                        "chat_id": chat_id,
+                        "message_thread_id": message_thread_id,
+                        "reply_to_message_id": reply_to_message_id,
+                    }
+                    try:
+                        self._apply_private_exec_action(direct_action)
+                    finally:
+                        self.runtime_exec_reply_target = None
+                    return True
+                direct_action = None
+        if direct_action and str(direct_action.get("action") or "").lower():
             need_more = self._needs_exec_clarification(direct_action)
             if need_more:
                 self.pending_exec_action = {
@@ -964,11 +983,12 @@ class PonchBot:
             "You are answering inside the Mr. Ponch Telegram general discussion topic. "
             "Reply naturally and conversationally, like a helpful trading assistant in group chat. "
             "Keep answers clear and not too long. "
+            "Treat normal symbol questions as market analysis requests. "
+            "Do not mention the user's live balance, open positions, leverage, margin mode, or Bitunix account status unless the user explicitly asks about their account or positions. "
             "If the topic is politics, religion, ethnicity, nationality, or identity, stay neutral, respectful, and factual. "
             "Do not express partisan loyalty, hatred, or favoritism.\n\n"
             f"Group chat title: {chat_obj.get('title') or 'Unknown'}\n"
             f"Thread id: {self._normalized_signal_thread_id(chat_id, message_thread_id)}\n\n"
-            f"{self._build_gemini_trade_context()}"
             f"{reply_anchor}"
         )
         if memory_excerpt:
@@ -4219,7 +4239,7 @@ class PonchBot:
         lower = text_str.lower()
         chart_cues = (
             "chart", "analysis", "analyse", "analyze", "think about", "thoughts on",
-            "what do you think", "bullish", "bearish", "long", "short", "support",
+            "what do you think", "what about", "bullish", "bearish", "long", "short", "support",
             "resistance", "trend", "setup", "entry", "pump", "dump", "move", "direction",
         )
         return ("?" in text_str) or any(cue in lower for cue in chart_cues)
