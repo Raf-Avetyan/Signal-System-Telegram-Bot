@@ -4213,20 +4213,90 @@ class PonchBot:
             "ETHEREUM": "ETHUSDT",
             "SOL": "SOLUSDT",
             "SOLANA": "SOLUSDT",
+            "HYPE": "HYPEUSDT",
+            "HYPERLIQUID": "HYPEUSDT",
             "XRP": "XRPUSDT",
             "RIPPLE": "XRPUSDT",
             "DOGE": "DOGEUSDT",
+            "DOGECOIN": "DOGEUSDT",
             "BNB": "BNBUSDT",
+            "BINANCECOIN": "BNBUSDT",
             "ADA": "ADAUSDT",
             "CARDANO": "ADAUSDT",
             "AVAX": "AVAXUSDT",
             "AVALANCHE": "AVAXUSDT",
             "LINK": "LINKUSDT",
             "CHAINLINK": "LINKUSDT",
+            "SUI": "SUIUSDT",
+            "APT": "APTUSDT",
+            "APTOS": "APTUSDT",
+            "ARB": "ARBUSDT",
+            "ARBITRUM": "ARBUSDT",
+            "OP": "OPUSDT",
+            "OPTIMISM": "OPUSDT",
+            "INJ": "INJUSDT",
+            "NEAR": "NEARUSDT",
+            "ATOM": "ATOMUSDT",
+            "COSMOS": "ATOMUSDT",
+            "DOT": "DOTUSDT",
+            "POLKADOT": "DOTUSDT",
+            "LTC": "LTCUSDT",
+            "LITECOIN": "LTCUSDT",
+            "BCH": "BCHUSDT",
+            "BITCOINCASH": "BCHUSDT",
+            "UNI": "UNIUSDT",
+            "UNISWAP": "UNIUSDT",
+            "PEPE": "PEPEUSDT",
+            "TRX": "TRXUSDT",
+            "TRON": "TRXUSDT",
+            "TON": "TONUSDT",
+            "TONCOIN": "TONUSDT",
+            "WIF": "WIFUSDT",
+            "BONK": "BONKUSDT",
+            "FET": "FETUSDT",
+            "RENDER": "RENDERUSDT",
+            "RNDR": "RENDERUSDT",
+            "SEI": "SEIUSDT",
+            "TIA": "TIAUSDT",
+            "JUP": "JUPUSDT",
+            "FIL": "FILUSDT",
+            "FILECOIN": "FILUSDT",
+            "ETC": "ETCUSDT",
+            "ETHEREUMCLASSIC": "ETCUSDT",
+            "AAVE": "AAVEUSDT",
+            "ONDO": "ONDOUSDT",
+            "HBAR": "HBARUSDT",
+            "ICP": "ICPUSDT",
+            "KAS": "KASUSDT",
+            "KASPA": "KASUSDT",
+            "XLM": "XLMUSDT",
+            "STELLAR": "XLMUSDT",
         }
+        ambiguous_aliases = {"NEAR", "LINK", "TON"}
         for key, value in aliases.items():
+            if key in ambiguous_aliases:
+                explicit_patterns = [
+                    rf"\b(?:WHAT ABOUT|ANALYZE|ANALYSIS|CHECK|THOUGHTS ON|COIN|TOKEN)\s+{key}\b",
+                    rf"\b{key}USDT\b",
+                    rf"\${key}\b",
+                ]
+                if any(re.search(pattern, raw) for pattern in explicit_patterns):
+                    return value
+                continue
             if re.search(rf"\b{key}\b", raw):
                 return value
+        cue_match = re.search(
+            r"\b(?:ABOUT|ANALYZE|ANALYSIS|CHECK|LOOK AT|THOUGHTS ON|WHAT ABOUT|COIN|TOKEN)\s+([A-Z]{2,10})\b",
+            raw,
+        )
+        if cue_match:
+            candidate = cue_match.group(1).upper()
+            blocked = {
+                "WHAT", "ABOUT", "CHART", "CHECK", "LOOK", "THINK", "THOUGHTS", "PRICE",
+                "LONG", "SHORT", "BULLISH", "BEARISH", "TREND", "SETUP", "ENTRY",
+            }
+            if candidate not in blocked:
+                return f"{candidate}USDT"
         return None
 
     def _looks_like_chart_question(self, text):
