@@ -8,8 +8,17 @@ import pandas as pd
 
 from bitunix_trade import BitunixFuturesClient
 from channels import calculate_channels, check_channel_signals
-from config import SYMBOL
+from config import SYMBOL, MULTI_EXCHANGE_CONTEXT_ENABLED, MULTI_EXCHANGE_LIQ_MIN_USD
 from data import (
+    fetch_binance_funding_rate,
+    fetch_binance_open_interest,
+    fetch_binance_order_book,
+    fetch_bitget_btc_funding_rate,
+    fetch_bitget_open_interest,
+    fetch_bitget_order_book,
+    fetch_bybit_funding_rate,
+    fetch_bybit_open_interest,
+    fetch_bybit_order_book,
     fetch_funding_rate as fetch_okx_funding_rate,
     fetch_liquidation_orders,
     fetch_liquidations,
@@ -339,6 +348,171 @@ def _liquidity_context(book, current_price, atr_1h):
             f"{_fmt_price(top_below.get('level_price'))} (${top_below.get('size_usd', 0)/1e6:.1f}M)"
             if top_below else "n/a"
         ),
+    }
+
+
+def _pick_exchange_liq_candidates(order_book, current_price, atr_1h, *, min_dist_pct, max_mult, bucket_pct=0.10, min_size_usd=None):
+    if not order_book or current_price <= 0:
+        return None, None
+    rows = detect_liquidity_candidates(
+        order_book=order_book,
+        price=current_price,
+        atr=max(atr_1h, current_price * 0.0025),
+        timeframe="multi-exchange",
+        max_distance_atr_mult=max_mult,
+        bucket_pct=bucket_pct,
+    )
+    size_floor = float(min_size_usd or MULTI_EXCHANGE_LIQ_MIN_USD or 0.0)
+    above = [
+        row for row in rows
+        if row.get("side") == "LONG"
+        and float(row.get("distance_pct", 0) or 0) >= min_dist_pct
+        and float(row.get("size_usd", 0) or 0) >= size_floor
+    ]
+    below = [
+        row for row in rows
+        if row.get("side") == "SHORT"
+        and float(row.get("distance_pct", 0) or 0) >= min_dist_pct
+        and float(row.get("size_usd", 0) or 0) >= size_floor
+    ]
+    return (above[0] if above else None), (below[0] if below else None)
+
+
+def _zone_fmt(item):
+    if not item:
+        return "n/a"
+    level = _safe_float(item.get("level_price") or item.get("price"))
+    size_usd = _safe_float(item.get("size_usd"))
+    exchange = str(item.get("exchange") or item.get("source") or "zone").upper()
+    if size_usd > 0:
+        return f"{_fmt_price(level)} (${size_usd/1e6:.1f}M, {exchange})"
+    return f"{_fmt_price(level)} ({exchange})"
+
+
+def _multi_exchange_context(current_price, atr_1h, levels, symbol=SYMBOL):
+    if not MULTI_EXCHANGE_CONTEXT_ENABLED:
+        return {
+            "funding": {},
+            "funding_consensus": "flat",
+            "funding_support_long": 0,
+            "funding_support_short": 0,
+            "funding_disagreement": False,
+            "liquidity_above": [],
+            "liquidity_below": [],
+            "top_above": None,
+            "top_below": None,
+            "summary_above": "n/a",
+            "summary_below": "n/a",
+            "oi": {},
+            "books": {},
+        }
+
+    def _fetch_exchange(name):
+        key = str(name or "").lower()
+        if key == "okx":
+            return {
+                "funding_rate": _safe_float(fetch_okx_funding_rate(symbol=symbol)),
+                "open_interest": _safe_float(fetch_open_interest(symbol=symbol)),
+                "order_book": fetch_okx_order_book(symbol=symbol, depth=400),
+            }
+        if key == "binance":
+            return {
+                "funding_rate": _safe_float(fetch_binance_funding_rate(symbol=symbol)),
+                "open_interest": _safe_float(fetch_binance_open_interest(symbol=symbol)),
+                "order_book": fetch_binance_order_book(symbol=symbol, depth=500),
+            }
+        if key == "bybit":
+            return {
+                "funding_rate": _safe_float(fetch_bybit_funding_rate(symbol=symbol)),
+                "open_interest": _safe_float(fetch_bybit_open_interest(symbol=symbol)),
+                "order_book": fetch_bybit_order_book(symbol=symbol, depth=500),
+            }
+        if key == "bitget":
+            return {
+                "funding_rate": _safe_float(fetch_bitget_btc_funding_rate(symbol=symbol)),
+                "open_interest": _safe_float(fetch_bitget_open_interest(symbol=symbol)),
+                "order_book": fetch_bitget_order_book(symbol=symbol, depth=200),
+            }
+        return {}
+
+    exchanges = ("okx", "binance", "bybit", "bitget")
+    raw = {}
+    with ThreadPoolExecutor(max_workers=len(exchanges)) as pool:
+        futures = {pool.submit(_fetch_exchange, name): name for name in exchanges}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                raw[name] = future.result() or {}
+            except Exception:
+                raw[name] = {}
+
+    funding = {}
+    oi = {}
+    books = {}
+    above_rows = []
+    below_rows = []
+    for name in exchanges:
+        row = raw.get(name) or {}
+        rate = _safe_float(row.get("funding_rate"))
+        if math.isfinite(rate) and rate != 0:
+            funding[name] = rate
+        oi_val = _safe_float(row.get("open_interest"))
+        if math.isfinite(oi_val) and oi_val > 0:
+            oi[name] = oi_val
+        book = row.get("order_book")
+        if book:
+            books[name] = book
+            above, below = _pick_exchange_liq_candidates(
+                book,
+                current_price,
+                atr_1h,
+                min_dist_pct=0.55,
+                max_mult=12.0,
+                bucket_pct=0.10 if name != "bitget" else 0.08,
+            )
+            if above:
+                above = dict(above)
+                above["exchange"] = name
+                above_rows.append(above)
+            if below:
+                below = dict(below)
+                below["exchange"] = name
+                below_rows.append(below)
+
+    above_rows = sorted(above_rows, key=lambda item: float(item.get("size_usd", 0) or 0), reverse=True)
+    below_rows = sorted(below_rows, key=lambda item: float(item.get("size_usd", 0) or 0), reverse=True)
+    top_above = above_rows[0] if above_rows else None
+    top_below = below_rows[0] if below_rows else None
+
+    support_long = 0
+    support_short = 0
+    for name, rate in funding.items():
+        weight = 2 if name == "bitget" else 1
+        if rate < 0:
+            support_long += weight
+        elif rate > 0:
+            support_short += weight
+    if support_long > support_short:
+        funding_consensus = "long"
+    elif support_short > support_long:
+        funding_consensus = "short"
+    else:
+        funding_consensus = "flat"
+
+    return {
+        "funding": funding,
+        "funding_consensus": funding_consensus,
+        "funding_support_long": support_long,
+        "funding_support_short": support_short,
+        "funding_disagreement": bool(support_long and support_short),
+        "liquidity_above": above_rows,
+        "liquidity_below": below_rows,
+        "top_above": top_above,
+        "top_below": top_below,
+        "summary_above": _zone_fmt(top_above),
+        "summary_below": _zone_fmt(top_below),
+        "oi": oi,
+        "books": books,
     }
 
 
@@ -764,7 +938,7 @@ def _scenario_mode_config(mode):
     }
 
 
-def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticker_ctx, liq_ctx, okx_ctx, liq_map, mode="swing", max_scenarios=4):
+def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticker_ctx, liq_ctx, okx_ctx, liq_map, multi_ctx=None, mode="swing", max_scenarios=4):
     current_price = _safe_float(current_price)
     mode_cfg = _scenario_mode_config(mode)
     tf_weights = {"1M": 4.0, "1w": 3.0, "1d": 2.0, "4h": 2.0, "1h": 1.0}
@@ -825,6 +999,24 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
     okx_far_below = (okx_ctx or {}).get("far_below") or {}
     okx_liq_usd = _safe_float((okx_ctx or {}).get("liquidations_usd"))
     okx_oi = _safe_float((okx_ctx or {}).get("oi"))
+    mex_top_above = (multi_ctx or {}).get("top_above") or {}
+    mex_top_below = (multi_ctx or {}).get("top_below") or {}
+    funding_consensus = str((multi_ctx or {}).get("funding_consensus") or "flat")
+    funding_support_long = int((multi_ctx or {}).get("funding_support_long") or 0)
+    funding_support_short = int((multi_ctx or {}).get("funding_support_short") or 0)
+
+    if not next_support and mex_top_below:
+        next_support = {
+            "price": _safe_float(mex_top_below.get("level_price")),
+            "size_usd": _safe_float(mex_top_below.get("size_usd")),
+            "source": f"{str(mex_top_below.get('exchange') or 'multi').upper()} wall",
+        }
+    if not next_resistance and mex_top_above:
+        next_resistance = {
+            "price": _safe_float(mex_top_above.get("level_price")),
+            "size_usd": _safe_float(mex_top_above.get("size_usd")),
+            "source": f"{str(mex_top_above.get('exchange') or 'multi').upper()} wall",
+        }
 
     scenarios = []
 
@@ -859,6 +1051,11 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
             probability += 2.0
         if funding_bias == "shorts paying":
             probability += 2.0
+        if funding_consensus == "long":
+            probability += 2.0
+        elif funding_consensus == "short":
+            probability -= 2.0
+        probability += min(2.0, max(0.0, funding_support_long - funding_support_short) * 0.5)
         if book_pressure == "bullish":
             probability += 3.0
         if range_position < 0.45:
@@ -867,6 +1064,8 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
             probability += 2.0
         if okx_mid_below:
             probability += 2.0
+        if mex_top_below:
+            probability += 1.5
         if okx_liq_usd >= 10_000_000:
             probability += 1.0
         if dominant_side == "shorts_vulnerable":
@@ -908,11 +1107,13 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
                     f"If BTC sweeps {_format_cluster(planning_support)}"
                     + (f" with a flush into major long-liq zone {_fmt_price(next_support.get('price'))}" if next_support else "")
                     + (f" and tags OKX mid-zone {_fmt_price(okx_mid_below.get('level_price'))}" if okx_mid_below else "")
+                    + (f" near {str(mex_top_below.get('exchange') or '').upper()} liquidity {_fmt_price(mex_top_below.get('level_price'))}" if mex_top_below else "")
                     + " and reclaims on 15m, long the bounce."
                 ),
                 "note": (
                     "Use only after reclaim confirmation."
                     + (" Funding supports this long." if funding_bias == "shorts paying" else "")
+                    + (" Cross-exchange funding leans long." if funding_consensus == "long" else "")
                     + (" Liquidation pressure is elevated." if okx_liq_usd >= 10_000_000 else "")
                     + (" Shorts look more vulnerable." if dominant_side == "shorts_vulnerable" else "")
                 ),
@@ -939,6 +1140,11 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
             probability += 2.0
         if funding_bias == "longs paying":
             probability += 2.0
+        if funding_consensus == "short":
+            probability += 2.0
+        elif funding_consensus == "long":
+            probability -= 2.0
+        probability += min(2.0, max(0.0, funding_support_short - funding_support_long) * 0.5)
         if book_pressure == "bearish":
             probability += 3.0
         if range_position > 0.55:
@@ -947,6 +1153,8 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
             probability += 2.0
         if okx_mid_above:
             probability += 2.0
+        if mex_top_above:
+            probability += 1.5
         if okx_liq_usd >= 10_000_000:
             probability += 1.0
         if dominant_side == "longs_vulnerable":
@@ -988,11 +1196,13 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
                     f"If BTC runs into {_format_cluster(planning_resistance)}"
                     + (f" with an extension into major short-liq zone {_fmt_price(next_resistance.get('price'))}" if next_resistance else "")
                     + (f" and tags OKX mid-zone {_fmt_price(okx_mid_above.get('level_price'))}" if okx_mid_above else "")
+                    + (f" near {str(mex_top_above.get('exchange') or '').upper()} liquidity {_fmt_price(mex_top_above.get('level_price'))}" if mex_top_above else "")
                     + " and rejects on 15m, short the fade."
                 ),
                 "note": (
                     "Use only after rejection confirmation."
                     + (" Funding supports this short." if funding_bias == "longs paying" else "")
+                    + (" Cross-exchange funding leans short." if funding_consensus == "short" else "")
                     + (" Longs look more vulnerable." if dominant_side == "longs_vulnerable" else "")
                 ),
             }
@@ -1642,6 +1852,7 @@ def build_liquidation_map_snapshot(symbol=SYMBOL):
     ticker_ctx = _ticker_context(ticker)
     liq_ctx = _liquidity_context(book, current_price, atr_1h)
     okx_ctx = _okx_liquidation_context(current_price, atr_1h, levels, symbol=symbol)
+    multi_ctx = _multi_exchange_context(current_price, atr_1h, levels, symbol=symbol)
     liq_map = build_liquidation_map(
         current_price=current_price,
         levels=levels,
@@ -1693,6 +1904,7 @@ def build_liquidation_map_snapshot(symbol=SYMBOL):
         "chart_df": data["15m"],
         "chart_timeframe": "15m",
         "liq_map": liq_map,
+        "multi_ctx": multi_ctx,
         "horizons": horizons,
         "heatmap_rows": heatmap_rows,
         "heatmap_history": heatmap_history,
@@ -1733,6 +1945,7 @@ def build_btc_scenarios_payload(symbol=SYMBOL, mode="swing"):
     ticker_ctx = _ticker_context(ticker)
     liq_ctx = _liquidity_context(book, current_price, atr_1h)
     okx_ctx = _okx_liquidation_context(current_price, atr_1h, levels)
+    multi_ctx = _multi_exchange_context(current_price, atr_1h, levels, symbol=symbol)
     liq_map = build_liquidation_map(
         current_price=current_price,
         levels=levels,
@@ -1753,6 +1966,7 @@ def build_btc_scenarios_payload(symbol=SYMBOL, mode="swing"):
         liq_ctx=liq_ctx,
         okx_ctx=okx_ctx,
         liq_map=liq_map,
+        multi_ctx=multi_ctx,
         mode=mode,
         max_scenarios=4,
     )
@@ -1772,6 +1986,7 @@ def build_btc_scenarios_payload(symbol=SYMBOL, mode="swing"):
         "ticker_ctx": ticker_ctx,
         "liq_ctx": liq_ctx,
         "okx_ctx": okx_ctx,
+        "multi_ctx": multi_ctx,
         "liq_map": liq_map,
         "scenarios": scenarios,
     }

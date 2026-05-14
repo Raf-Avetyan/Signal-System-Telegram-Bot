@@ -11,6 +11,9 @@ from urllib.parse import quote
 from config import SYMBOL, KLINE_LIMITS
 
 OKX_BASE = "https://www.okx.com"
+BINANCE_BASE = "https://fapi.binance.com"
+BYBIT_BASE = "https://api.bybit.com"
+BITGET_BASE = "https://api.bitget.com"
 KLINES_URL = f"{OKX_BASE}/api/v5/market/candles"
 
 # Map Binance intervals to OKX V5 intervals
@@ -424,7 +427,82 @@ def fetch_funding_rate(symbol=SYMBOL):
             return rate
     except Exception as e:
         print(f"[ERROR] Failed to fetch funding rate: {e}")
+        return None
+
+
+def fetch_binance_funding_rate(symbol=SYMBOL):
+    """
+    Fetch current funding rate from Binance USD-M futures.
+    Returns float or None on failure.
+    """
+    url = f"{BINANCE_BASE}/fapi/v1/premiumIndex"
+    params = {"symbol": str(symbol or SYMBOL).upper()}
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        return float(data.get("lastFundingRate", 0) or 0)
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch Binance funding rate: {e}")
+        return None
+
+
+def fetch_bitget_btc_funding_rate(symbol="BTCUSDT"):
+    """
+    Fetch current BTC funding rate from Bitget USDT futures public API.
+    Returns a float funding rate (decimal form, e.g. 0.0001 = 0.01%) or None.
+    """
+    url = f"{BITGET_BASE}/api/v2/mix/market/current-fund-rate"
+    params = {
+        "symbol": str(symbol or "BTCUSDT").upper(),
+        "productType": "usdt-futures",
+    }
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, params=params, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            if str(data.get("code")) == "00000":
+                row = data.get("data") or {}
+                if isinstance(row, list):
+                    row = row[0] if row else {}
+                rate = float((row or {}).get("fundingRate", 0) or 0)
+                return rate
+            else:
+                msg = data.get("msg") or data.get("message") or "unknown"
+                print(f"[ERROR] Bitget funding API returned error: {msg}")
+                return None
+        except Exception as e:
+            if attempt == 2:
+                print(f"[ERROR] Failed to fetch Bitget BTC funding rate: {e}")
+                return None
+            time.sleep(1.5)
     return None
+
+
+def fetch_bybit_funding_rate(symbol=SYMBOL):
+    """
+    Fetch current funding rate from Bybit linear futures ticker.
+    Returns float or None on failure.
+    """
+    url = f"{BYBIT_BASE}/v5/market/tickers"
+    params = {
+        "category": "linear",
+        "symbol": str(symbol or SYMBOL).upper(),
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if int(data.get("retCode", -1)) != 0:
+            return None
+        rows = ((data.get("result") or {}).get("list") or [])
+        if not rows:
+            return None
+        return float((rows[0] or {}).get("fundingRate", 0) or 0)
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch Bybit funding rate: {e}")
+        return None
 
 
 def fetch_open_interest(symbol=SYMBOL):
@@ -445,6 +523,76 @@ def fetch_open_interest(symbol=SYMBOL):
     except Exception as e:
         print(f"[ERROR] Failed to fetch OI: {e}")
     return None
+
+
+def fetch_binance_open_interest(symbol=SYMBOL):
+    """
+    Fetch current open interest from Binance USD-M futures.
+    Returns float or None.
+    """
+    url = f"{BINANCE_BASE}/fapi/v1/openInterest"
+    params = {"symbol": str(symbol or SYMBOL).upper()}
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        return float(data.get("openInterest", 0) or 0)
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch Binance OI: {e}")
+        return None
+
+
+def fetch_bybit_open_interest(symbol=SYMBOL, interval="5min"):
+    """
+    Fetch recent open interest from Bybit linear futures.
+    Returns latest float value or None.
+    """
+    url = f"{BYBIT_BASE}/v5/market/open-interest"
+    params = {
+        "category": "linear",
+        "symbol": str(symbol or SYMBOL).upper(),
+        "intervalTime": str(interval or "5min"),
+        "limit": 1,
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if int(data.get("retCode", -1)) != 0:
+            return None
+        rows = ((data.get("result") or {}).get("list") or [])
+        if not rows:
+            return None
+        return float((rows[0] or {}).get("openInterest", 0) or 0)
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch Bybit OI: {e}")
+        return None
+
+
+def fetch_bitget_open_interest(symbol=SYMBOL):
+    """
+    Fetch current open interest from Bitget USDT futures.
+    Returns float or None.
+    """
+    url = f"{BITGET_BASE}/api/v2/mix/market/open-interest"
+    params = {
+        "symbol": str(symbol or SYMBOL).upper(),
+        "productType": "usdt-futures",
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if str(data.get("code")) != "00000":
+            return None
+        payload = data.get("data") or {}
+        rows = payload.get("openInterestList") or []
+        if not rows:
+            return None
+        return float((rows[0] or {}).get("size", 0) or 0)
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch Bitget OI: {e}")
+        return None
 
 
 def fetch_liquidation_orders(symbol=SYMBOL, limit=100):
@@ -526,6 +674,101 @@ def fetch_order_book(symbol=SYMBOL, depth=400):
         return {"bids": bids, "asks": asks}
     except Exception as e:
         print(f"[ERROR] Failed to fetch order book: {e}")
+        return None
+
+
+def fetch_binance_order_book(symbol=SYMBOL, depth=500):
+    """
+    Fetch current Binance USD-M futures order book.
+    Returns normalized {"bids": [[px, sz], ...], "asks": [[px, sz], ...]} or None.
+    """
+    url = f"{BINANCE_BASE}/fapi/v1/depth"
+    valid_depth = min(max(int(depth), 5), 1000)
+    if valid_depth not in {5, 10, 20, 50, 100, 500, 1000}:
+        valid_depth = 500 if valid_depth > 100 else 100
+    params = {
+        "symbol": str(symbol or SYMBOL).upper(),
+        "limit": valid_depth,
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        payload = resp.json()
+        bids = []
+        asks = []
+        for row in payload.get("bids", []):
+            if len(row) >= 2:
+                bids.append([float(row[0]), float(row[1])])
+        for row in payload.get("asks", []):
+            if len(row) >= 2:
+                asks.append([float(row[0]), float(row[1])])
+        return {"bids": bids, "asks": asks}
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch Binance order book: {e}")
+        return None
+
+
+def fetch_bybit_order_book(symbol=SYMBOL, depth=500):
+    """
+    Fetch current Bybit linear futures order book.
+    Returns normalized {"bids": [[px, sz], ...], "asks": [[px, sz], ...]} or None.
+    """
+    url = f"{BYBIT_BASE}/v5/market/orderbook"
+    params = {
+        "category": "linear",
+        "symbol": str(symbol or SYMBOL).upper(),
+        "limit": min(max(int(depth), 1), 500),
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        payload = resp.json()
+        if int(payload.get("retCode", -1)) != 0:
+            return None
+        book = payload.get("result") or {}
+        bids = []
+        asks = []
+        for row in book.get("b", []):
+            if len(row) >= 2:
+                bids.append([float(row[0]), float(row[1])])
+        for row in book.get("a", []):
+            if len(row) >= 2:
+                asks.append([float(row[0]), float(row[1])])
+        return {"bids": bids, "asks": asks}
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch Bybit order book: {e}")
+        return None
+
+
+def fetch_bitget_order_book(symbol=SYMBOL, depth=200):
+    """
+    Fetch current Bitget USDT futures order book.
+    Returns normalized {"bids": [[px, sz], ...], "asks": [[px, sz], ...]} or None.
+    """
+    url = f"{BITGET_BASE}/api/v3/market/orderbook"
+    params = {
+        "category": "USDT-FUTURES",
+        "symbol": str(symbol or SYMBOL).upper(),
+        "limit": min(max(int(depth), 1), 200),
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        payload = resp.json()
+        if str(payload.get("code")) != "00000":
+            return None
+        book = payload.get("data") or {}
+        bids = []
+        asks = []
+        for row in book.get("b", []):
+            if len(row) >= 2:
+                bids.append([float(row[0]), float(row[1])])
+        for row in book.get("a", []):
+            if len(row) >= 2:
+                asks.append([float(row[0]), float(row[1])])
+        return {"bids": bids, "asks": asks}
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch Bitget order book: {e}")
         return None
 
 

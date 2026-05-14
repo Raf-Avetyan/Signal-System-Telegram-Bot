@@ -76,7 +76,11 @@ from config import (
     MIN_SIGNAL_SIZE_PCT, MAX_SIGNAL_SIZE_PCT, PRIVATE_EXEC_CHAT_ID, EXECUTION_UPDATES_PRIVATE_ONLY,
     PRIVATE_EXEC_AI_CONTROL_ENABLED, PRIVATE_EXEC_CONFIRM_TIMEOUT_SEC,
     GEMINI_API_KEY, GEMINI_MODEL, TIMEFRAME_RISK_MULTIPLIERS, BITUNIX_DEFAULT_LEVERAGE,
-    BITUNIX_POSITION_MODE,
+    BITUNIX_POSITION_MODE, BITGET_FUNDING_CONFIRM_ENABLED, BITGET_FUNDING_SCORE_THRESHOLD,
+    BITGET_FUNDING_EXTREME_THRESHOLD, BITGET_FUNDING_SCORE_BONUS, BITGET_FUNDING_COUNTER_BLOCK_SCORE,
+    MULTI_EXCHANGE_CONTEXT_ENABLED, MULTI_EXCHANGE_FUNDING_CONFIRM_ENABLED,
+    MULTI_EXCHANGE_FUNDING_SCORE_BONUS, MULTI_EXCHANGE_FUNDING_DISAGREE_PENALTY,
+    MULTI_EXCHANGE_FUNDING_BLOCK_MIN_AGREE, MULTI_EXCHANGE_LIQ_SCORE_BONUS,
     NEWS_FILTER_ENABLED, get_active_news_blackout, is_ny_market_holiday,
     TRADING_ECONOMICS_NEWS_ENABLED, TRADING_ECONOMICS_API_KEY,
     TRADING_ECONOMICS_COUNTRIES, TRADING_ECONOMICS_MIN_IMPORTANCE,
@@ -108,7 +112,10 @@ from confirmation import ConfirmationTracker
 from charting import generate_daily_levels_chart, generate_signal_setup_chart, generate_liquidation_map_chart
 from data import (
     fetch_klines, fetch_all_timeframes, fetch_daily, fetch_weekly, fetch_monthly, 
-    fetch_funding_rate, fetch_open_interest, fetch_liquidations, fetch_global_indicators, fetch_order_book,
+    fetch_funding_rate, fetch_bitget_btc_funding_rate, fetch_binance_funding_rate, fetch_bybit_funding_rate,
+    fetch_open_interest, fetch_binance_open_interest, fetch_bybit_open_interest, fetch_bitget_open_interest,
+    fetch_liquidations, fetch_global_indicators, fetch_order_book, fetch_binance_order_book,
+    fetch_bybit_order_book, fetch_bitget_order_book,
     fetch_trading_economics_calendar, parse_gemini_trade_instruction, ask_gemini_trade_question,
     ask_gemini_trade_question_with_image,
     fetch_last_price, fetch_markettwits_posts
@@ -150,6 +157,9 @@ class PonchBot:
         self.approach_alerts = {}      # { "Pump": timestamp }
         self.last_funding_check = 0
         self.last_funding_alert = 0
+        self.last_bitget_btc_funding = None
+        self.last_exchange_funding = {}
+        self.last_exchange_context = {}
         self.sent_sessions = set()     # "session_LONDON_2023-10-14"
         self.session_data = {}         # { "LONDON_2024-03-15": {"open": 70000, "levels": set()} }
         self.session_history = {}      # { "ASIA": "Asia recap text" }
@@ -167,6 +177,9 @@ class PonchBot:
         self.sent_sessions       = set(state.get("sent_sessions", [])) # New: Persist session summaries
         self.approach_alerts     = state.get("approach_alerts", {})    # New: Persist approaching level cooldowns
         self.last_funding_alert  = state.get("last_funding_alert", 0)   
+        self.last_bitget_btc_funding = state.get("last_bitget_btc_funding")
+        self.last_exchange_funding = state.get("last_exchange_funding", {}) or {}
+        self.last_exchange_context = state.get("last_exchange_context", {}) or {}
         self.last_market_alert   = state.get("last_market_alert", 0)
         self.last_summary_date   = state.get("last_summary_date")      # New: Track summary schedule
         self.last_daily_report_date = state.get("last_daily_report_date")
@@ -3391,6 +3404,228 @@ class PonchBot:
             lines.append("")
             lines.append("I do not have any blocker history recorded for today yet. That usually means the bot has not been running long enough today, or there really have not been any signal attempts yet.")
         self._send_private_execution_answer("\n".join(lines))
+
+    def _get_bitget_btc_funding_confirmation_adjustment(self, side, score):
+        if not BITGET_FUNDING_CONFIRM_ENABLED:
+            return {"score_delta": 0, "reason": "", "block": False, "block_reason": ""}
+        try:
+            rate = float(self.last_bitget_btc_funding or 0.0)
+        except Exception:
+            rate = 0.0
+        if abs(rate) < float(BITGET_FUNDING_SCORE_THRESHOLD or 0.0):
+            return {"score_delta": 0, "reason": "", "block": False, "block_reason": ""}
+
+        side = str(side or "").upper()
+        score_delta = 0
+        reason = ""
+        block = False
+        block_reason = ""
+
+        if side == "LONG":
+            if rate < 0:
+                score_delta = int(BITGET_FUNDING_SCORE_BONUS)
+                reason = f"Bitget BTC funding supports LONG ({rate:+.6f})"
+            else:
+                score_delta = -int(BITGET_FUNDING_SCORE_BONUS)
+                reason = f"Bitget BTC funding leans against LONG ({rate:+.6f})"
+                if abs(rate) >= float(BITGET_FUNDING_EXTREME_THRESHOLD or 0.0) and int(score) < int(BITGET_FUNDING_COUNTER_BLOCK_SCORE):
+                    block = True
+                    block_reason = f"Bitget BTC funding is strongly long-crowded ({rate:+.6f})"
+        elif side == "SHORT":
+            if rate > 0:
+                score_delta = int(BITGET_FUNDING_SCORE_BONUS)
+                reason = f"Bitget BTC funding supports SHORT ({rate:+.6f})"
+            else:
+                score_delta = -int(BITGET_FUNDING_SCORE_BONUS)
+                reason = f"Bitget BTC funding leans against SHORT ({rate:+.6f})"
+                if abs(rate) >= float(BITGET_FUNDING_EXTREME_THRESHOLD or 0.0) and int(score) < int(BITGET_FUNDING_COUNTER_BLOCK_SCORE):
+                    block = True
+                    block_reason = f"Bitget BTC funding is strongly short-crowded ({rate:+.6f})"
+
+        return {
+            "score_delta": score_delta,
+            "reason": reason,
+            "block": block,
+            "block_reason": block_reason,
+            "rate": rate,
+        }
+
+    def _update_multi_exchange_context(self, latest_price, atr_value, symbol=SYMBOL):
+        if not MULTI_EXCHANGE_CONTEXT_ENABLED:
+            self.last_exchange_funding = {}
+            self.last_exchange_context = {}
+            return {}
+
+        current_price = float(latest_price or 0.0)
+        atr = max(float(atr_value or 0.0), current_price * 0.0035 if current_price > 0 else 0.0)
+        symbol = str(symbol or SYMBOL).upper()
+
+        def _top_liquidity(book, desired_side):
+            if not book or current_price <= 0 or atr <= 0:
+                return None
+            try:
+                rows = detect_liquidity_candidates(
+                    order_book=book,
+                    price=current_price,
+                    atr=max(atr, current_price * 0.0025),
+                    timeframe="confirm",
+                    max_distance_atr_mult=10.0,
+                    bucket_pct=0.10,
+                )
+            except Exception:
+                return None
+            picked = []
+            for row in rows:
+                row_side = str(row.get("side") or "").upper()
+                dist_pct = float(row.get("distance_pct", 0) or 0)
+                size_usd = float(row.get("size_usd", 0) or 0)
+                if row_side != desired_side or dist_pct < 0.45 or size_usd < 12_000_000:
+                    continue
+                picked.append(row)
+            return picked[0] if picked else None
+
+        exchange_fetchers = {
+            "okx": {
+                "funding": lambda: fetch_funding_rate(symbol),
+                "oi": lambda: fetch_open_interest(symbol),
+                "book": lambda: fetch_order_book(symbol, depth=400),
+            },
+            "binance": {
+                "funding": lambda: fetch_binance_funding_rate(symbol),
+                "oi": lambda: fetch_binance_open_interest(symbol),
+                "book": lambda: fetch_binance_order_book(symbol, depth=500),
+            },
+            "bybit": {
+                "funding": lambda: fetch_bybit_funding_rate(symbol),
+                "oi": lambda: fetch_bybit_open_interest(symbol),
+                "book": lambda: fetch_bybit_order_book(symbol, depth=500),
+            },
+            "bitget": {
+                "funding": lambda: fetch_bitget_btc_funding_rate(symbol),
+                "oi": lambda: fetch_bitget_open_interest(symbol),
+                "book": lambda: fetch_bitget_order_book(symbol, depth=200),
+            },
+        }
+
+        funding = {}
+        oi = {}
+        liquidity = {"above": [], "below": []}
+        for name, fetchers in exchange_fetchers.items():
+            try:
+                rate = fetchers["funding"]()
+                if rate is not None:
+                    funding[name] = float(rate)
+            except Exception:
+                pass
+            try:
+                oi_val = fetchers["oi"]()
+                if oi_val is not None:
+                    oi[name] = float(oi_val)
+            except Exception:
+                pass
+            try:
+                book = fetchers["book"]()
+            except Exception:
+                book = None
+            above = _top_liquidity(book, "LONG")
+            below = _top_liquidity(book, "SHORT")
+            if above:
+                above = dict(above)
+                above["exchange"] = name
+                liquidity["above"].append(above)
+            if below:
+                below = dict(below)
+                below["exchange"] = name
+                liquidity["below"].append(below)
+
+        liquidity["above"] = sorted(liquidity["above"], key=lambda row: float(row.get("size_usd", 0) or 0), reverse=True)
+        liquidity["below"] = sorted(liquidity["below"], key=lambda row: float(row.get("size_usd", 0) or 0), reverse=True)
+        context = {
+            "symbol": symbol,
+            "funding": funding,
+            "oi": oi,
+            "liquidity": liquidity,
+            "updated_at": time.time(),
+        }
+        self.last_bitget_btc_funding = funding.get("bitget", self.last_bitget_btc_funding)
+        self.last_exchange_funding = funding
+        self.last_exchange_context = context
+        return context
+
+    def _get_multi_exchange_confirmation_adjustment(self, side, score):
+        if not MULTI_EXCHANGE_FUNDING_CONFIRM_ENABLED:
+            return {"score_delta": 0, "reason": "", "block": False, "block_reason": ""}
+        context = getattr(self, "last_exchange_context", {}) or {}
+        funding = dict(context.get("funding") or {})
+        if not funding:
+            return {"score_delta": 0, "reason": "", "block": False, "block_reason": ""}
+
+        weighted_long = 0
+        weighted_short = 0
+        long_names = []
+        short_names = []
+        for name, rate in funding.items():
+            try:
+                rate_val = float(rate or 0.0)
+            except Exception:
+                continue
+            weight = 2 if name == "bitget" else 1
+            if rate_val < 0:
+                weighted_long += weight
+                long_names.append(name.upper())
+            elif rate_val > 0:
+                weighted_short += weight
+                short_names.append(name.upper())
+
+        score_delta = 0
+        reason_parts = []
+        block = False
+        block_reason = ""
+
+        liquidity = context.get("liquidity") or {}
+        total_above = sum(float(row.get("size_usd", 0) or 0) for row in (liquidity.get("above") or []))
+        total_below = sum(float(row.get("size_usd", 0) or 0) for row in (liquidity.get("below") or []))
+
+        side = str(side or "").upper()
+        if side == "LONG":
+            if weighted_long > weighted_short:
+                score_delta += int(MULTI_EXCHANGE_FUNDING_SCORE_BONUS)
+                reason_parts.append("Multi-exchange funding leans LONG")
+            elif weighted_short > weighted_long:
+                score_delta -= int(MULTI_EXCHANGE_FUNDING_DISAGREE_PENALTY)
+                reason_parts.append("Multi-exchange funding leans against LONG")
+                if weighted_short >= int(MULTI_EXCHANGE_FUNDING_BLOCK_MIN_AGREE) and int(score) < int(BITGET_FUNDING_COUNTER_BLOCK_SCORE):
+                    block = True
+                    block_reason = f"Funding is long-crowded across {', '.join(short_names[:3])}"
+            if total_below > total_above * 1.10 and total_below > 0:
+                score_delta -= int(MULTI_EXCHANGE_LIQ_SCORE_BONUS)
+                reason_parts.append("More downside liquidity is still below price")
+            elif total_above > total_below * 1.10 and total_above > 0:
+                score_delta += int(MULTI_EXCHANGE_LIQ_SCORE_BONUS)
+        elif side == "SHORT":
+            if weighted_short > weighted_long:
+                score_delta += int(MULTI_EXCHANGE_FUNDING_SCORE_BONUS)
+                reason_parts.append("Multi-exchange funding leans SHORT")
+            elif weighted_long > weighted_short:
+                score_delta -= int(MULTI_EXCHANGE_FUNDING_DISAGREE_PENALTY)
+                reason_parts.append("Multi-exchange funding leans against SHORT")
+                if weighted_long >= int(MULTI_EXCHANGE_FUNDING_BLOCK_MIN_AGREE) and int(score) < int(BITGET_FUNDING_COUNTER_BLOCK_SCORE):
+                    block = True
+                    block_reason = f"Funding is short-crowded across {', '.join(long_names[:3])}"
+            if total_above > total_below * 1.10 and total_above > 0:
+                score_delta -= int(MULTI_EXCHANGE_LIQ_SCORE_BONUS)
+                reason_parts.append("More upside liquidity is still above price")
+            elif total_below > total_above * 1.10 and total_below > 0:
+                score_delta += int(MULTI_EXCHANGE_LIQ_SCORE_BONUS)
+
+        return {
+            "score_delta": score_delta,
+            "reason": ". ".join(reason_parts).strip(),
+            "block": block,
+            "block_reason": block_reason,
+            "funding": funding,
+            "liquidity": liquidity,
+        }
 
 
     def _refresh_private_execution_state(self):
@@ -7793,6 +8028,9 @@ class PonchBot:
                 "sent_sessions": list(self.sent_sessions),
                 "approach_alerts": self.approach_alerts,
                 "last_funding_alert": self.last_funding_alert,
+                "last_bitget_btc_funding": self.last_bitget_btc_funding,
+                "last_exchange_funding": self.last_exchange_funding,
+                "last_exchange_context": self.last_exchange_context,
                 "last_market_alert": self.last_market_alert,
                 "last_summary_date": self.last_summary_date,
                 "last_daily_report_date": self.last_daily_report_date,
@@ -8018,6 +8256,9 @@ class PonchBot:
         if current_time - self.last_funding_check > FUNDING_CHECK_INTERVAL:
             self.last_funding_check = current_time
             rate = fetch_funding_rate()
+            bitget_rate = fetch_bitget_btc_funding_rate("BTCUSDT")
+            if bitget_rate is not None:
+                self.last_bitget_btc_funding = float(bitget_rate)
             if rate is not None:
                 if abs(rate) >= FUNDING_THRESHOLD:
                     if current_time - self.last_funding_alert > FUNDING_COOLDOWN:
@@ -8074,6 +8315,12 @@ class PonchBot:
                 if tf_atr > 0:
                     ref_atr = tf_atr
                     ref_ts  = tf_ts
+
+        if latest_price is not None:
+            ctx_age = current_time - float((self.last_exchange_context or {}).get("updated_at") or 0)
+            if ctx_age > FUNDING_CHECK_INTERVAL:
+                self._update_multi_exchange_context(latest_price, ref_atr or (latest_price * 0.0035), SYMBOL)
+                self._save_state()
 
         # Check confirmation aggregation (once per tick)
         if latest_price is not None:
@@ -8142,6 +8389,21 @@ class PonchBot:
                         print(f"  [CONFLUENCE] Blocked {side} {ce['type']}: {fast_move_note}")
                         continue
 
+                    funding_adjust = self._get_bitget_btc_funding_confirmation_adjustment(side, ce.get("points", 0))
+                    if funding_adjust.get("block"):
+                        self._record_signal_block("bitget_funding_counter", now=now)
+                        print(f"  [CONFLUENCE] Blocked {side} {ce['type']}: {funding_adjust.get('block_reason')}")
+                        continue
+                    ce_points = int(ce.get("points", 0) or 0) + int(funding_adjust.get("score_delta") or 0)
+                    funding_reason = str(funding_adjust.get("reason") or "").strip()
+                    mx_adjust = self._get_multi_exchange_confirmation_adjustment(side, ce_points)
+                    if mx_adjust.get("block"):
+                        self._record_signal_block("multi_exchange_counter", now=now)
+                        print(f"  [CONFLUENCE] Blocked {side} {ce['type']}: {mx_adjust.get('block_reason')}")
+                        continue
+                    ce_points += int(mx_adjust.get("score_delta") or 0)
+                    mx_reason = str(mx_adjust.get("reason") or "").strip()
+
                     # 2. Momentum exhaustion guard: avoid SHORT when RSI already very low
                     # and LONG when RSI already very high.
                     if confluence_rsi is not None:
@@ -8209,22 +8471,28 @@ class PonchBot:
 
                     if ce["type"] == "STRONG":
                         strong_size = round(
-                            min(MAX_SIGNAL_SIZE_PCT, max(MIN_SIGNAL_SIZE_PCT, ce["points"] * 1.5)),
+                            min(MAX_SIGNAL_SIZE_PCT, max(MIN_SIGNAL_SIZE_PCT, ce_points * 1.5)),
                             1,
                         )
                         tp_liq = self._estimate_tp_liquidity(side, latest_price, tp1_c, tp2_c, tp3_c)
                         signal_id = new_signal_id()
+                        indicators = list(ce["indicators"])
+                        if funding_reason:
+                            indicators.append(funding_reason)
+                        if mx_reason:
+                            indicators.append(mx_reason)
                         self.tracker.log_signal(
                             side=ce["side"], entry=latest_price, sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
                             tf="Confluence", timestamp=base_candle_ts or conf_ts,
                             msg_id=None, chat_id=self._signal_chat_id(), signal_type="STRONG",
                             meta={
                                 "signal_id": signal_id,
-                                "indicators": ce["indicators"],
+                                "indicators": indicators,
                                 "size": strong_size,
                                 "tp_liq_prob": tp_liq["prob"] if tp_liq else None,
                                 "tp_liq_usd": tp_liq["size_usd"] if tp_liq else None,
                                 "tp_liq_target": tp_liq["target"] if tp_liq else None,
+                                "bitget_btc_funding": funding_adjust.get("rate"),
                             }
                         )
                         self.tracker.signals[-1]["signal_id"] = signal_id
@@ -8247,26 +8515,32 @@ class PonchBot:
                         if reinforcement_mode in {"normal", "add"}:
                             self._execute_exchange_trade(self.tracker.signals[-1])
                         self._save_state()
-                        print(f"  [CONFLUENCE] STRONG {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
+                        print(f"  [CONFLUENCE] STRONG {ce['side']} ({ce_points}pts, {ce['confirmations']} conf)")
 
                     elif ce["type"] == "EXTREME":
                         extreme_size = round(
-                            min(MAX_SIGNAL_SIZE_PCT, max(MIN_SIGNAL_SIZE_PCT, ce["points"] * 2.0)),
+                            min(MAX_SIGNAL_SIZE_PCT, max(MIN_SIGNAL_SIZE_PCT, ce_points * 2.0)),
                             1,
                         )
                         tp_liq = self._estimate_tp_liquidity(side, latest_price, tp1_c, tp2_c, tp3_c)
                         signal_id = new_signal_id()
+                        indicators = list(ce["indicators"])
+                        if funding_reason:
+                            indicators.append(funding_reason)
+                        if mx_reason:
+                            indicators.append(mx_reason)
                         self.tracker.log_signal(
                             side=ce["side"], entry=latest_price, sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
                             tf="Confluence", timestamp=base_candle_ts or conf_ts,
                             msg_id=None, chat_id=self._signal_chat_id(), signal_type="EXTREME",
                             meta={
                                 "signal_id": signal_id,
-                                "indicators": ce["indicators"],
+                                "indicators": indicators,
                                 "size": extreme_size,
                                 "tp_liq_prob": tp_liq["prob"] if tp_liq else None,
                                 "tp_liq_usd": tp_liq["size_usd"] if tp_liq else None,
                                 "tp_liq_target": tp_liq["target"] if tp_liq else None,
+                                "bitget_btc_funding": funding_adjust.get("rate"),
                             }
                         )
                         self.tracker.signals[-1]["signal_id"] = signal_id
@@ -8289,7 +8563,7 @@ class PonchBot:
                         if reinforcement_mode in {"normal", "add"}:
                             self._execute_exchange_trade(self.tracker.signals[-1])
                         self._save_state()
-                        print(f"  [CONFLUENCE] EXTREME {ce['side']} ({ce['points']}pts, {ce['confirmations']} conf)")
+                        print(f"  [CONFLUENCE] EXTREME {ce['side']} ({ce_points}pts, {ce['confirmations']} conf)")
 
                     # Prevent immediate opposite-side flip from stale queued confirmations.
                     opposite_side = "SHORT" if ce["side"] == "LONG" else "LONG"
@@ -9752,6 +10026,27 @@ class PonchBot:
                     self._record_signal_block("fast_move_volume", now=now)
                     print(f"  [SCALP] Blocked {tf} {side}: {fast_move_note}")
                     continue
+
+                funding_adjust = self._get_bitget_btc_funding_confirmation_adjustment(side, score)
+                if funding_adjust.get("block") and not rsi_pullback_override and not liq_watch_note:
+                    self._record_signal_block("bitget_funding_counter", now=now)
+                    print(f"  [SCALP] Blocked {tf} {side}: {funding_adjust.get('block_reason')}")
+                    continue
+                funding_reason = str(funding_adjust.get("reason") or "").strip()
+                if int(funding_adjust.get("score_delta") or 0):
+                    score += int(funding_adjust.get("score_delta") or 0)
+                    if funding_reason:
+                        reasons.append(funding_reason)
+                mx_adjust = self._get_multi_exchange_confirmation_adjustment(side, score)
+                if mx_adjust.get("block") and not rsi_pullback_override and not liq_watch_note:
+                    self._record_signal_block("multi_exchange_counter", now=now)
+                    print(f"  [SCALP] Blocked {tf} {side}: {mx_adjust.get('block_reason')}")
+                    continue
+                mx_reason = str(mx_adjust.get("reason") or "").strip()
+                if int(mx_adjust.get("score_delta") or 0):
+                    score += int(mx_adjust.get("score_delta") or 0)
+                    if mx_reason:
+                        reasons.append(mx_reason)
 
                 late_confirm_reason = self._get_late_confirm_reason(tf, side, df)
                 if late_confirm_reason:
