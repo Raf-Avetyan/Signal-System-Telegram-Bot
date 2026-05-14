@@ -687,6 +687,23 @@ class TradeExecutor:
             return entry * (1.0 - buffer_pct / 100.0)
         return entry
 
+    @staticmethod
+    def _adaptive_tp_splits_for_signal(signal: Dict[str, Any], base_splits: tuple[float, float, float]) -> tuple[float, float, float]:
+        meta = (signal or {}).get("meta") or {}
+        grade = str(meta.get("quality_grade") or "").upper()
+        trend_aligned = bool(meta.get("trend_aligned"))
+        countertrend = bool(meta.get("countertrend"))
+        strategy = str(meta.get("strategy") or signal.get("strategy") or "").upper()
+        if strategy == "SMART_MONEY_LIQUIDITY":
+            return tuple(float(x or 0) for x in base_splits[:3])
+        if grade == "A+" and trend_aligned and not countertrend:
+            return (0.20, 0.30, 0.50)
+        if grade == "B" or countertrend:
+            return (0.40, 0.35, 0.25)
+        if grade == "A":
+            return (0.30, 0.40, 0.30)
+        return tuple(float(x or 0) for x in base_splits[:3])
+
     def _update_position_stop(self, symbol: str, position_id: str, signal: Dict[str, Any], execution: Dict[str, Any], new_sl: float) -> None:
         current_tp_price = self._current_position_tp_price(signal, execution)
         if current_tp_price is not None:
@@ -1353,7 +1370,10 @@ class TradeExecutor:
             or (signal.get("meta") or {}).get("strategy")
             or ""
         ).upper()
-        tp_splits = get_tp_splits_for_tf(tf_name, strategy_name)
+        tp_splits = self._adaptive_tp_splits_for_signal(
+            signal,
+            tuple(get_tp_splits_for_tf(tf_name, strategy_name)),
+        )
         tp_qtys, tp_split_warning = self._split_qty(
             qty,
             min_base_qty=min_base_qty,
@@ -2052,7 +2072,14 @@ class TradeExecutor:
         execution["entry"] = execution["filled_entry_price"]
         execution["notional"] = float(actual_qty) * float(execution["filled_entry_price"] or 0)
 
-        splits = tuple(execution.get("tp_splits") or get_tp_splits_for_tf(signal.get("tf"), str((signal.get("meta") or {}).get("strategy") or signal.get("strategy") or "")))
+        base_splits = tuple(
+            execution.get("tp_splits")
+            or self._adaptive_tp_splits_for_signal(
+                signal,
+                tuple(get_tp_splits_for_tf(signal.get("tf"), str((signal.get("meta") or {}).get("strategy") or signal.get("strategy") or ""))),
+            )
+        )
+        splits = tuple(base_splits)
         execution["tp_splits"] = list(splits)
         tp_targets = list(execution.get("tp_targets") or [signal.get("tp1"), signal.get("tp2"), signal.get("tp3")])
         while len(tp_targets) < 3:

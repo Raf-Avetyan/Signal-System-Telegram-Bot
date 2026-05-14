@@ -7,6 +7,7 @@ detects signals, and sends formatted Telegram alerts.
 
 import time
 import traceback
+from collections import Counter
 from datetime import datetime, timezone, timedelta
 import json
 import re
@@ -191,6 +192,7 @@ class PonchBot:
         self.last_today_wins_batch_date = state.get("last_today_wins_batch_date")
         self.pending_stop_liq_watches = state.get("pending_stop_liq_watches", {})
         self.scenario_trade_cooldowns = state.get("scenario_trade_cooldowns", {})
+        self.last_no_trade_alerts = state.get("last_no_trade_alerts", {}) or {}
         if not self.last_education_post_slot and self.last_education_post_date:
             self.last_education_post_slot = f"{self.last_education_post_date} 08"
         self.education_post_index = int(state.get("education_post_index", 0) or 0)
@@ -1220,6 +1222,7 @@ class PonchBot:
             "ENTRY_CLOSE": "🟡 <b>BREAKEVEN EXIT</b>",
             "PROFIT_SL": "🛡 <b>PROTECTED EXIT</b>",
             "CLOSED": "🛑 <b>TRADE CLOSED</b>",
+            "EXPIRED": "⏳ <b>SIGNAL EXPIRED</b>",
         }
         header = header_map.get(status, "📍 <b>BTC SIGNAL</b>")
         if event_label and status == "OPEN":
@@ -1249,6 +1252,9 @@ class PonchBot:
                 lines.append(f"Size: {size}")
         reinf_count = int(((sig.get("meta") or {}).get("reinforcement_count", 0)) or 0)
         add_count = int(((sig.get("meta") or {}).get("same_side_add_count", 0)) or 0)
+        grade = str(((sig.get("meta") or {}).get("quality_grade") or "")).upper()
+        if grade:
+            lines.append(f"Grade: {grade}")
         if reinf_count > 0:
             lines.append(f"Reinforcement: {reinf_count}x")
         if add_count > 0:
@@ -1312,6 +1318,7 @@ class PonchBot:
             indicators=indicators,
             reasons=meta.get("reasons"),
             size=sig.get("signal_size_pct", meta.get("size")),
+            grade=meta.get("quality_grade"),
             tp_liq_prob=meta.get("tp_liq_prob"),
             tp_liq_usd=meta.get("tp_liq_usd"),
             tp_liq_target=meta.get("tp_liq_target"),
@@ -1454,6 +1461,12 @@ class PonchBot:
             lines.append("TP2: hit")
         if sig.get("tp3_hit"):
             lines.append("TP3: hit")
+        grade = str(((sig.get("meta") or {}).get("quality_grade") or "")).upper()
+        if grade:
+            lines.append(f"Grade: {grade}")
+        tags = list(((sig.get("meta") or {}).get("review_tags")) or [])
+        if tags:
+            lines.append("Tags: " + ", ".join(tags[:3]))
         return f"🏆 <b>TODAY'S SUCCESSFUL TRADE</b>\n<blockquote>{chr(10).join(lines)}</blockquote>\n{note}"
 
     def _signal_chart_timeframe(self, sig):
@@ -1688,6 +1701,15 @@ class PonchBot:
 
     def _signal_quality_score(self, sig):
         meta = (sig or {}).get("meta") or {}
+        grade = str(meta.get("quality_grade") or "").upper()
+        if grade == "A+":
+            return 10.0
+        if grade == "A":
+            return 8.0
+        if grade == "B":
+            return 6.5
+        if grade == "AVOID":
+            return 4.0
         for raw in (meta.get("score"), meta.get("scenario_probability")):
             try:
                 value = float(raw or 0)
@@ -1698,6 +1720,228 @@ class PonchBot:
             if value > 0:
                 return value
         return 0.0
+
+    def _grade_rank(self, grade):
+        return {"AVOID": 0, "B": 1, "A": 2, "A+": 3}.get(str(grade or "").upper(), 0)
+
+    def _signal_expiry_hours(self, tf):
+        key = str(tf or "").strip().lower()
+        mapping = {
+            "5m": 2.0,
+            "15m": 4.0,
+            "1h": 8.0,
+            "4h": 18.0,
+            "confluence": 6.0,
+        }
+        return float(mapping.get(key, 8.0))
+
+    def _htf_bias_lock(self, side):
+        side = str(side or "").upper()
+        tf_4h = str((self.tf_trends or {}).get("4h") or "Ranging")
+        tf_1d = str((self.tf_trends or {}).get("1d") or "Ranging")
+        tf_1h = str((self.tf_trends or {}).get("1h") or "Ranging")
+        bullish = {"Bullish", "Trending Bullish"}
+        bearish = {"Bearish", "Trending Bearish"}
+        if tf_4h in bullish and tf_1d in bullish:
+            lock_side = "LONG"
+            strength = "strong"
+        elif tf_4h in bearish and tf_1d in bearish:
+            lock_side = "SHORT"
+            strength = "strong"
+        elif tf_4h in bullish or tf_1d in bullish:
+            lock_side = "LONG"
+            strength = "soft"
+        elif tf_4h in bearish or tf_1d in bearish:
+            lock_side = "SHORT"
+            strength = "soft"
+        else:
+            lock_side = ""
+            strength = "none"
+        aligned = bool(lock_side) and side == lock_side
+        countertrend = bool(lock_side) and side != lock_side
+        return {
+            "side": lock_side,
+            "strength": strength,
+            "aligned": aligned,
+            "countertrend": countertrend,
+            "tf_4h": tf_4h,
+            "tf_1d": tf_1d,
+            "tf_1h": tf_1h,
+        }
+
+    def _grade_signal_candidate(self, *, side, tf, score, reasons=None, signal_type="SCALP", trend_aligned_hint=None):
+        normalized = float(score or 0.0)
+        if normalized > 10:
+            normalized = normalized / 10.0
+        normalized = max(0.0, min(10.0, normalized))
+        reasons = list(reasons or [])
+        bias = self._htf_bias_lock(side)
+        adjusted = normalized
+        notes = []
+        if bias["aligned"]:
+            adjusted += 0.8 if bias["strength"] == "strong" else 0.4
+            notes.append("HTF bias supports the trade")
+        elif bias["countertrend"]:
+            adjusted -= 1.0 if bias["strength"] == "strong" else 0.5
+            notes.append("Counter-trend against 4H/1D bias")
+        if trend_aligned_hint is True:
+            adjusted += 0.3
+        elif trend_aligned_hint is False:
+            adjusted -= 0.4
+
+        if bias["countertrend"] and bias["strength"] == "strong" and adjusted < 8.8:
+            grade = "Avoid"
+            reason = "4H and 1D are strongly against this side."
+        elif adjusted >= 9.0 and bias["aligned"]:
+            grade = "A+"
+            reason = "Top-tier alignment across score, structure, and higher timeframe bias."
+        elif adjusted >= 7.3:
+            grade = "A"
+            reason = "Clean setup but not the very strongest auto-trade profile."
+        elif adjusted >= 6.0:
+            grade = "B"
+            reason = "Tradable idea for Telegram, but not strong enough for live auto-trading."
+        else:
+            grade = "Avoid"
+            reason = "Quality is too low after context and bias checks."
+
+        return {
+            "grade": grade,
+            "grade_reason": reason,
+            "allow_post": grade in {"A+", "A", "B"},
+            "allow_trade": grade == "A+",
+            "trend_aligned": bias["aligned"] if trend_aligned_hint is None else bool(trend_aligned_hint),
+            "countertrend": bool(bias["countertrend"]),
+            "bias_lock": bias,
+            "normalized_score": round(normalized, 2),
+            "adjusted_score": round(adjusted, 2),
+            "notes": notes,
+            "signal_type": str(signal_type or "SCALP").upper(),
+        }
+
+    def _apply_grade_to_signal(self, sig, grade_info):
+        if not sig or not grade_info:
+            return
+        meta = sig.setdefault("meta", {})
+        meta["quality_grade"] = grade_info.get("grade")
+        meta["quality_grade_reason"] = grade_info.get("grade_reason")
+        meta["quality_score_normalized"] = grade_info.get("normalized_score")
+        meta["quality_score_adjusted"] = grade_info.get("adjusted_score")
+        meta["allow_live_trade"] = bool(grade_info.get("allow_trade"))
+        meta["allow_post"] = bool(grade_info.get("allow_post"))
+        meta["trend_aligned"] = bool(grade_info.get("trend_aligned"))
+        meta["countertrend"] = bool(grade_info.get("countertrend"))
+        meta["bias_lock"] = dict(grade_info.get("bias_lock") or {})
+
+    def _maybe_send_no_trade_alert(self, key, message, *, now=None, cooldown_sec=1800):
+        now = now or datetime.now(self.local_tz)
+        now_ts = now.timestamp() if hasattr(now, "timestamp") else time.time()
+        last_ts = float((self.last_no_trade_alerts or {}).get(str(key), 0) or 0)
+        if (now_ts - last_ts) < max(300, int(cooldown_sec)):
+            return False
+        if not self.is_booting:
+            tg.send(
+                f"⏸ <b>NO TRADE</b>\n<blockquote>{html.escape(str(message or '').strip())}</blockquote>",
+                parse_mode="HTML",
+                chat_id=self._signal_chat_id(),
+                message_thread_id=self._trading_signal_thread_id(),
+            )
+        self.last_no_trade_alerts[str(key)] = now_ts
+        self._save_state()
+        return True
+
+    def _expire_stale_signals(self, latest_price, now):
+        changed = False
+        if latest_price is None:
+            return False
+        current_time = now if isinstance(now, datetime) else datetime.now(timezone.utc)
+        funding = dict((self.last_exchange_context or {}).get("funding") or {})
+        support_long = sum(2 if name == "bitget" else 1 for name, rate in funding.items() if float(rate or 0) < 0)
+        support_short = sum(2 if name == "bitget" else 1 for name, rate in funding.items() if float(rate or 0) > 0)
+        for sig in self.tracker.signals:
+            status = str(sig.get("status") or "OPEN").upper()
+            if status not in {"OPEN"}:
+                continue
+            execution = sig.get("execution") or {}
+            if execution.get("active"):
+                continue
+            if sig.get("tp1_hit") or sig.get("tp2_hit") or sig.get("tp3_hit"):
+                continue
+            opened_at = self.tracker._parse_iso_utc(sig.get("logged_at") or sig.get("timestamp"))
+            if not opened_at:
+                continue
+            age_hours = (current_time.astimezone(timezone.utc) - opened_at).total_seconds() / 3600.0
+            tf = sig.get("tf")
+            side = str(sig.get("side") or "").upper()
+            reason = ""
+            if age_hours >= self._signal_expiry_hours(tf):
+                reason = "setup aged out without reaching a fresh valid continuation"
+            else:
+                bias = self._htf_bias_lock(side)
+                if bias["countertrend"] and bias["strength"] == "strong":
+                    reason = "higher timeframe structure flipped strongly against the setup"
+                elif side == "LONG" and support_short >= 3 and support_long == 0:
+                    reason = "funding flipped hard against the long idea"
+                elif side == "SHORT" and support_long >= 3 and support_short == 0:
+                    reason = "funding flipped hard against the short idea"
+                elif side == "LONG" and float(latest_price or 0) >= float(sig.get("tp1") or 0) * 1.003:
+                    reason = "price bypassed the original long path without a valid fill structure"
+                elif side == "SHORT" and float(latest_price or 0) <= float(sig.get("tp1") or 0) * 0.997:
+                    reason = "price bypassed the original short path without a valid fill structure"
+            if not reason:
+                continue
+            sig["status"] = "EXPIRED"
+            sig["closed_at"] = current_time.astimezone(timezone.utc).isoformat()
+            meta = sig.setdefault("meta", {})
+            meta["expired_reason"] = reason
+            changed = True
+        if changed:
+            self.tracker.persist()
+        return changed
+
+    def _trade_review_tags(self, sig):
+        sig = sig or {}
+        meta = sig.get("meta") or {}
+        tags = []
+        if bool(meta.get("countertrend")):
+            tags.append("counter-trend")
+        if str(meta.get("quality_grade") or "").upper() in {"B", "AVOID"}:
+            tags.append("late / low-quality")
+        reasons = [str(x).lower() for x in (meta.get("reasons") or [])]
+        scenario_note = str(meta.get("scenario_note") or "").lower()
+        trigger = str(meta.get("trigger") or "").lower()
+        if any("funding leans against" in x or "crowded" in x for x in reasons):
+            tags.append("weak funding context")
+        if "reclaim" in trigger or "reclaim" in scenario_note:
+            tags.append("good reclaim")
+        if "sweep" in scenario_note or "sweep" in trigger or "liquidity sweep" in " ".join(reasons):
+            tags.append("clean sweep reversal")
+        if str(sig.get("status") or "").upper() in {"ENTRY_CLOSE", "PROFIT_SL"}:
+            tags.append("protected management")
+        unique = []
+        seen = set()
+        for tag in tags:
+            if tag in seen:
+                continue
+            seen.add(tag)
+            unique.append(tag)
+        return unique
+
+    def _analytics_top_review_tags(self, days=30):
+        now_utc = datetime.now(timezone.utc)
+        cutoff = now_utc - timedelta(days=max(1, int(days or 30)))
+        counter = Counter()
+        for sig in list(self.tracker.signals or []):
+            status = str(sig.get("status") or "").upper()
+            if status not in {"SL", "TP3", "ENTRY_CLOSE", "PROFIT_SL"}:
+                continue
+            closed_at = self.tracker._parse_iso_utc(sig.get("closed_at"))
+            if not closed_at or closed_at < cutoff:
+                continue
+            tags = list(((sig.get("meta") or {}).get("review_tags")) or [])
+            for tag in tags:
+                counter[str(tag)] += 1
+        return counter.most_common(3)
 
     def _protected_stop_active(self, sig):
         sig = sig or {}
@@ -1804,6 +2048,7 @@ class PonchBot:
         add_allowed = bool(
             owner_add_count < 1
             and (owner_tp1 or owner_protected)
+            and str(meta.get("quality_grade") or "").upper() == "A+"
             and candidate_quality >= owner_quality
             and better_ok
             and owner_qty > 0
@@ -1821,7 +2066,7 @@ class PonchBot:
         meta["same_side_entry_threshold"] = round(threshold, 2)
         meta["same_side_add_allowed"] = add_allowed
         if add_allowed:
-            meta["same_side_add_reason"] = "Protected trade with a clearly better same-side entry."
+            meta["same_side_add_reason"] = "Protected re-entry allowed: A+ same-side setup with a clearly better price."
         else:
             meta["same_side_add_reason"] = "Confirmation only. Existing trade stays primary."
 
@@ -1952,6 +2197,16 @@ class PonchBot:
         if str(strategy_name or "").upper() == "SMART_HEDGE":
             reasons = ["Smart Hedge"] + [r for r in reasons if r != "Smart Hedge"]
         strength_label = "Hedge" if str(strategy_name or "").upper() == "SMART_HEDGE" else "Scenario"
+        grade_info = self._grade_signal_candidate(
+            side=side,
+            tf=exec_tf,
+            score=float(scenario.get("probability") or 0.0) / 10.0,
+            reasons=reasons,
+            signal_type=signal_type,
+            trend_aligned_hint=bool(scenario.get("trend_aligned")),
+        )
+        if not grade_info.get("allow_post"):
+            return False
         signal_id = new_signal_id()
         tp_liq = self._estimate_tp_liquidity(side, current_price, scenario.get("tp1"), scenario.get("tp2"), scenario.get("tp3"))
 
@@ -1983,6 +2238,14 @@ class PonchBot:
                 "tp_liq_prob": tp_liq["prob"] if tp_liq else None,
                 "tp_liq_usd": tp_liq["size_usd"] if tp_liq else None,
                 "tp_liq_target": tp_liq["target"] if tp_liq else None,
+                "quality_grade": grade_info.get("grade"),
+                "quality_grade_reason": grade_info.get("grade_reason"),
+                "quality_score_adjusted": grade_info.get("adjusted_score"),
+                "allow_live_trade": grade_info.get("allow_trade"),
+                "allow_post": grade_info.get("allow_post"),
+                "trend_aligned": grade_info.get("trend_aligned"),
+                "countertrend": grade_info.get("countertrend"),
+                "bias_lock": grade_info.get("bias_lock"),
                 **dict(extra_meta or {}),
             },
         )
@@ -1990,6 +2253,7 @@ class PonchBot:
         sig["signal_id"] = signal_id
         sig["signal_size_pct"] = size_pct
         sig["public_signal_is_photo"] = True
+        self._apply_grade_to_signal(sig, grade_info)
         reinforcement_mode, owner_sig = self._prepare_same_side_signal_behavior(
             sig,
             self._find_active_primary_same_side_execution(side, SYMBOL),
@@ -2718,6 +2982,56 @@ class PonchBot:
                     os.remove(chart_path)
             except Exception:
                 pass
+
+    def _send_session_game_plan(self, session_name, latest_price):
+        if self.is_booting:
+            return
+        try:
+            payload = build_btc_scenarios_payload(symbol=SYMBOL, mode="short_term")
+        except Exception as e:
+            print(f"[SESSION] Could not build session game plan: {e}")
+            return
+        scenarios = list(payload.get("scenarios") or [])
+        if not scenarios:
+            return
+        long_plan = next((row for row in scenarios if str(row.get("side") or "").upper() == "LONG"), None)
+        short_plan = next((row for row in scenarios if str(row.get("side") or "").upper() == "SHORT"), None)
+        current_price = float(payload.get("current_price") or latest_price or 0)
+        funding_rate = float(payload.get("funding_rate") or 0.0)
+        funding_bias = str(((payload.get("funding_ctx") or {}).get("bias")) or "flat")
+        bias_4h = str(((payload.get("tf_map") or {}).get("4h") or {}).get("bias") or "Ranging")
+        bias_1d = str(((payload.get("tf_map") or {}).get("1d") or {}).get("bias") or "Ranging")
+        preferred = long_plan if (float((long_plan or {}).get("probability") or 0) >= float((short_plan or {}).get("probability") or 0)) else short_plan
+        preferred_side = str((preferred or {}).get("side") or "WAIT").upper()
+        top_above = ((payload.get("multi_ctx") or {}).get("top_above") or (payload.get("liq_ctx") or {}).get("top_above") or {})
+        top_below = ((payload.get("multi_ctx") or {}).get("top_below") or (payload.get("liq_ctx") or {}).get("top_below") or {})
+        above_txt = f"{float(top_above.get('level_price', 0) or 0):,.0f}" if top_above else "n/a"
+        below_txt = f"{float(top_below.get('level_price', 0) or 0):,.0f}" if top_below else "n/a"
+        no_trade = "Wait for the session sweep first if price expands aggressively into liquidity without reclaim/rejection confirmation."
+        if funding_bias == "longs paying":
+            no_trade = "Do not force late longs while longs are paying funding and price is extended into upside liquidity."
+        elif funding_bias == "shorts paying":
+            no_trade = "Do not force late shorts while shorts are paying funding and price is extended into downside liquidity."
+        trigger_text = str((preferred or {}).get("trigger") or "Wait for the first clean reclaim or rejection trigger.").strip()
+        msg = (
+            f"🧭 <b>{html.escape(str(session_name))} GAME PLAN</b>\n\n"
+            f"<blockquote>"
+            f"Price: {current_price:,.2f}\n"
+            f"Bias: 4H {html.escape(bias_4h)} | 1D {html.escape(bias_1d)}\n"
+            f"Funding: {funding_rate:+.6f}% ({html.escape(funding_bias)})\n"
+            f"Best Side: {html.escape(preferred_side)}\n"
+            f"Sweep Above: {above_txt}\n"
+            f"Sweep Below: {below_txt}"
+            f"</blockquote>\n"
+            f"<blockquote>{html.escape(trigger_text)}</blockquote>\n"
+            f"<blockquote>NO TRADE: {html.escape(no_trade)}</blockquote>"
+        )
+        tg.send(
+            msg,
+            parse_mode="HTML",
+            chat_id=self._signal_chat_id(),
+            message_thread_id=self._sessions_thread_id(),
+        )
 
     def _build_demo_signal(self, side="LONG"):
         side_text = str(side or "LONG").upper()
@@ -8042,6 +8356,7 @@ class PonchBot:
                 "last_today_wins_batch_date": self.last_today_wins_batch_date,
                 "pending_stop_liq_watches": self.pending_stop_liq_watches,
                 "scenario_trade_cooldowns": self.scenario_trade_cooldowns,
+                "last_no_trade_alerts": self.last_no_trade_alerts,
                 "education_post_index": self.education_post_index,
                 "pending_exec_action": self.pending_exec_action,
                 "last_exec_suggested_action": self.last_exec_suggested_action,
@@ -8452,6 +8767,23 @@ class PonchBot:
                         )
                         continue
 
+                    grade_info = self._grade_signal_candidate(
+                        side=side,
+                        tf="Confluence",
+                        score=ce_points,
+                        reasons=ce.get("indicators"),
+                        signal_type=ce["type"],
+                    )
+                    if not grade_info.get("allow_post"):
+                        self._record_signal_block("quality_grade_avoid", now=now)
+                        self._maybe_send_no_trade_alert(
+                            f"grade_avoid_confluence_{side}",
+                            f"No clean {side.lower()} yet: {grade_info.get('grade_reason')}",
+                            now=now,
+                        )
+                        print(f"  [CONFLUENCE] Blocked {side} {ce['type']}: {grade_info.get('grade_reason')}")
+                        continue
+
                     # 3. Calculate targets from timeframe ATR model.
                     risk_cfg = TIMEFRAME_RISK_MULTIPLIERS.get(tf, TIMEFRAME_RISK_MULTIPLIERS.get("5m", {}))
                     sl_m = float(risk_cfg.get("sl", 1.0))
@@ -8493,11 +8825,20 @@ class PonchBot:
                                 "tp_liq_usd": tp_liq["size_usd"] if tp_liq else None,
                                 "tp_liq_target": tp_liq["target"] if tp_liq else None,
                                 "bitget_btc_funding": funding_adjust.get("rate"),
+                                "quality_grade": grade_info.get("grade"),
+                                "quality_grade_reason": grade_info.get("grade_reason"),
+                                "quality_score_adjusted": grade_info.get("adjusted_score"),
+                                "allow_live_trade": grade_info.get("allow_trade"),
+                                "allow_post": grade_info.get("allow_post"),
+                                "trend_aligned": grade_info.get("trend_aligned"),
+                                "countertrend": grade_info.get("countertrend"),
+                                "bias_lock": grade_info.get("bias_lock"),
                             }
                         )
                         self.tracker.signals[-1]["signal_id"] = signal_id
                         self.tracker.signals[-1]["signal_size_pct"] = strong_size
                         self.tracker.signals[-1]["public_signal_is_photo"] = True
+                        self._apply_grade_to_signal(self.tracker.signals[-1], grade_info)
                         reinforcement_mode, owner_sig = self._prepare_same_side_signal_behavior(
                             self.tracker.signals[-1],
                             self._find_active_primary_same_side_execution(ce["side"], SYMBOL),
@@ -8541,11 +8882,20 @@ class PonchBot:
                                 "tp_liq_usd": tp_liq["size_usd"] if tp_liq else None,
                                 "tp_liq_target": tp_liq["target"] if tp_liq else None,
                                 "bitget_btc_funding": funding_adjust.get("rate"),
+                                "quality_grade": grade_info.get("grade"),
+                                "quality_grade_reason": grade_info.get("grade_reason"),
+                                "quality_score_adjusted": grade_info.get("adjusted_score"),
+                                "allow_live_trade": grade_info.get("allow_trade"),
+                                "allow_post": grade_info.get("allow_post"),
+                                "trend_aligned": grade_info.get("trend_aligned"),
+                                "countertrend": grade_info.get("countertrend"),
+                                "bias_lock": grade_info.get("bias_lock"),
                             }
                         )
                         self.tracker.signals[-1]["signal_id"] = signal_id
                         self.tracker.signals[-1]["signal_size_pct"] = extreme_size
                         self.tracker.signals[-1]["public_signal_is_photo"] = True
+                        self._apply_grade_to_signal(self.tracker.signals[-1], grade_info)
                         reinforcement_mode, owner_sig = self._prepare_same_side_signal_behavior(
                             self.tracker.signals[-1],
                             self._find_active_primary_same_side_execution(ce["side"], SYMBOL),
@@ -8584,6 +8934,8 @@ class PonchBot:
                 low=outcome_low,
                 current_candle_ts_set=current_candle_ts_set
             )
+            if self._expire_stale_signals(latest_price, now):
+                print("  [TRACKER] Soft-expired stale non-live signals.")
             today_str = now.strftime("%Y-%m-%d")
             signal_tick_events = {}
             terminal_event_types = {"TP3", "ENTRY_CLOSE", "PROFIT_SL", "SL"}
@@ -8705,6 +9057,13 @@ class PonchBot:
 
                 if risk_state_changed:
                     self._save_state()
+
+                if evt_type in terminal_event_types:
+                    meta = sig.setdefault("meta", {})
+                    review_tags = self._trade_review_tags(sig)
+                    if review_tags != list(meta.get("review_tags") or []):
+                        meta["review_tags"] = list(review_tags)
+                        self._save_state()
 
                 if evt_type in terminal_event_types and current_public_signal and not private_exec_paper_signal:
                     self._send_success_trade_post(sig, evt_type, close_price=latest_price)
@@ -8830,6 +9189,12 @@ class PonchBot:
                                 }
                                 self.last_session_update = current_time
                                 self._save_state()
+
+                        plan_key = f"gameplan_{session_id}"
+                        if plan_key not in self.sent_sessions:
+                            self._send_session_game_plan(s_name, latest_price)
+                            self.sent_sessions.add(plan_key)
+                            self._save_state()
 
 
                     # Update High/Low with current candle wicks
@@ -9278,6 +9643,7 @@ class PonchBot:
                     totals = stats["totals"]
                     best_tf = stats.get("best_timeframe")
                     best_strategy = stats.get("best_strategy")
+                    top_review_tags = self._analytics_top_review_tags(days=days)
 
                     def fmt_best(item):
                         if not item:
@@ -9285,6 +9651,13 @@ class PonchBot:
                         return (
                             f"{item['name']} | wr {float(item.get('win_rate', 0.0)):.1f}%"
                             f" | {int(item.get('trades', 0) or 0)} trades"
+                        )
+
+                    tags_text = "n/a"
+                    if top_review_tags:
+                        tags_text = "\n".join(
+                            f"{tag} | {count}"
+                            for tag, count in top_review_tags
                         )
 
                     msg = (
@@ -9306,7 +9679,9 @@ class PonchBot:
                         f"🏆 <b>Best TF</b>\n"
                         f"<blockquote>{fmt_best(best_tf)}</blockquote>\n\n"
                         f"🧠 <b>Best Model</b>\n"
-                        f"<blockquote>{fmt_best(best_strategy)}</blockquote>"
+                        f"<blockquote>{fmt_best(best_strategy)}</blockquote>\n\n"
+                        f"🧩 <b>Top Tags</b>\n"
+                        f"<blockquote>{tags_text}</blockquote>"
                     )
                     tg.send(
                         msg,
@@ -9383,6 +9758,13 @@ class PonchBot:
         """Route a confirmed signal into the Bitunix executor if trading is enabled."""
         if not self.trade_executor.can_trade():
             print(f"  [TRADE] Skipped signal {sig_obj.get('type')} {sig_obj.get('side')}: executor disabled")
+            return
+        meta = (sig_obj or {}).get("meta") or {}
+        if not bool(meta.get("allow_live_trade", False)) and not self._is_hedge_signal(sig_obj):
+            print(
+                f"  [TRADE] Skipped signal {sig_obj.get('type')} {sig_obj.get('side')}: "
+                f"grade {str(meta.get('quality_grade') or 'N/A').upper()} is not allowed for live auto-trading"
+            )
             return
         symbol = str(sig_obj.get("symbol") or (sig_obj.get("meta") or {}).get("symbol") or SYMBOL).upper()
         side = str(sig_obj.get("side") or "").upper()
@@ -10024,12 +10406,22 @@ class PonchBot:
                 fast_move_note = self._get_fast_move_volume_guard(self.latest_data or {}, side, preferred_tf=tf)
                 if fast_move_note:
                     self._record_signal_block("fast_move_volume", now=now)
+                    self._maybe_send_no_trade_alert(
+                        f"fast_move_{tf}_{side}",
+                        f"No clean {side.lower()} right now: {fast_move_note}",
+                        now=now,
+                    )
                     print(f"  [SCALP] Blocked {tf} {side}: {fast_move_note}")
                     continue
 
                 funding_adjust = self._get_bitget_btc_funding_confirmation_adjustment(side, score)
                 if funding_adjust.get("block") and not rsi_pullback_override and not liq_watch_note:
                     self._record_signal_block("bitget_funding_counter", now=now)
+                    self._maybe_send_no_trade_alert(
+                        f"bitget_funding_{side}",
+                        f"No clean {side.lower()} right now: {funding_adjust.get('block_reason')}",
+                        now=now,
+                    )
                     print(f"  [SCALP] Blocked {tf} {side}: {funding_adjust.get('block_reason')}")
                     continue
                 funding_reason = str(funding_adjust.get("reason") or "").strip()
@@ -10040,6 +10432,11 @@ class PonchBot:
                 mx_adjust = self._get_multi_exchange_confirmation_adjustment(side, score)
                 if mx_adjust.get("block") and not rsi_pullback_override and not liq_watch_note:
                     self._record_signal_block("multi_exchange_counter", now=now)
+                    self._maybe_send_no_trade_alert(
+                        f"multi_exchange_{side}",
+                        f"No clean {side.lower()} right now: {mx_adjust.get('block_reason')}",
+                        now=now,
+                    )
                     print(f"  [SCALP] Blocked {tf} {side}: {mx_adjust.get('block_reason')}")
                     continue
                 mx_reason = str(mx_adjust.get("reason") or "").strip()
@@ -10064,6 +10461,11 @@ class PonchBot:
                 if stop_liq_hazard and not rsi_pullback_override and not liq_watch_note:
                     self._register_stop_liq_watch(evt, tf, stop_liq_hazard, now)
                     self._record_signal_block("stop_liquidity_hazard", now=now)
+                    self._maybe_send_no_trade_alert(
+                        f"stop_liq_{tf}_{side}",
+                        f"No clean {side.lower()} yet: {stop_liq_hazard.get('reason')}",
+                        now=now,
+                    )
                     print(f"  [SCALP] Blocked {tf} {side}: {stop_liq_hazard.get('reason')}")
                     continue
 
@@ -10146,6 +10548,11 @@ class PonchBot:
                     max_pct *= regime_vol_max_mult
                     if atr_pct < min_pct or atr_pct > max_pct:
                         self._record_signal_block("volatility_filter", now=now)
+                        self._maybe_send_no_trade_alert(
+                            f"volatility_{tf}",
+                            f"No clean setup: {tf} volatility regime is poor right now.",
+                            now=now,
+                        )
                         print(
                             f"  [SCALP] Blocked {tf} {side}: ATR% {atr_pct:.3f} "
                             f"outside [{min_pct:.3f}, {max_pct:.3f}]"
@@ -10178,6 +10585,11 @@ class PonchBot:
                     self._record_signal_block("news_blackout", now=now)
                     label = str(news_blackout.get("label") or "High Impact News")
                     source = str(news_blackout.get("source") or "NEWS")
+                    self._maybe_send_no_trade_alert(
+                        "news_blackout",
+                        f"No new trade: {label} lock is active.",
+                        now=now,
+                    )
                     print(f"  [SCALP] Blocked {tf} {side}: news blackout active ({label} via {source})")
                     continue
                 if tf == "5m":
@@ -10351,6 +10763,22 @@ class PonchBot:
                         min(float(MAX_SIGNAL_SIZE_PCT), max(float(MIN_SIGNAL_SIZE_PCT), dyn_base * size_mult)),
                         1,
                     )
+                grade_info = self._grade_signal_candidate(
+                    side=side,
+                    tf=tf,
+                    score=score,
+                    reasons=reasons,
+                    signal_type="SCALP",
+                )
+                if not grade_info.get("allow_post"):
+                    self._record_signal_block("quality_grade_avoid", now=now)
+                    self._maybe_send_no_trade_alert(
+                        f"grade_avoid_scalp_{tf}_{side}",
+                        f"No clean {side.lower()} on {tf}: {grade_info.get('grade_reason')}",
+                        now=now,
+                    )
+                    print(f"  [SCALP] Blocked {tf} {side}: {grade_info.get('grade_reason')}")
+                    continue
                 tp_liq = self._estimate_tp_liquidity(evt["side"], evt["entry"], evt["tp1"], evt["tp2"], evt["tp3"])
                 signal_id = new_signal_id()
 
@@ -10383,11 +10811,20 @@ class PonchBot:
                         "tp_liq_prob": tp_liq["prob"] if tp_liq else None,
                         "tp_liq_usd": tp_liq["size_usd"] if tp_liq else None,
                         "tp_liq_target": tp_liq["target"] if tp_liq else None,
+                        "quality_grade": grade_info.get("grade"),
+                        "quality_grade_reason": grade_info.get("grade_reason"),
+                        "quality_score_adjusted": grade_info.get("adjusted_score"),
+                        "allow_live_trade": grade_info.get("allow_trade"),
+                        "allow_post": grade_info.get("allow_post"),
+                        "trend_aligned": grade_info.get("trend_aligned"),
+                        "countertrend": grade_info.get("countertrend"),
+                        "bias_lock": grade_info.get("bias_lock"),
                     }
                 )
                 self.tracker.signals[-1]["signal_id"] = signal_id
                 self.tracker.signals[-1]["signal_size_pct"] = dyn_size
                 self.tracker.signals[-1]["public_signal_is_photo"] = True
+                self._apply_grade_to_signal(self.tracker.signals[-1], grade_info)
                 reinforcement_mode, owner_sig = self._prepare_same_side_signal_behavior(
                     self.tracker.signals[-1],
                     self._find_active_primary_same_side_execution(evt["side"], SYMBOL),

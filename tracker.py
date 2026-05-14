@@ -91,7 +91,13 @@ class SignalTracker:
 
     @staticmethod
     def _breakeven_lock_price(sig):
-        entry = float(sig.get("entry", 0) or 0)
+        execution = (sig or {}).get("execution") or {}
+        entry = float(
+            execution.get("filled_entry_price")
+            or execution.get("entry")
+            or sig.get("entry", 0)
+            or 0
+        )
         if entry <= 0:
             return entry
         side = str(sig.get("side", "")).upper()
@@ -267,7 +273,7 @@ class SignalTracker:
         # instantly fire TP/SL from the same wick that created them.
         new_this_tick = set(self._new_this_tick)
 
-        terminal_statuses = {"SL", "TP3", "CLOSED", "ENTRY_CLOSE", "PROFIT_SL"}
+        terminal_statuses = {"SL", "TP3", "CLOSED", "ENTRY_CLOSE", "PROFIT_SL", "EXPIRED"}
 
         for idx, sig in enumerate(self.signals):
             if idx in new_this_tick:

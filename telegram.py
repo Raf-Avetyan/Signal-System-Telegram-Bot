@@ -543,7 +543,7 @@ def get_signal_levels_code(entry, sl, tp1, tp2, tp3, status="OPEN", tp1_h=False,
 
 def get_signal_html(signal_type, side, timeframe, entry, sl, tp1, tp2, tp3,
                     status="OPEN", tp1_h=False, tp2_h=False, tp3_h=False, sl_h=False,
-                    score=None, trend=None, indicators=None, reasons=None, size=None,
+                    score=None, trend=None, indicators=None, reasons=None, size=None, grade=None,
                     tp_liq_prob=None, tp_liq_usd=None, tp_liq_target=None,
                     trigger_label=None, initial_sl=None):
     """Generate HTML for Scalp, Strong, or Extreme signals."""
@@ -577,20 +577,23 @@ def get_signal_html(signal_type, side, timeframe, entry, sl, tp1, tp2, tp3,
         reasons_label = "Model" if trigger_name == "Smart Money Liquidity" else "Confl"
         reasons_display = f"{reasons_label}:   {', '.join(reasons)}\n" if reasons else ""
         size_display = f"Size:    {size}%\n" if size is not None else ""
+        grade_display = f"Grade:   {grade}\n" if grade else ""
         liq_display = ""
         if tp_liq_prob is not None and tp_liq_usd is not None and tp_liq_target:
             liq_display = f"TP Liq:  {tp_liq_target} ${tp_liq_usd/1e6:.1f}M | Prob {tp_liq_prob:.0f}%\n"
-        details = f"<pre>Trigger: {trigger_name}\n{score_display}{trend_display}{reasons_display}{size_display}{liq_display}</pre>\n"
+        details = f"<pre>Trigger: {trigger_name}\n{score_display}{trend_display}{grade_display}{reasons_display}{size_display}{liq_display}</pre>\n"
     else:
         num_systems = len(indicators) if indicators else 0
         total_points = sum(ind['points'] for ind in indicators) if indicators else 0
         size_display = f"\n<b>Risk Size:</b> {size}%" if size is not None else ""
+        grade_display = f"\n<b>Grade:</b> {grade}" if grade else ""
         liq_display = ""
         if tp_liq_prob is not None and tp_liq_usd is not None and tp_liq_target:
             liq_display = f"\n<b>TP Liquidity:</b> {tp_liq_target} ${tp_liq_usd/1e6:.1f}M | Prob {tp_liq_prob:.0f}%"
         details = (
             f"<b>Confluence:</b> {num_systems} Systems Agree\n"
             f"<b>Total Weight:</b> {total_points} Points"
+            f"{grade_display}"
             f"{size_display}"
             f"{liq_display}\n"
         )
@@ -614,6 +617,8 @@ def get_signal_html(signal_type, side, timeframe, entry, sl, tp1, tp2, tp3,
         msg += f"\n<b>\U0001F7E1 CLOSED AT BREAKEVEN | NOT ACTIVE</b>"
     elif status == "CLOSED":
         msg += f"\n<b>\U0001F6E1 CLOSED AFTER TP | NOT ACTIVE</b>"
+    elif status == "EXPIRED":
+        msg += f"\n<b>\u23F3 SIGNAL EXPIRED | NOT ACTIVE</b>"
 
     if (signal_type in ["STRONG", "EXTREME"]) and indicators:
         ind_lines = []
