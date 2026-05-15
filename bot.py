@@ -1198,6 +1198,14 @@ class PonchBot:
         symbol = (self._extract_symbol_from_text(text) or str(fallback_symbol or "").strip().upper() or "BTCUSDT")
         payload = build_btc_scenarios_payload(symbol=symbol, mode=self._extract_analysis_mode(text))
         funding_rate = float(payload.get("funding_rate") or 0.0)
+        try:
+            live_bitunix_rate = fetch_funding_rate(symbol)
+        except Exception:
+            live_bitunix_rate = None
+        if live_bitunix_rate is not None:
+            funding_rate = self._normalize_bitunix_funding_rate(live_bitunix_rate)
+        else:
+            funding_rate = self._normalize_bitunix_funding_rate(funding_rate)
         funding_ctx = payload.get("funding_ctx") or {}
         multi_ctx = payload.get("multi_ctx") or {}
         funding_map = dict(multi_ctx.get("funding") or {})
@@ -5541,6 +5549,16 @@ class PonchBot:
         elif abs(val) >= 0.02:
             val /= 100.0
         return f"{val:+.{decimals}f}%"
+
+    @staticmethod
+    def _normalize_bitunix_funding_rate(rate):
+        try:
+            val = float(rate or 0.0)
+        except Exception:
+            return 0.0
+        if abs(val) >= 0.02:
+            val /= 100.0
+        return val
 
     def _build_live_exchange_context(self, now=None, force=False):
         now = now or datetime.now(timezone.utc)
