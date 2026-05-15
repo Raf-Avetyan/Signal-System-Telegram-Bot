@@ -72,6 +72,8 @@ def _fmt_funding_pct(value, decimals=4, already_percent=False):
     rate = _safe_float(value)
     if not already_percent:
         rate *= 100.0
+    elif abs(rate) >= 0.02:
+        rate /= 100.0
     return f"{rate:+.{decimals}f}%"
 
 
@@ -284,8 +286,8 @@ def _fetch_bitunix_depth(symbol=SYMBOL, limit="50"):
 
 
 def _funding_context(current_rate, history_rows):
-    current_rate = _safe_float(current_rate)
-    rates = [_safe_float(row.get("fundingRate")) for row in (history_rows or []) if row]
+    current_rate = _normalize_bitunix_funding_rate(current_rate)
+    rates = [_normalize_bitunix_funding_rate(row.get("fundingRate")) for row in (history_rows or []) if row]
     if not rates:
         avg_rate = current_rate
         trend = 0.0

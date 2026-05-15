@@ -1296,7 +1296,7 @@ class PonchBot:
             tf_map = payload.get("tf_map") or {}
             lines.append(
                 f"<blockquote>{symbol.replace('USDT', '')}: 4H {str((tf_map.get('4h') or {}).get('bias') or 'n/a')} | "
-                f"Funding {float(payload.get('funding_rate') or 0):+.6f}% | "
+                f"Funding {self._fmt_funding_pct(payload.get('funding_rate'), decimals=4, already_percent=True)} | "
                 f"Best plan {str((best or {}).get('title') or 'n/a').upper()} | "
                 f"Chance {float((best or {}).get('probability') or 0):.0f}%</blockquote>"
             )
@@ -5469,6 +5469,8 @@ class PonchBot:
             val = 0.0
         if not already_percent:
             val *= 100.0
+        elif abs(val) >= 0.02:
+            val /= 100.0
         return f"{val:+.{decimals}f}%"
 
     def _build_live_exchange_context(self, now=None, force=False):
