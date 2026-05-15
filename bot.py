@@ -1001,9 +1001,43 @@ class PonchBot:
         )
         return any(cue in lower for cue in cues)
 
+    def _looks_like_funding_overview_request(self, text):
+        lower = str(text or "").lower()
+        if "funding" not in lower:
+            return False
+        cues = (
+            "current funding",
+            "latest funding",
+            "funding data",
+            "funding rates",
+            "funding rate",
+            "funding across",
+            "across exchanges",
+            "across the exchanges",
+            "show funding",
+            "give me funding",
+            "need funding",
+            "grab funding",
+            "grab data",
+            "fetch funding",
+            "show me funding",
+            "exchange funding",
+        )
+        if any(cue in lower for cue in cues):
+            return True
+        exchange_names = ("bitunix", "bitunx", "bitget", "binance", "bybit", "okx")
+        mentioned = sum(1 for name in exchange_names if name in lower)
+        if mentioned >= 2:
+            return True
+        if mentioned >= 1 and any(word in lower for word in ("right now", "now", "current", "latest", "futures", "btcusdt", "for btc", "for eth")):
+            return True
+        return False
+
     def _saved_teaching_reply(self, text):
         lower = str(text or "").lower()
         style = self._extract_explain_style(text)
+        if self._looks_like_funding_overview_request(text):
+            return ""
         topics = [
             (
                 ("reclaim",),
@@ -1052,7 +1086,7 @@ class PonchBot:
                 },
             ),
             (
-                ("crowded funding", "funding"),
+                ("crowded funding", "how funding works", "what is funding", "explain funding", "funding means"),
                 {
                     "simple": (
                         "<b>Crowded Funding</b>\n"
@@ -1158,6 +1192,32 @@ class PonchBot:
             f"Why it is priced this way: current price is {price:,.2f}, and the bot is rewarding trend alignment, funding support, and cleaner liquidity path while penalizing crowded positioning and messy structure.",
             f"<blockquote>Confidence: {self._payload_confidence_label(payload)}</blockquote>",
         ]
+        return "\n".join(lines)
+
+    def _build_funding_overview_answer(self, text, fallback_symbol=None):
+        symbol = (self._extract_symbol_from_text(text) or str(fallback_symbol or "").strip().upper() or "BTCUSDT")
+        payload = build_btc_scenarios_payload(symbol=symbol, mode=self._extract_analysis_mode(text))
+        funding_rate = float(payload.get("funding_rate") or 0.0)
+        funding_ctx = payload.get("funding_ctx") or {}
+        multi_ctx = payload.get("multi_ctx") or {}
+        funding_map = dict(multi_ctx.get("funding") or {})
+
+        lines = [f"<b>{symbol.replace('USDT', '')} funding snapshot</b>"]
+        rows = [f"Bitunix: {self._fmt_funding_pct(funding_rate, decimals=4, already_percent=True)}"]
+        bitget_rate = funding_map.get("bitget")
+        if bitget_rate is not None:
+            rows.append(f"Bitget: {self._fmt_funding_pct(bitget_rate, decimals=4)}")
+        for name in ("binance", "bybit", "okx"):
+            rate = funding_map.get(name)
+            if rate is not None:
+                rows.append(f"{name.upper()}: {self._fmt_funding_pct(rate, decimals=4)}")
+
+        lines.append("<blockquote>" + "\n".join(rows) + "</blockquote>")
+        lines.append(
+            f"Read: <b>{html.escape(str(funding_ctx.get('bias') or 'flat'))}</b>. "
+            "Bitget matters most for the bot’s funding read, but it compares the full exchange set."
+        )
+        lines.append(f"<blockquote>Confidence: {self._payload_confidence_label(payload)}</blockquote>")
         return "\n".join(lines)
 
     def _build_no_trade_answer(self, text, fallback_symbol=None):
@@ -1320,6 +1380,15 @@ class PonchBot:
                 answer = self._build_symbol_chart_chat_answer(prompt or recent_symbol, fallback_symbol=recent_symbol, mode=mode, style=style)
                 if answer:
                     return {"answer": answer, "symbol": recent_symbol, "mode": mode, "style": style, "intent": "chart_followup"}
+        if self._looks_like_funding_overview_request(prompt):
+            symbol = self._extract_symbol_from_text(prompt) or fallback_symbol or "BTCUSDT"
+            return {
+                "answer": self._build_funding_overview_answer(prompt, fallback_symbol=symbol),
+                "symbol": symbol,
+                "mode": mode,
+                "style": style,
+                "intent": "funding",
+            }
         saved = self._saved_teaching_reply(prompt)
         if saved:
             return {"answer": saved, "symbol": fallback_symbol or "", "mode": mode, "style": style, "intent": "education"}

@@ -19,7 +19,7 @@
       "execution_tf": "15m",
       "scenario_mode": "short_term",
       "entry_mid": 78584.83333333333,
-      "_sticky_cached_at": 1778864993.9020123
+      "_sticky_cached_at": 1778865418.6341891
     },
     "SHORT::SHORT REJECTION PLAN": {
       "title": "Short rejection plan",
@@ -40,7 +40,7 @@
       "execution_tf": "15m",
       "scenario_mode": "short_term",
       "entry_mid": 80302.13235382024,
-      "_sticky_cached_at": 1778864993.9020228
+      "_sticky_cached_at": 1778865418.6342144
     },
     "SHORT::SHORT LOCAL RESISTANCE PLAN": {
       "title": "Short local resistance plan",
@@ -61,19 +61,19 @@
       "execution_tf": "15m",
       "scenario_mode": "short_term",
       "entry_mid": 81054.1,
-      "_sticky_cached_at": 1778864993.9020302
+      "_sticky_cached_at": 1778865418.634227
     },
     "SHORT::SHORT BREAKDOWN PLAN": {
       "title": "Short breakdown plan",
       "side": "SHORT",
       "kind": "breakdown",
       "probability": 51.0,
-      "entry_low": 78489.72541333333,
-      "entry_high": 78489.72541333333,
+      "entry_low": 78489.74521333333,
+      "entry_high": 78489.74521333333,
       "stop": 78758.66498049723,
-      "tp1": 78230.21959721009,
-      "tp2": 78120.95399042136,
-      "tp3": 77984.37198193544,
+      "tp1": 78230.23939721008,
+      "tp2": 78120.97379042135,
+      "tp3": 77984.39178193544,
       "risk_style": "small",
       "risk_pct": 0.3,
       "trend_aligned": true,
@@ -81,20 +81,20 @@
       "note": "Use only if support is lost cleanly and downside momentum expands.",
       "execution_tf": "15m",
       "scenario_mode": "short_term",
-      "entry_mid": 78489.72541333333,
-      "_sticky_cached_at": 1778864993.902037
+      "entry_mid": 78489.74521333333,
+      "_sticky_cached_at": 1778865418.6342342
     },
     "LONG::LONG BREAKOUT PLAN": {
       "title": "Long breakout plan",
       "side": "LONG",
       "kind": "breakout",
       "probability": 49.8,
-      "entry_low": 80397.24027382024,
-      "entry_high": 80397.24027382024,
+      "entry_low": 80397.22047382024,
+      "entry_high": 80397.22047382024,
       "stop": 80128.30070665634,
-      "tp1": 80656.74608994348,
-      "tp2": 80766.01169673221,
-      "tp3": 80902.59370521813,
+      "tp1": 80656.72628994349,
+      "tp2": 80765.99189673222,
+      "tp3": 80902.57390521813,
       "risk_style": "small",
       "risk_pct": 0.3,
       "trend_aligned": false,
@@ -102,8 +102,8 @@
       "note": "Use only if momentum holds and no pullback entry appears first.",
       "execution_tf": "15m",
       "scenario_mode": "short_term",
-      "entry_mid": 80397.24027382024,
-      "_sticky_cached_at": 1778864993.9020438
+      "entry_mid": 80397.22047382024,
+      "_sticky_cached_at": 1778865418.6342423
     },
     "LONG::LONG CONTINUATION RETEST PLAN": {
       "title": "Long continuation retest plan",
@@ -114,7 +114,7 @@
       "entry_high": 81093.83294792318,
       "stop": 80790.86922000897,
       "tp1": 81304.16924099148,
-      "tp2": 81399.27716099148,
+      "tp2": 81399.25736099148,
       "tp3": 81541.07694298342,
       "risk_style": "starter",
       "risk_pct": 0.35,
@@ -124,7 +124,7 @@
       "execution_tf": "15m",
       "scenario_mode": "short_term",
       "entry_mid": 81054.1,
-      "_sticky_cached_at": 1778864993.9020522
+      "_sticky_cached_at": 1778865418.6342487
     }
   }
 }
