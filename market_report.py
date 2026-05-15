@@ -68,6 +68,10 @@ def _fmt_price(value):
     return f"{_safe_float(value):,.2f}"
 
 
+def _fmt_funding_pct(value, decimals=4):
+    return f"{_safe_float(value) * 100:+.{decimals}f}%"
+
+
 def _load_json_file(path, default):
     if not os.path.exists(path):
         return default
@@ -2040,7 +2044,7 @@ def build_btc_market_report(symbol=SYMBOL, mode="swing"):
             f"\U0001F4CD <b>{mode_cfg['title']}</b>\n\n"
             "<blockquote>"
             f"Price: {_fmt_price(current_price)}\n"
-            f"Funding: {funding_rate_raw:+.6f}%"
+            f"Funding: {_fmt_funding_pct(funding_rate_raw)}"
             "</blockquote>"
         ),
     ]

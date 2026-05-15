@@ -1152,7 +1152,7 @@ class PonchBot:
                 "</blockquote>"
             ),
             f"Trend: 1H {str((tf_map.get('1h') or {}).get('bias') or 'n/a')} | 4H {str((tf_map.get('4h') or {}).get('bias') or 'n/a')} | 1D {str((tf_map.get('1d') or {}).get('bias') or 'n/a')}",
-            f"Funding: {float(payload.get('funding_rate') or 0):+.6f}% ({str(funding_ctx.get('bias') or 'flat')})",
+            f"Funding: {self._fmt_funding_pct(payload.get('funding_rate'), decimals=4)} ({str(funding_ctx.get('bias') or 'flat')})",
             f"Positioning: {str(cot_ctx.get('summary') or 'Neutral')}",
             f"Liquidity: {liq_text}",
             f"Why it is priced this way: current price is {price:,.2f}, and the bot is rewarding trend alignment, funding support, and cleaner liquidity path while penalizing crowded positioning and messy structure.",
@@ -1198,7 +1198,7 @@ class PonchBot:
         reasons = reasons[:3] or ["price still needs a cleaner trigger first"]
         lines = [
             f"<b>{symbol.replace('USDT', '')} why no trade yet</b>",
-            f"<blockquote>Price: {current_price:,.2f} | Funding: {float(payload.get('funding_rate') or 0):+.6f}%</blockquote>",
+            f"<blockquote>Price: {current_price:,.2f} | Funding: {self._fmt_funding_pct(payload.get('funding_rate'), decimals=4)}</blockquote>",
             "Main blockers:",
         ]
         lines.extend([f"- {reason}" for reason in reasons])
@@ -3803,7 +3803,7 @@ class PonchBot:
             f"🟡 <b>BTC Liquidation Map</b>\n\n"
             f"<blockquote>"
             f"Price: {float(snapshot.get('current_price', 0) or 0):,.2f}\n"
-            f"Funding: {float(snapshot.get('funding_rate', 0) or 0):+.6f}%"
+            f"Funding: {self._fmt_funding_pct(snapshot.get('funding_rate'), decimals=4)}"
             f"</blockquote>\n"
             f"<blockquote>{chr(10).join(compact_lines)}</blockquote>"
         )
@@ -3894,15 +3894,16 @@ class PonchBot:
 
         funding_map = dict(multi_ctx.get("funding") or {})
         funding_bits = []
+        funding_bits.append(f"Bitunix {self._fmt_funding_pct(funding_rate, decimals=4)}")
         bitget_rate = funding_map.get("bitget")
         if bitget_rate is not None:
-            funding_bits.append(f"Bitget {float(bitget_rate):+.6f}%")
+            funding_bits.append(f"Bitget {self._fmt_funding_pct(bitget_rate, decimals=4)}")
         for name in ("binance", "bybit", "okx"):
             rate = funding_map.get(name)
             if rate is not None:
-                funding_bits.append(f"{name.upper()} {float(rate):+.6f}%")
+                funding_bits.append(f"{name.upper()} {self._fmt_funding_pct(rate, decimals=4)}")
         if not funding_bits:
-            funding_text = f"{funding_rate:+.6f}% ({html.escape(funding_bias)})"
+            funding_text = f"{self._fmt_funding_pct(funding_rate, decimals=4)} ({html.escape(funding_bias)})"
         else:
             funding_text = f"{' | '.join(funding_bits)} ({html.escape(funding_bias)})"
         no_trade = "Wait for the session sweep first if price expands aggressively into liquidity without reclaim/rejection confirmation."
@@ -5359,7 +5360,7 @@ class PonchBot:
             (
                 "<blockquote>"
                 f"Price: {current_price:,.2f}\n"
-                f"Funding: {funding_rate:+.6f}% ({funding_bias})\n"
+                f"Funding: {self._fmt_funding_pct(funding_rate, decimals=4)} ({funding_bias})\n"
                 f"1H: {bias_1h} | 4H: {bias_4h} | 1D: {bias_1d}\n"
                 f"24H: {day_change:+.2f}%"
                 "</blockquote>"
@@ -5459,6 +5460,14 @@ class PonchBot:
         if abs(val) < 1e-12:
             return f"{0:.{decimals}f}"
         return f"{val:.{decimals}f}"
+
+    @staticmethod
+    def _fmt_funding_pct(rate, decimals=4):
+        try:
+            val = float(rate or 0.0)
+        except Exception:
+            val = 0.0
+        return f"{val * 100:+.{decimals}f}%"
 
     def _build_live_exchange_context(self, now=None, force=False):
         now = now or datetime.now(timezone.utc)
