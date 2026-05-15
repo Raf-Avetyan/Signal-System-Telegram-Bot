@@ -192,6 +192,7 @@ class PonchBot:
         self.last_liquidation_map_date = state.get("last_liquidation_map_date")
         self.last_education_post_date = state.get("last_education_post_date")
         self.last_education_post_slot = state.get("last_education_post_slot")
+        self.education_category_indices = state.get("education_category_indices", {}) or {}
         self.last_today_wins_batch_date = state.get("last_today_wins_batch_date")
         self.pending_stop_liq_watches = state.get("pending_stop_liq_watches", {})
         self.scenario_trade_cooldowns = state.get("scenario_trade_cooldowns", {})
@@ -3693,18 +3694,81 @@ class PonchBot:
             ),
         ]
 
-    def _send_member_education_post(self):
+    @staticmethod
+    def _education_topic_from_post(post_html):
+        match = re.search(r"Topic:\s*([^<]+)</blockquote>", str(post_html or ""), flags=re.IGNORECASE)
+        return str(match.group(1)).strip() if match else ""
+
+    def _classify_education_post(self, post_html):
+        topic = self._education_topic_from_post(post_html).lower()
+        if not topic:
+            return "risk_execution"
+
+        psychology_markers = [
+            "մոդուլ 4", "հոգեբան", "fear", "greed", "revenge", "overtrading",
+            "bias", "drawdown", "journal", "routine", "emotion", "psycholog",
+        ]
+        risk_execution_markers = [
+            "risk management", "daily loss", "expectancy", "leverage", "scaling out",
+            "trade management", "execution", "slippage", "risk-reward", "մոդուլ 10",
+            "margin", "liquidation", "spot", "futures", "trade setup", "breakeven",
+            "session", "news", "playbook", "weekly risk", "risk", "profit",
+        ]
+        technical_markers = [
+            "մոդուլ 2", "մոդուլ 3", "մոդուլ 5", "մոդուլ 6", "մոդուլ 7", "մոդուլ 8", "մոդուլ 9",
+            "candlestick", "support", "resistance", "breakout", "swing", "structure",
+            "price action", "trend", "rsi", "macd", "bollinger", "stochastic", "atr",
+            "vwap", "volume profile", "fibonacci", "smart money", "order block", "fair value gap",
+            "fvg", "bos", "choch", "liquidity", "supply", "demand", "indicator",
+        ]
+
+        if any(marker in topic for marker in psychology_markers):
+            return "psychology"
+        if any(marker in topic for marker in technical_markers):
+            return "technical"
+        if any(marker in topic for marker in risk_execution_markers):
+            return "risk_execution"
+        return "risk_execution"
+
+    def _education_slot_category(self, now):
+        hour = int((now or datetime.now(timezone.utc)).hour)
+        if hour == 8:
+            return "technical"
+        if hour == 12:
+            return "psychology"
+        if hour == 16:
+            return "risk_execution"
+        return "technical"
+
+    def _education_posts_by_category(self):
+        posts = list(PROFESSIONAL_MEMBER_EDUCATION_POSTS or []) or self._member_education_posts()
+        grouped = {"technical": [], "psychology": [], "risk_execution": []}
+        for post in posts:
+            grouped.setdefault(self._classify_education_post(post), []).append(post)
+        return grouped
+
+    def _send_member_education_post(self, now=None):
         posts = list(PROFESSIONAL_MEMBER_EDUCATION_POSTS or []) or self._member_education_posts()
         if not posts or self.is_booting:
             return
-        idx = int(self.education_post_index or 0) % len(posts)
+        now = now or datetime.now(timezone.utc)
+        category = self._education_slot_category(now)
+        grouped = self._education_posts_by_category()
+        category_posts = list(grouped.get(category) or [])
+        if category_posts:
+            idx = int((self.education_category_indices or {}).get(category, 0) or 0) % len(category_posts)
+            chosen_post = category_posts[idx]
+            self.education_category_indices[category] = idx + 1
+        else:
+            idx = int(self.education_post_index or 0) % len(posts)
+            chosen_post = posts[idx]
         tg.send(
-            posts[idx],
+            chosen_post,
             parse_mode="HTML",
             chat_id=self._signal_chat_id(),
             message_thread_id=self._general_thread_id(),
         )
-        self.education_post_index = idx + 1
+        self.education_post_index = int(self.education_post_index or 0) + 1
         self._save_state()
 
     def _send_liquidation_map_post(self, *, chat_id=None, message_thread_id=None):
@@ -9352,6 +9416,7 @@ class PonchBot:
                 "last_liquidation_map_date": self.last_liquidation_map_date,
                 "last_education_post_date": self.last_education_post_date,
                 "last_education_post_slot": self.last_education_post_slot,
+                "education_category_indices": self.education_category_indices,
                 "last_today_wins_batch_date": self.last_today_wins_batch_date,
                 "pending_stop_liq_watches": self.pending_stop_liq_watches,
                 "scenario_trade_cooldowns": self.scenario_trade_cooldowns,
@@ -9502,7 +9567,7 @@ class PonchBot:
         if now.minute == 0 and now.hour in {8, 12, 16}:
             slot_key = now.strftime("%d.%m.%Y %H")
             if self.last_education_post_slot != slot_key:
-                self._send_member_education_post()
+                self._send_member_education_post(now=now)
                 self.last_education_post_slot = slot_key
                 self.last_education_post_date = now.strftime("%d.%m.%Y")
                 self._save_state()

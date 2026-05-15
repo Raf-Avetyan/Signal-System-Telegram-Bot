@@ -376,8 +376,352 @@ def _actionable_playbook_posts():
     return [_education_post(topic, body) for topic, body in playbooks]
 
 
+def _technical_topic_posts(module_title, topic, lesson, example_one, example_two, takeaway):
+    return [
+        _education_post(
+            f"{module_title} — {topic} | Example 1",
+            f"{lesson} Example 1: {example_one} {takeaway}",
+        ),
+        _education_post(
+            f"{module_title} — {topic} | Example 2",
+            f"{lesson} Example 2: {example_two} {takeaway}",
+        ),
+    ]
+
+
+def _technical_topic_content(module_title, topic):
+    topic_lower = str(topic or "").lower()
+    custom = [
+        (
+            ["fvg", "fair value gap"],
+            (
+                "Fair Value Gap is a three-candle imbalance where price moved so fast that inefficient space was left behind.",
+                "BTC prints a strong displacement from 79,800 to 80,420 and leaves a gap between the first candle high and the third candle low. If price later comes back into that gap and holds, the FVG can act like a continuation demand zone.",
+                "ETH sells off hard, leaves a bearish FVG overhead, then rallies back into that gap but rejects before filling the whole area. That kind of FVG failure can become a short continuation entry.",
+                "The key rule is that FVG is not a blind entry. It works best when it aligns with structure, liquidity, and trend.",
+            ),
+        ),
+        (
+            ["order block", "(ob)", " ob"],
+            (
+                "An order block is usually the last opposing candle or small base before the displacement that actually broke structure.",
+                "BTC breaks structure upward and the last bearish candle before the impulse becomes the bullish order block. When price returns there and shows acceptance, traders often use it as a precise long zone instead of chasing the breakout.",
+                "ETH breaks down from a clear swing low, and the last bullish candle before that displacement becomes the bearish order block. If price retests that candle body and fails to reclaim it, the order block has done its job.",
+                "Good order blocks are linked to real displacement and structure shift. Without that, it is just another candle zone.",
+            ),
+        ),
+        (
+            ["bos", "break of structure"],
+            (
+                "Break of Structure matters when price takes out a meaningful swing and closes through it with conviction.",
+                "BTC forms higher lows, then breaks the last clear lower high at 80,600 with a displacement candle. That is a bullish BOS because structure advanced, not just because price poked above a minor wick.",
+                "ETH loses a key higher low on 1H and cannot reclaim it on the retest. That is a bearish BOS because the prior supportive structure actually failed.",
+                "A proper BOS usually changes what side gets priority next. That is why it matters for bias, not only for labels.",
+            ),
+        ),
+        (
+            ["choch", "change of character"],
+            (
+                "Change of Character is often the first meaningful sign that the old trend is losing control.",
+                "BTC has been printing lower highs and lower lows, but then it suddenly breaks the last lower high and holds above it. That first break can be read as CHoCH before the full bullish structure is confirmed.",
+                "ETH trends up cleanly, then fails to make a new higher high and loses the last higher low. That shift is often the first bearish CHoCH before a larger breakdown follows.",
+                "CHoCH is earlier than full confirmation, so it is useful, but it should be respected together with liquidity and confirmation, not alone.",
+            ),
+        ),
+        (
+            ["liquidity", "stop hunt", "liquidity grab"],
+            (
+                "Liquidity is where obvious stops or breakout orders tend to sit, and the market often targets it before the real move begins.",
+                "BTC builds equal lows at 79,950, sweeps them to 79,880, and then reclaims. The sweep is not the long entry by itself; the reclaim is the part that proves the sell-side liquidity was likely taken.",
+                "ETH builds equal highs under 3,420, runs through them by a few dollars, and then closes back below. That is a classic buy-side stop hunt, and the better short usually comes after the failed hold.",
+                "Think of liquidity as a magnet first and an entry trigger only after price proves what it wants to do there.",
+            ),
+        ),
+        (
+            ["rsi"],
+            (
+                "RSI measures momentum, but context decides whether that momentum matters.",
+                "BTC can stay above RSI 70 for several candles during a strong trend. That alone does not make it a short if structure still prints higher highs and higher lows.",
+                "ETH can print bullish divergence into a support zone while RSI makes a higher low against a lower price low. That becomes useful only if price also reclaims the level.",
+                "RSI is strongest as a supporting clue, not as a stand-alone reason to enter.",
+            ),
+        ),
+        (
+            ["macd"],
+            (
+                "MACD is helpful for momentum shifts, but it is still a lagging tool that should confirm price, not replace it.",
+                "BTC reclaims a level while MACD histogram turns from deeply negative toward neutral. That supports the idea that bearish momentum is fading.",
+                "ETH prints a MACD bullish cross, but price is still trapped under resistance and cannot close above it. In that case MACD is not enough to justify the long.",
+                "When MACD agrees with structure and liquidity, it adds weight. When it fights the chart, the chart wins.",
+            ),
+        ),
+        (
+            ["moving averages", "ema", "sma"],
+            (
+                "Moving averages are best used as trend filters and dynamic support or resistance.",
+                "BTC pulls back into a rising 20 EMA while 4H structure stays bullish. That kind of touch is often more useful than buying a random green candle far from the average.",
+                "ETH trades below a falling 200 SMA, and every rally into the 50 EMA gets sold. That tells you the trend filter still favors short-side setups.",
+                "The average is context, not permission. Price still needs a trigger at the level.",
+            ),
+        ),
+        (
+            ["atr"],
+            (
+                "ATR tells you whether your stop is realistic relative to current volatility.",
+                "If BTC 15m ATR is about $280 and you place a $70 stop inside that noise, getting stopped out does not necessarily mean the idea was wrong; the stop was simply too small for the environment.",
+                "If ETH 1H ATR is 1.5% and your target is only 0.4%, the setup may not offer enough room to justify the trade.",
+                "ATR protects traders from choosing stops and targets that the current market regime is unlikely to respect.",
+            ),
+        ),
+        (
+            ["vwap", "volume profile"],
+            (
+                "VWAP and volume profile show where business was done and where price may react around fair value.",
+                "BTC can reclaim VWAP after a sweep and use it as intraday support. That often tells you buyers are regaining control around the average transaction area.",
+                "ETH can stall inside a high-volume node because that area previously hosted a lot of two-way trade. Until it escapes, trend continuation may remain slow.",
+                "These tools work best when they support a structure story, not when they become the whole story.",
+            ),
+        ),
+        (
+            ["fibonacci", "fib"],
+            (
+                "Fibonacci is most useful when applied to obvious swings that already matter structurally.",
+                "BTC rallies from 79,400 to 80,900, then pulls back into the 0.5 to 0.618 zone while that same area overlaps with an old breakout level. That confluence is what makes the retracement interesting.",
+                "ETH breaks down, then retests near the 0.618 pullback where a bearish order block sits. That overlap creates a more believable short than the fib level alone.",
+                "Fib becomes valuable when it agrees with price memory, liquidity, or trend structure.",
+            ),
+        ),
+        (
+            ["support", "resistance"],
+            (
+                "Support and resistance matter because they show where buyers or sellers previously defended price.",
+                "BTC can bounce three times from 79,800 and prove that level matters. The more important question then becomes whether the next test holds or sweeps the stops below it.",
+                "ETH can reject several times from 3,420, which turns that price into resistance. If the market later closes above and retests it successfully, resistance can flip into support.",
+                "A level is useful when it changes behavior, not just because a line exists on the chart.",
+            ),
+        ),
+        (
+            ["breakout", "fakeout"],
+            (
+                "Breakouts that hold are different from fakeouts that simply grab liquidity and fail.",
+                "BTC closes above 81,000 and then retests it as support. That is a more trustworthy breakout than a wick above 81,000 that falls right back inside the range.",
+                "ETH pushes through range highs, attracts breakout buyers, then loses the level on the next candle. That is the kind of fakeout that often creates the better short after the failure.",
+                "The hold or failure after the break matters more than the first touch through the line.",
+            ),
+        ),
+        (
+            ["engulfing", "doji", "hammer", "shooting star"],
+            (
+                "Candlestick patterns only matter when they appear in useful context.",
+                "BTC can print a hammer after sweeping a known low. That is much more meaningful than a hammer in the middle of nowhere.",
+                "ETH can form a bearish engulfing pattern at a premium retracement or resistance retest. There the pattern is confirming rejection, not inventing it.",
+                "Pattern plus level plus context is what makes the read professional.",
+            ),
+        ),
+        (
+            ["psychology", "fear", "greed", "revenge", "overtrading", "bias"],
+            (
+                "Psychology topics are practical because most trader mistakes come from behavior, not from missing one more indicator.",
+                "After a BTC stop-out, a trader immediately flips short without a real setup just to get the loss back. That is revenge trading, and the market does not care that the previous trade hurt.",
+                "After a winning ETH trade, greed can make the trader oversize the next setup or hold the runner with no evidence left. That turns a good day into a messy one.",
+                "The fix is routine, size control, and written process, not just motivation.",
+            ),
+        ),
+        (
+            ["margin", "liquidation", "leverage"],
+            (
+                "Leverage changes margin efficiency, but liquidation risk turns execution mistakes into much bigger problems.",
+                "A BTC long with a structurally correct stop can still be dangerous if the liquidation price sits too close because leverage is excessive.",
+                "An ETH futures trade may look small in margin terms, but if the real stop-based risk is not controlled, leverage is just making the mistake faster.",
+                "Risk should always be built from invalidation first and leverage second, never the other way around.",
+            ),
+        ),
+    ]
+
+    for keys, content in custom:
+        if any(key in topic_lower for key in keys):
+            return content
+
+    if "մոդուլ 4" in module_title.lower():
+        return (
+            "This topic belongs to trader psychology, so the useful question is always how the behavior shows up in real execution.",
+            "On BTC, the concept usually becomes visible when the trader changes the plan because of fear, greed, tilt, or impatience rather than because the chart truly changed.",
+            "On ETH, the same concept often appears when the trader forces extra trades during chop or refuses to accept a planned stop because of emotion.",
+            "The practical edge comes from identifying the behavior early and giving it a process-based correction.",
+        )
+    if "մոդուլ 9" in module_title.lower():
+        return (
+            "This topic is about tools, so the main lesson is that every script or indicator should speed up observation without replacing judgement.",
+            "On BTC, a tool can help surface levels, structure, or alerts faster, but the trader still has to decide whether the context is clean enough to act.",
+            "On ETH, the same script can become noise if it plots too many levels and makes the chart harder to read than the raw price itself.",
+            "Good tool usage means faster clarity, not more clutter.",
+        )
+    if "մոդուլ 10" in module_title.lower():
+        return (
+            "This topic is about live trading reality, so the useful angle is always risk, execution, and operational safety.",
+            "On BTC, the lesson often shows up in how orders are filled, how stops are respected, and whether the trader follows the plan under pressure.",
+            "On ETH, the same lesson often appears in leverage decisions, margin awareness, or whether the trader is using the right product for the objective.",
+            "The goal is not just a good idea, but safe and repeatable execution.",
+        )
+    if "մոդուլ 7" in module_title.lower() or "մոդուլ 8" in module_title.lower():
+        return (
+            "This topic lives inside Smart Money Concepts, so the main task is to connect liquidity, structure, and displacement instead of treating the label like magic.",
+            "On BTC, the clean example is usually a sweep, structure shift, or retracement into a marked zone where the move actually began.",
+            "On ETH, the same concept often becomes clearer when a premium or discount area lines up with a rejection, reclaim, or displacement candle.",
+            "The concept becomes useful only when it changes the plan, not when it is just another annotation on the chart.",
+        )
+    if "մոդուլ 5" in module_title.lower():
+        return (
+            "This topic is about indicators, so the real edge is learning what the tool confirms and what it cannot confirm by itself.",
+            "On BTC, an indicator is most helpful when it agrees with a structure or liquidity read that already makes sense on the chart.",
+            "On ETH, the same indicator can become misleading if it is used alone while price is still stuck inside resistance, support, or range noise.",
+            "Indicators are strongest as filters and confirmations, not as blind entry buttons.",
+        )
+    if "մոդուլ 6" in module_title.lower():
+        return (
+            "This topic is about entries and trade construction, so the main question is always where the invalidation sits and whether the reward justifies the risk.",
+            "On BTC, a good example is waiting for the cleaner retracement or retest instead of forcing the trade from the middle of the move.",
+            "On ETH, the same idea often means using confluence so the entry is tighter, the stop is more logical, and the target has real room to travel.",
+            "If the entry style improves precision, the whole trade improves with it.",
+        )
+    if "մոդուլ 3" in module_title.lower():
+        return (
+            "This topic is about trend and price action, so the point is to read how price is moving before deciding what strategy fits.",
+            "On BTC, the concept becomes visible when you compare impulsive candles to corrective pullbacks and see whether the market is trending or just ranging.",
+            "On ETH, the same read often helps decide whether you should follow continuation or wait for a reversal signal after exhaustion.",
+            "Price action is useful when it changes what kind of trade you take, not just how you describe the chart afterward.",
+        )
+    return (
+        "This topic is part of technical chart reading, so the goal is to see how the concept appears in real structure instead of memorizing the term only.",
+        "On BTC, the best example usually shows up around a clear level, trend phase, or liquidity event where the concept can change entry timing.",
+        "On ETH, the same concept often looks cleaner because the move is smaller in dollars, but the logic is still the same: context first, trigger second.",
+        "Always ask how this concept would improve your entry, stop, target, or no-trade decision.",
+    )
+
+
+def _technical_curriculum_posts():
+    curriculum = [
+        ("✅ Մոդուլ 2․ Մոմային անալիզ և շուկայի կառուցվածք", [
+            "11. Candlestick-ի կառուցվածքը և տրամաբանությունը",
+            "12. Bullish/Bearish patterns – Engulfing, Doji, Hammer, Shooting Star",
+            "13. Թայմֆրեյմերի աշխատանք – M1-ից մինչև 1W",
+            "14. Support և Resistance՝ հորիզոնական և դինամիկ",
+            "15. Breakouts և Fakeouts",
+            "16. Swing High / Swing Low",
+            "17. Շուկայի կառուցվածք – HH, HL, LH, LL",
+            "18. Կոնսոլիդացիա / ռենջ",
+            "19. Գործնական – նշում իրական գրաֆիկների վրա",
+            "20. BTC/ETH օրինակի անալիզ",
+        ]),
+        ("✅ Մոդուլ 3․ Թրենդ, գնի շարժ և Price Action", [
+            "21. Թրենդի տեսակներ – աճ, անկում, հորիզոնական",
+            "22. Թրենդի փուլեր – Accumulation, Expansion, Distribution",
+            "23. Price Action-ի հիմունքներ",
+            "24. Impulse և Correction շարժեր",
+            "25. Հակառակ տենդենցի ձևեր – Double Top/Bottom, Head & Shoulders",
+            "26. Շարունակականություն՝ Flag, Pennant, Triangle",
+            "27. Ծավալ և թրենդի ուժ",
+            "28. Գործնական վարժանքներ",
+            "29. Թրենդի փոփոխության նշաններ",
+            "30. Price Action ստրատեգիայի կառուցում",
+        ]),
+        ("✅ Մոդուլ 4․ Թրեյդերի հոգեբանություն", [
+            "31. Վախ և ագահություն",
+            "32. Սխալներ՝ Revenge Trading, Overtrading",
+            "33. Cognitive biases՝ Confirmation bias, Loss aversion",
+            "34. Ռիսկի հանդուրժողականություն և էմոցիոնալ վերահսկում",
+            "35. Trading Journal – գրանցում, վերլուծություն",
+            "36. Trading ռեժիմներ և ռուտինա",
+            "37. Volatile շուկաների հոգեբանական մարտահրավերներ",
+            "38. Drawdown-ների հետ աշխատանք",
+            "39. Սիմուլյացիոն վարժանքներ",
+            "40. Գտիր քո թրեյդերական տիպը",
+        ]),
+        ("✅ Մոդուլ 5․ Տեխնիկական ինդիկատորներ", [
+            "41. Moving Averages (EMA/SMA) – 20, 50, 200",
+            "42. RSI – Relative Strength Index",
+            "43. MACD",
+            "44. Bollinger Bands",
+            "45. Stochastic Oscillator",
+            "46. ATR – Average True Range",
+            "47. Volume Profile, VWAP",
+            "48. Դիվերգենցիա",
+            "49. Ինդիկատորների համադրություն",
+            "50. Ինդիկատորով ստրատեգիայի կառուցում",
+        ]),
+        ("✅ Մոդուլ 6․ Fibonacci և մուտքի տեխնիկաներ", [
+            "51. Fibonacci Retracement/Extension",
+            "52. Կոնֆլյուենցիայով զոնաների հայտնաբերում",
+            "53. Մուտքի ձևեր՝ Breakout Entry, Retest Entry",
+            "54. Risk-Reward Ratio",
+            "55. SL և TP-ի ճիշտ տեղադրում",
+            "56. Մասնակի profit-ի ֆիքսում",
+            "57. Swing",
+            "58. Scaling ծանոթացում",
+            "59. Trade Setup ձևաչափեր",
+            "60. Գործնական վարժանք – Fibonacci-ի կիրառում",
+        ]),
+        ("✅ Մոդուլ 7․ Smart Money Concepts (SMC)", [
+            "61. Ի՞նչ է Smart Money – ինստիտուցիոնալ մտածելակերպ",
+            "62. Liquidity – Buy-side / Sell-side",
+            "63. Liquidity Grabs / Stop Hunt",
+            "64. BOS – Break of Structure",
+            "65. CHoCH – Change of Character",
+            "66. Order Blocks (OB)",
+            "67. Fair Value Gaps (FVG)",
+            "68. Inducement – ներքին լիկվիդության մանիպուլյացիա",
+            "69. Premium / Discount Zones",
+            "70. BTC/ETH օրինակներով Smart Money վերլուծություն",
+        ]),
+        ("✅ Մոդուլ 8․ SMC ստրատեգիաներ", [
+            "71. Order Block Entry Strategy",
+            "72. Liquidity Sweep Strategy",
+            "73. FVG + OB Combo",
+            "74. Asian Range + London Breakout",
+            "75. Supply & Demand Zones",
+            "76. SMC Trading Plan-ի կառուցում",
+            "77. High R:R Setup-ների ձևավորում",
+            "78. Smart Risk Management",
+            "79. SMC vs Indicator Analysis",
+            "80. Trading Journal SMC-ի համար",
+        ]),
+        ("✅ Մոդուլ 9․ Smart Money ինդիկատորներ", [
+            "81. LuxAlgo Smart Money Concepts",
+            "82. Smart Money Indicator by Quantlab",
+            "83. OB & BOS Auto Plot",
+            "84. FVG Detector",
+            "85. Liquidity Maps – Coinglass, Hyblock",
+            "86. Volume Imbalance Tools",
+            "87. ICT Concepts Indicator (Free)",
+            "88. Alerts – BOS, OB, FVG",
+            "89. Սքրիպտեր՝ ռիսկի կառավարման համար",
+            "90. TradingView գործիքների հավաքածու",
+        ]),
+        ("✅ Մոդուլ 10․ Իրական առևտուր և անվտանգություն", [
+            "91. Ճշգրիտ trade execution",
+            "92. Spot և Futures առևտուր",
+            "93. Լեվերիջի ճիշտ օգտագործում",
+            "94. Margin և Liquidation",
+            "95. Դրամապանակներ՝ Cold vs Hot",
+            "96. KYC, AML, կարգավորող պահանջներ",
+            "97. Բոտեր և Copy-trading",
+            "98. Ամենօրյա թրեյդինգային պլան",
+            "99. Եզրափակիչ ստուգում",
+            "100. Դիպլոմ + հետադարձ կապ",
+        ]),
+    ]
+
+    posts = []
+    for module_title, topics in curriculum:
+        for topic in topics:
+            lesson, example_one, example_two, takeaway = _technical_topic_content(module_title, topic)
+            posts.extend(_technical_topic_posts(module_title, topic, lesson, example_one, example_two, takeaway))
+    return posts
+
+
 def build_professional_member_education_posts():
     groups = [
+        _technical_curriculum_posts(),
         _actionable_playbook_posts(),
         _session_and_news_posts(),
         _structure_and_liquidity_posts(),
