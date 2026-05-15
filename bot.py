@@ -515,6 +515,27 @@ class PonchBot:
                 self._append_general_group_memory(message, role="assistant", text="Sent BTC short-term trading plans.")
             return handled
 
+        if self._looks_like_funding_overview_request(prompt):
+            answer = self._build_funding_overview_answer(prompt, fallback_symbol=fallback_symbol or "BTCUSDT")
+            self._send_text_chunks(
+                chat_id,
+                answer,
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=message_thread_id,
+            )
+            self._remember_group_chat_context(
+                message,
+                prompt=prompt,
+                answer=answer,
+                symbol=str(self._extract_symbol_from_text(prompt) or fallback_symbol or "BTCUSDT"),
+                mode=mode,
+                style=style,
+                intent="funding",
+            )
+            self._remember_general_group_profile(message, prompt=prompt, answer=answer, save=True)
+            self._append_general_group_memory(message, role="assistant", text=answer)
+            return True
+
         feature_reply = self._build_general_conversation_feature_answer(message, prompt, fallback_symbol=fallback_symbol, recent_ctx=recent_ctx)
         if feature_reply and str(feature_reply.get("answer") or "").strip():
             answer = str(feature_reply.get("answer") or "").strip()
@@ -1588,6 +1609,27 @@ class PonchBot:
                 self._remember_general_group_profile(message, prompt=prompt, answer="Sent BTC short-term trading plans.", save=True)
                 self._append_general_group_memory(message, role="assistant", text="Sent BTC short-term trading plans.")
             return handled
+
+        if self._looks_like_funding_overview_request(prompt):
+            answer = self._build_funding_overview_answer(prompt, fallback_symbol=fallback_symbol or "BTCUSDT")
+            self._send_text_chunks(
+                chat_id,
+                answer,
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=message_thread_id,
+            )
+            self._remember_group_chat_context(
+                message,
+                prompt=prompt,
+                answer=answer,
+                symbol=str(self._extract_symbol_from_text(prompt) or fallback_symbol or "BTCUSDT"),
+                mode=mode,
+                style=style,
+                intent="funding",
+            )
+            self._remember_general_group_profile(message, prompt=prompt, answer=answer, save=True)
+            self._append_general_group_memory(message, role="assistant", text=answer)
+            return True
 
         feature_reply = self._build_general_conversation_feature_answer(message, prompt, fallback_symbol=fallback_symbol, recent_ctx=recent_ctx)
         if feature_reply and str(feature_reply.get("answer") or "").strip():
