@@ -1227,9 +1227,14 @@ class PonchBot:
             funding_rate = self._normalize_bitunix_funding_rate(live_bitunix_rate)
         else:
             funding_rate = self._normalize_bitunix_funding_rate(funding_rate)
-        funding_ctx = payload.get("funding_ctx") or {}
         multi_ctx = payload.get("multi_ctx") or {}
         funding_map = dict(multi_ctx.get("funding") or {})
+        if funding_rate > 0:
+            bitunix_read = "longs pay shorts"
+        elif funding_rate < 0:
+            bitunix_read = "shorts pay longs"
+        else:
+            bitunix_read = "funding is flat"
 
         lines = [f"<b>{symbol.replace('USDT', '')} funding snapshot</b>"]
         rows = [f"Bitunix: {self._fmt_funding_pct(funding_rate, decimals=4, already_percent=True)}"]
@@ -1243,8 +1248,8 @@ class PonchBot:
 
         lines.append("<blockquote>" + "\n".join(rows) + "</blockquote>")
         lines.append(
-            f"Read: <b>{html.escape(str(funding_ctx.get('bias') or 'flat'))}</b>. "
-            "Bitget matters most for the bot’s funding read, but it compares the full exchange set."
+            f"Bitunix read: <b>{html.escape(bitunix_read)}</b>. "
+            "Bitget matters most for the bot’s broader funding bias, but the bot compares the full exchange set."
         )
         lines.append(f"<blockquote>Confidence: {self._payload_confidence_label(payload)}</blockquote>")
         return "\n".join(lines)
