@@ -75,6 +75,15 @@ def _fmt_funding_pct(value, decimals=4, already_percent=False):
     return f"{rate:+.{decimals}f}%"
 
 
+def _normalize_bitunix_funding_rate(value):
+    rate = _safe_float(value)
+    # Bitunix sometimes returns a percent-scaled number like 0.11 when the
+    # meaningful working value for this bot should be 0.0011.
+    if abs(rate) >= 0.02:
+        rate /= 100.0
+    return rate
+
+
 def _load_json_file(path, default):
     if not os.path.exists(path):
         return default
@@ -247,13 +256,22 @@ def _fetch_bitunix_ticker(symbol=SYMBOL):
 def _fetch_bitunix_funding(symbol=SYMBOL):
     client = BitunixFuturesClient()
     raw = client.get_funding_rate(symbol)
-    return raw.get("data") or {}
+    payload = dict(raw.get("data") or {})
+    if payload:
+        payload["fundingRate"] = _normalize_bitunix_funding_rate(payload.get("fundingRate"))
+    return payload
 
 
 def _fetch_bitunix_funding_history(symbol=SYMBOL, limit=30):
     client = BitunixFuturesClient()
     raw = client.get_funding_rate_history(symbol, limit=int(limit))
-    return raw.get("data") or []
+    rows = list(raw.get("data") or [])
+    normalized = []
+    for row in rows:
+        item = dict(row or {})
+        item["fundingRate"] = _normalize_bitunix_funding_rate(item.get("fundingRate"))
+        normalized.append(item)
+    return normalized
 
 
 def _fetch_bitunix_depth(symbol=SYMBOL, limit="50"):
