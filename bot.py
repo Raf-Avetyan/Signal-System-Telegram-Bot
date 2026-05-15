@@ -111,6 +111,7 @@ from scoring import calculate_signal_score
 from signals import check_momentum_confirm, check_range_confirm, check_flow_confirm, check_rsi_divergence
 from confirmation import ConfirmationTracker
 from charting import generate_daily_levels_chart, generate_signal_setup_chart, generate_liquidation_map_chart
+from cot_index import build_synthetic_cot_index
 from data import (
     fetch_klines, fetch_all_timeframes, fetch_daily, fetch_weekly, fetch_monthly, 
     fetch_funding_rate, fetch_bitget_btc_funding_rate, fetch_binance_funding_rate, fetch_bybit_funding_rate,
@@ -181,6 +182,7 @@ class PonchBot:
         self.last_bitget_btc_funding = state.get("last_bitget_btc_funding")
         self.last_exchange_funding = state.get("last_exchange_funding", {}) or {}
         self.last_exchange_context = state.get("last_exchange_context", {}) or {}
+        self.last_cot_context = state.get("last_cot_context", {}) or {}
         self.last_market_alert   = state.get("last_market_alert", 0)
         self.last_summary_date   = state.get("last_summary_date")      # New: Track summary schedule
         self.last_daily_report_date = state.get("last_daily_report_date")
@@ -1796,6 +1798,7 @@ class PonchBot:
         normalized = max(0.0, min(10.0, normalized))
         reasons = list(reasons or [])
         bias = self._htf_bias_lock(side)
+        cot = dict(getattr(self, "last_cot_context", {}) or {})
         adjusted = normalized
         notes = []
         if bias["aligned"]:
@@ -1809,9 +1812,33 @@ class PonchBot:
         elif trend_aligned_hint is False:
             adjusted -= 0.4
 
+        cot_bias = str(cot.get("bias") or "neutral")
+        cot_extreme = bool(cot.get("extreme"))
+        cot_index = float(cot.get("cot_index") or 50.0)
+        if side == "LONG":
+            if cot_bias == "shorts_crowded":
+                adjusted += 0.6 if cot_extreme else 0.3
+                notes.append(f"Synthetic COT supports LONG ({cot_index:.0f})")
+            elif cot_bias == "longs_crowded":
+                adjusted -= 1.0 if cot_extreme else 0.45
+                notes.append(f"Synthetic COT says longs are crowded ({cot_index:.0f})")
+        elif side == "SHORT":
+            if cot_bias == "longs_crowded":
+                adjusted += 0.6 if cot_extreme else 0.3
+                notes.append(f"Synthetic COT supports SHORT ({cot_index:.0f})")
+            elif cot_bias == "shorts_crowded":
+                adjusted -= 1.0 if cot_extreme else 0.45
+                notes.append(f"Synthetic COT says shorts are crowded ({cot_index:.0f})")
+
         if bias["countertrend"] and bias["strength"] == "strong" and adjusted < 8.8:
             grade = "Avoid"
             reason = "4H and 1D are strongly against this side."
+        elif side == "LONG" and cot_bias == "longs_crowded" and cot_extreme and adjusted < 9.2:
+            grade = "Avoid"
+            reason = f"Synthetic COT shows longs are too crowded ({cot_index:.0f}/100)."
+        elif side == "SHORT" and cot_bias == "shorts_crowded" and cot_extreme and adjusted < 9.2:
+            grade = "Avoid"
+            reason = f"Synthetic COT shows shorts are too crowded ({cot_index:.0f}/100)."
         elif adjusted >= 9.0 and bias["aligned"]:
             grade = "A+"
             reason = "Top-tier alignment across score, structure, and higher timeframe bias."
@@ -1852,6 +1879,8 @@ class PonchBot:
         meta["trend_aligned"] = bool(grade_info.get("trend_aligned"))
         meta["countertrend"] = bool(grade_info.get("countertrend"))
         meta["bias_lock"] = dict(grade_info.get("bias_lock") or {})
+        if getattr(self, "last_cot_context", None):
+            meta["cot_context"] = dict(self.last_cot_context or {})
 
     def _maybe_send_no_trade_alert(self, key, message, *, now=None, cooldown_sec=1800):
         now = now or datetime.now(self.local_tz)
@@ -3886,6 +3915,133 @@ class PonchBot:
         self.last_exchange_context = context
         return context
 
+    def _order_book_imbalance(self, order_book):
+        book = order_book or {}
+        bids = list(book.get("bids") or [])[:60]
+        asks = list(book.get("asks") or [])[:60]
+        bid_usd = sum(float(px) * float(sz) for px, sz in bids if len([px, sz]) >= 2)
+        ask_usd = sum(float(px) * float(sz) for px, sz in asks if len([px, sz]) >= 2)
+        total = bid_usd + ask_usd
+        if total <= 0:
+            return 0.0
+        return (bid_usd - ask_usd) / total
+
+    def _update_runtime_cot_context(self, latest_price, data):
+        current_price = float(latest_price or 0.0)
+        if current_price <= 0:
+            self.last_cot_context = {}
+            return {}
+        exchange_context = dict(self.last_exchange_context or {})
+        if not exchange_context:
+            self.last_cot_context = {}
+            return {}
+
+        tf_map = {}
+        for tf in ["1h", "4h", "1d"]:
+            tf_map[tf] = {"bias": str((self.tf_trends or {}).get(tf) or "Ranging")}
+
+        day_df = data.get("1d")
+        ticker_ctx = {}
+        if day_df is not None and not day_df.empty:
+            last_day = day_df.iloc[-1]
+            day_high = float(last_day.get("High", current_price) or current_price)
+            day_low = float(last_day.get("Low", current_price) or current_price)
+            day_open = float(last_day.get("Open", current_price) or current_price)
+            range_pos = 0.5
+            if day_high > day_low:
+                range_pos = (current_price - day_low) / max(day_high - day_low, 1e-9)
+            ticker_ctx = {
+                "range_position": max(0.0, min(1.0, range_pos)),
+                "day_change_pct": ((current_price / day_open) - 1.0) * 100.0 if day_open > 0 else 0.0,
+            }
+
+        funding_map = dict(exchange_context.get("funding") or {})
+        preferred_rate = funding_map.get("bitget")
+        if preferred_rate is None and funding_map:
+            preferred_rate = sum(float(v or 0.0) for v in funding_map.values()) / max(len(funding_map), 1)
+        funding_ctx = {
+            "current_rate": float(preferred_rate or 0.0),
+            "trend": 0.0,
+        }
+
+        total_above = sum(float(row.get("size_usd", 0) or 0) for row in ((exchange_context.get("liquidity") or {}).get("above") or []))
+        total_below = sum(float(row.get("size_usd", 0) or 0) for row in ((exchange_context.get("liquidity") or {}).get("below") or []))
+        dominant_side = "balanced"
+        if total_below > total_above * 1.25 and total_below > 0:
+            dominant_side = "longs_vulnerable"
+        elif total_above > total_below * 1.25 and total_above > 0:
+            dominant_side = "shorts_vulnerable"
+
+        liq_map = {"dominant_side": dominant_side}
+        book_ctx = {"imbalance": self._order_book_imbalance(self.last_order_book)}
+        oi_change_pct = 0.0
+        if float(self.last_oi_base or 0) > 0:
+            oi_change_pct = (float(self.last_oi or 0.0) / float(self.last_oi_base or 1.0)) - 1.0
+        okx_ctx = {"oi": float(self.last_oi or 0.0)}
+        cot_ctx = build_synthetic_cot_index(
+            current_price=current_price,
+            tf_map=tf_map,
+            funding_ctx=funding_ctx,
+            ticker_ctx=ticker_ctx,
+            book_ctx=book_ctx,
+            okx_ctx=okx_ctx,
+            multi_ctx={
+                "funding": funding_map,
+                "oi": dict(exchange_context.get("oi") or {}),
+                "liquidity_above": list(((exchange_context.get("liquidity") or {}).get("above") or [])),
+                "liquidity_below": list(((exchange_context.get("liquidity") or {}).get("below") or [])),
+            },
+            liq_map=liq_map,
+            oi_change_pct=oi_change_pct,
+        )
+        self.last_cot_context = cot_ctx
+        return cot_ctx
+
+    def _get_cot_confirmation_adjustment(self, side, score):
+        cot = dict(getattr(self, "last_cot_context", {}) or {})
+        if not cot:
+            return {"score_delta": 0, "reason": "", "block": False, "block_reason": ""}
+
+        bias = str(cot.get("bias") or "neutral")
+        extreme = bool(cot.get("extreme"))
+        idx = float(cot.get("cot_index") or 50.0)
+        side = str(side or "").upper()
+        score_delta = 0
+        reason = ""
+        block = False
+        block_reason = ""
+
+        if side == "LONG":
+            if bias == "shorts_crowded":
+                score_delta = 2 if extreme else 1
+                reason = f"Synthetic COT supports LONG ({idx:.0f}: shorts crowded)"
+            elif bias == "longs_crowded":
+                score_delta = -2 if extreme else -1
+                reason = f"Synthetic COT leans against LONG ({idx:.0f}: longs crowded)"
+                if extreme and int(score) < 9:
+                    block = True
+                    block_reason = f"Synthetic COT shows longs are too crowded ({idx:.0f}/100)"
+        elif side == "SHORT":
+            if bias == "longs_crowded":
+                score_delta = 2 if extreme else 1
+                reason = f"Synthetic COT supports SHORT ({idx:.0f}: longs crowded)"
+            elif bias == "shorts_crowded":
+                score_delta = -2 if extreme else -1
+                reason = f"Synthetic COT leans against SHORT ({idx:.0f}: shorts crowded)"
+                if extreme and int(score) < 9:
+                    block = True
+                    block_reason = f"Synthetic COT shows shorts are too crowded ({idx:.0f}/100)"
+
+        return {
+            "score_delta": score_delta,
+            "reason": reason,
+            "block": block,
+            "block_reason": block_reason,
+            "cot_index": idx,
+            "bias": bias,
+            "extreme": extreme,
+        }
+
     def _get_multi_exchange_confirmation_adjustment(self, side, score):
         if not MULTI_EXCHANGE_FUNDING_CONFIRM_ENABLED:
             return {"score_delta": 0, "reason": "", "block": False, "block_reason": ""}
@@ -4326,6 +4482,7 @@ class PonchBot:
         liq_ctx = payload.get("liq_ctx") or {}
         okx_ctx = payload.get("okx_ctx") or {}
         liq_map = payload.get("liq_map") or {}
+        cot_ctx = payload.get("cot_ctx") or {}
         scenarios = list(payload.get("scenarios") or [])
         root = str(symbol).replace("USDT", "")
 
@@ -4343,6 +4500,7 @@ class PonchBot:
         funding_bias = str(funding_ctx.get("bias") or "flat")
         top_above = str(book_ctx.get("above_text") or "n/a")
         top_below = str(book_ctx.get("below_text") or "n/a")
+        cot_summary = str(cot_ctx.get("summary") or "Neutral positioning")
 
         def _liq_text_from_row(row):
             if not row:
@@ -4403,6 +4561,7 @@ class PonchBot:
                 "</blockquote>"
             ),
             f"Bias: <b>{bias_line}</b>",
+            f"Positioning: <b>{cot_summary}</b>",
             f"Liquidity: above {top_above} | below {top_below}",
             f"<blockquote>{_scenario_line('Long plan', best_long)}</blockquote>",
             f"<blockquote>{_scenario_line('Short plan', best_short)}</blockquote>",
@@ -8435,6 +8594,7 @@ class PonchBot:
                 "last_bitget_btc_funding": self.last_bitget_btc_funding,
                 "last_exchange_funding": self.last_exchange_funding,
                 "last_exchange_context": self.last_exchange_context,
+                "last_cot_context": self.last_cot_context,
                 "last_market_alert": self.last_market_alert,
                 "last_summary_date": self.last_summary_date,
                 "last_daily_report_date": self.last_daily_report_date,
@@ -8736,6 +8896,7 @@ class PonchBot:
                 except Exception as e:
                     print(f"[LIQMAP] history capture failed: {e}")
             self._update_liquidity_pool_context(data, latest_price, current_time)
+            self._update_runtime_cot_context(latest_price, data)
             self._maybe_send_liquidity_pool_report(data, latest_price, now, current_time)
             for side in ["LONG", "SHORT"]:
                 lock_until = float(self.confluence_side_lock_until.get(side, 0) or 0)
@@ -8808,6 +8969,18 @@ class PonchBot:
                         continue
                     ce_points += int(mx_adjust.get("score_delta") or 0)
                     mx_reason = str(mx_adjust.get("reason") or "").strip()
+                    cot_adjust = self._get_cot_confirmation_adjustment(side, ce_points)
+                    if cot_adjust.get("block"):
+                        self._record_signal_block("synthetic_cot_counter", now=now)
+                        self._maybe_send_no_trade_alert(
+                            f"cot_confluence_{side}",
+                            f"No clean {side.lower()} yet: {cot_adjust.get('block_reason')}",
+                            now=now,
+                        )
+                        print(f"  [CONFLUENCE] Blocked {side} {ce['type']}: {cot_adjust.get('block_reason')}")
+                        continue
+                    ce_points += int(cot_adjust.get("score_delta") or 0)
+                    cot_reason = str(cot_adjust.get("reason") or "").strip()
 
                     # 2. Momentum exhaustion guard: avoid SHORT when RSI already very low
                     # and LONG when RSI already very high.
@@ -8903,6 +9076,8 @@ class PonchBot:
                             indicators.append(funding_reason)
                         if mx_reason:
                             indicators.append(mx_reason)
+                        if cot_reason:
+                            indicators.append(cot_reason)
                         self.tracker.log_signal(
                             side=ce["side"], entry=latest_price, sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
                             tf="Confluence", timestamp=base_candle_ts or conf_ts,
@@ -8960,6 +9135,8 @@ class PonchBot:
                             indicators.append(funding_reason)
                         if mx_reason:
                             indicators.append(mx_reason)
+                        if cot_reason:
+                            indicators.append(cot_reason)
                         self.tracker.log_signal(
                             side=ce["side"], entry=latest_price, sl=sl_c, tp1=tp1_c, tp2=tp2_c, tp3=tp3_c,
                             tf="Confluence", timestamp=base_candle_ts or conf_ts,
@@ -10534,6 +10711,21 @@ class PonchBot:
                     score += int(mx_adjust.get("score_delta") or 0)
                     if mx_reason:
                         reasons.append(mx_reason)
+                cot_adjust = self._get_cot_confirmation_adjustment(side, score)
+                if cot_adjust.get("block") and not rsi_pullback_override and not liq_watch_note:
+                    self._record_signal_block("synthetic_cot_counter", now=now)
+                    self._maybe_send_no_trade_alert(
+                        f"cot_{tf}_{side}",
+                        f"No clean {side.lower()} on {tf}: {cot_adjust.get('block_reason')}",
+                        now=now,
+                    )
+                    print(f"  [SCALP] Blocked {tf} {side}: {cot_adjust.get('block_reason')}")
+                    continue
+                cot_reason = str(cot_adjust.get("reason") or "").strip()
+                if int(cot_adjust.get("score_delta") or 0):
+                    score += int(cot_adjust.get("score_delta") or 0)
+                    if cot_reason:
+                        reasons.append(cot_reason)
 
                 late_confirm_reason = self._get_late_confirm_reason(tf, side, df)
                 if late_confirm_reason:

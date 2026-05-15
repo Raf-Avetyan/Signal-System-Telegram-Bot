@@ -9,6 +9,7 @@ import pandas as pd
 from bitunix_trade import BitunixFuturesClient
 from channels import calculate_channels, check_channel_signals
 from config import SYMBOL, MULTI_EXCHANGE_CONTEXT_ENABLED, MULTI_EXCHANGE_LIQ_MIN_USD
+from cot_index import build_synthetic_cot_index
 from data import (
     fetch_binance_funding_rate,
     fetch_binance_open_interest,
@@ -938,7 +939,7 @@ def _scenario_mode_config(mode):
     }
 
 
-def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticker_ctx, liq_ctx, okx_ctx, liq_map, multi_ctx=None, mode="swing", max_scenarios=4):
+def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticker_ctx, liq_ctx, okx_ctx, liq_map, multi_ctx=None, cot_ctx=None, mode="swing", max_scenarios=4):
     current_price = _safe_float(current_price)
     mode_cfg = _scenario_mode_config(mode)
     tf_weights = {"1M": 4.0, "1w": 3.0, "1d": 2.0, "4h": 2.0, "1h": 1.0}
@@ -1004,6 +1005,8 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
     funding_consensus = str((multi_ctx or {}).get("funding_consensus") or "flat")
     funding_support_long = int((multi_ctx or {}).get("funding_support_long") or 0)
     funding_support_short = int((multi_ctx or {}).get("funding_support_short") or 0)
+    cot_bias = str((cot_ctx or {}).get("bias") or "neutral")
+    cot_extreme = bool((cot_ctx or {}).get("extreme"))
 
     if not next_support and mex_top_below:
         next_support = {
@@ -1072,6 +1075,10 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
             probability += 2.0
         elif dominant_side == "longs_vulnerable":
             probability -= 2.0
+        if cot_bias == "shorts_crowded":
+            probability += 2.5 if cot_extreme else 1.5
+        elif cot_bias == "longs_crowded":
+            probability -= 3.0 if cot_extreme else 1.5
         if trend_bias_score < 0:
             probability -= 5.0
         probability = max(40.0, min(84.0, probability))
@@ -1115,6 +1122,7 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
                     + (" Funding supports this long." if funding_bias == "shorts paying" else "")
                     + (" Cross-exchange funding leans long." if funding_consensus == "long" else "")
                     + (" Liquidation pressure is elevated." if okx_liq_usd >= 10_000_000 else "")
+                    + (" Synthetic COT shows shorts crowded." if cot_bias == "shorts_crowded" else "")
                     + (" Shorts look more vulnerable." if dominant_side == "shorts_vulnerable" else "")
                 ),
             }
@@ -1161,6 +1169,10 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
             probability += 2.0
         elif dominant_side == "shorts_vulnerable":
             probability -= 2.0
+        if cot_bias == "longs_crowded":
+            probability += 2.5 if cot_extreme else 1.5
+        elif cot_bias == "shorts_crowded":
+            probability -= 3.0 if cot_extreme else 1.5
         if trend_bias_score > 0:
             probability -= 5.0
         probability = max(40.0, min(82.0, probability))
@@ -1203,6 +1215,7 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
                     "Use only after rejection confirmation."
                     + (" Funding supports this short." if funding_bias == "longs paying" else "")
                     + (" Cross-exchange funding leans short." if funding_consensus == "short" else "")
+                    + (" Synthetic COT shows longs crowded." if cot_bias == "longs_crowded" else "")
                     + (" Longs look more vulnerable." if dominant_side == "longs_vulnerable" else "")
                 ),
             }
@@ -1863,6 +1876,16 @@ def build_liquidation_map_snapshot(symbol=SYMBOL):
         liq_ctx=liq_ctx,
         okx_ctx=okx_ctx,
     )
+    cot_ctx = build_synthetic_cot_index(
+        current_price=current_price,
+        tf_map=tf_map,
+        funding_ctx=funding_ctx,
+        ticker_ctx=ticker_ctx,
+        book_ctx=book_ctx,
+        okx_ctx=okx_ctx,
+        multi_ctx=multi_ctx,
+        liq_map=liq_map,
+    )
 
     upside_rows = list((liq_map or {}).get("all_short_liq_zones") or (liq_map or {}).get("short_liq_zones") or [])
     downside_rows = list((liq_map or {}).get("all_long_liq_zones") or (liq_map or {}).get("long_liq_zones") or [])
@@ -1905,6 +1928,7 @@ def build_liquidation_map_snapshot(symbol=SYMBOL):
         "chart_timeframe": "15m",
         "liq_map": liq_map,
         "multi_ctx": multi_ctx,
+        "cot_ctx": cot_ctx,
         "horizons": horizons,
         "heatmap_rows": heatmap_rows,
         "heatmap_history": heatmap_history,
@@ -1956,6 +1980,16 @@ def build_btc_scenarios_payload(symbol=SYMBOL, mode="swing"):
         liq_ctx=liq_ctx,
         okx_ctx=okx_ctx,
     )
+    cot_ctx = build_synthetic_cot_index(
+        current_price=current_price,
+        tf_map=tf_map,
+        funding_ctx=funding_ctx,
+        ticker_ctx=ticker_ctx,
+        book_ctx=book_ctx,
+        okx_ctx=okx_ctx,
+        multi_ctx=multi_ctx,
+        liq_map=liq_map,
+    )
     scenarios = _build_scenarios(
         current_price=current_price,
         levels=levels,
@@ -1967,6 +2001,7 @@ def build_btc_scenarios_payload(symbol=SYMBOL, mode="swing"):
         okx_ctx=okx_ctx,
         liq_map=liq_map,
         multi_ctx=multi_ctx,
+        cot_ctx=cot_ctx,
         mode=mode,
         max_scenarios=4,
     )
@@ -1988,6 +2023,7 @@ def build_btc_scenarios_payload(symbol=SYMBOL, mode="swing"):
         "okx_ctx": okx_ctx,
         "multi_ctx": multi_ctx,
         "liq_map": liq_map,
+        "cot_ctx": cot_ctx,
         "scenarios": scenarios,
     }
 
