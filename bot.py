@@ -10,6 +10,7 @@ import traceback
 from collections import Counter
 from datetime import datetime, timezone, timedelta
 import json
+import os
 import re
 import html
 import requests
@@ -202,6 +203,8 @@ class PonchBot:
         self.last_exec_suggested_action = state.get("last_exec_suggested_action")
         self.private_exec_focus = state.get("private_exec_focus", {})
         self.group_chat_contexts = state.get("group_chat_contexts", {})
+        self.general_group_profiles = state.get("general_group_profiles", {}) or {}
+        self.general_group_topic_memory = state.get("general_group_topic_memory", {}) or {}
         self.general_group_memory_file = "general_group_memory.md"
         self.runtime_exec_reply_target = None
         self.private_todo_items = state.get("private_todo_items", [])
@@ -475,8 +478,28 @@ class PonchBot:
             self._append_general_group_memory(message, role="assistant", text="I’m here. Mention me with your question and I’ll answer in this group.")
             return True
 
+        self._remember_general_group_profile(message, prompt=prompt)
         recent_ctx = self._recent_group_chat_context(message)
+        profile = dict((self.general_group_profiles or {}).get(self._general_group_profile_key(message)) or {})
         fallback_symbol = str(recent_ctx.get("symbol") or "").strip().upper() or None
+        mode = self._extract_analysis_mode(prompt, recent_ctx=recent_ctx, profile=profile)
+        style = self._extract_explain_style(prompt, recent_ctx=recent_ctx, profile=profile)
+
+        session_plan_name = self._requested_session_game_plan(prompt)
+        if session_plan_name:
+            answer = self._build_session_game_plan_message(session_plan_name)
+            if answer:
+                tg.send(
+                    answer,
+                    chat_id=chat_id,
+                    parse_mode="HTML",
+                    reply_to_message_id=reply_to_message_id,
+                    message_thread_id=message_thread_id,
+                )
+                self._remember_group_chat_context(message, prompt=prompt, answer=answer, symbol="BTCUSDT", mode=mode, style=style, intent="session_plan")
+                self._remember_general_group_profile(message, prompt=prompt, answer=answer, save=True)
+                self._append_general_group_memory(message, role="assistant", text=answer)
+                return True
 
         if self._looks_like_bitcoin_plans_request(prompt):
             handled = self._handle_btc_market_command(
@@ -486,13 +509,36 @@ class PonchBot:
                 mode="short_term",
             )
             if handled:
-                self._remember_group_chat_context(message, prompt=prompt, answer="btc plans", symbol="BTCUSDT")
+                self._remember_group_chat_context(message, prompt=prompt, answer="btc plans", symbol="BTCUSDT", mode="short_term", style=style, intent="plans")
+                self._remember_general_group_profile(message, prompt=prompt, answer="Sent BTC short-term trading plans.", save=True)
                 self._append_general_group_memory(message, role="assistant", text="Sent BTC short-term trading plans.")
             return handled
 
+        feature_reply = self._build_general_conversation_feature_answer(message, prompt, fallback_symbol=fallback_symbol, recent_ctx=recent_ctx)
+        if feature_reply and str(feature_reply.get("answer") or "").strip():
+            answer = str(feature_reply.get("answer") or "").strip()
+            self._send_text_chunks(
+                chat_id,
+                answer,
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=message_thread_id,
+            )
+            self._remember_group_chat_context(
+                message,
+                prompt=prompt,
+                answer=answer,
+                symbol=str(feature_reply.get("symbol") or fallback_symbol or ""),
+                mode=feature_reply.get("mode"),
+                style=feature_reply.get("style"),
+                intent=feature_reply.get("intent"),
+            )
+            self._remember_general_group_profile(message, prompt=prompt, answer=answer, save=True)
+            self._append_general_group_memory(message, role="assistant", text=answer)
+            return True
+
         if self._looks_like_chart_question(prompt):
             try:
-                answer = self._build_symbol_chart_chat_answer(prompt, fallback_symbol=fallback_symbol)
+                answer = self._build_symbol_chart_chat_answer(prompt, fallback_symbol=fallback_symbol, mode=mode, style=style)
             except Exception as e:
                 answer = f"I tried to load that chart from Bitunix/OKX, but it failed this time: {e}"
             self._send_text_chunks(
@@ -506,11 +552,22 @@ class PonchBot:
                 prompt=prompt,
                 answer=answer,
                 symbol=self._extract_symbol_from_text(prompt) or fallback_symbol or "",
+                mode=mode,
+                style=style,
+                intent="chart",
             )
+            self._remember_general_group_profile(message, prompt=prompt, answer=answer, save=True)
             self._append_general_group_memory(message, role="assistant", text=answer)
             return True
 
         memory_excerpt = self._read_general_group_memory_tail()
+        profile_summary = self._general_group_profile_summary(message)
+        followup_note = ""
+        if self._looks_like_followup_question(prompt) and recent_ctx:
+            followup_note = (
+                "This looks like a follow-up to the recent conversation. "
+                "Continue from the prior answer instead of starting from zero.\n"
+            )
 
         group_context = (
             "You are answering inside the Mr. Ponch Telegram general discussion topic. "
@@ -519,6 +576,10 @@ class PonchBot:
             f"Group mention chat title: {chat_obj.get('title') or 'Unknown'}\n"
             f"Thread id: {self._normalized_signal_thread_id(chat_id, message_thread_id)}"
         )
+        if followup_note:
+            group_context += f"\n\n{followup_note}"
+        if profile_summary:
+            group_context += f"\n\nStructured user/topic memory:\n{profile_summary}"
         if memory_excerpt:
             group_context += f"\n\nRecent group markdown memory:\n{memory_excerpt}"
         answer = self._ask_private_chat_question(prompt, context_text=group_context)
@@ -532,7 +593,8 @@ class PonchBot:
             reply_to_message_id=reply_to_message_id,
             message_thread_id=message_thread_id,
         )
-        self._remember_group_chat_context(message, prompt=prompt, answer=answer, symbol=fallback_symbol or "")
+        self._remember_group_chat_context(message, prompt=prompt, answer=answer, symbol=fallback_symbol or "", mode=mode, style=style, intent="general")
+        self._remember_general_group_profile(message, prompt=prompt, answer=answer, save=True)
         self._append_general_group_memory(message, role="assistant", text=answer)
         return True
 
@@ -592,13 +654,16 @@ class PonchBot:
             return {}
         return ctx
 
-    def _remember_group_chat_context(self, message, *, prompt=None, answer=None, symbol=None):
+    def _remember_group_chat_context(self, message, *, prompt=None, answer=None, symbol=None, mode=None, style=None, intent=None):
         key = self._group_context_key(message)
         payload = {
             "updated_at": time.time(),
             "prompt": str(prompt or "").strip(),
             "answer": str(answer or "").strip(),
             "symbol": str(symbol or "").strip().upper(),
+            "mode": str(mode or "").strip().lower(),
+            "style": str(style or "").strip().lower(),
+            "intent": str(intent or "").strip().lower(),
             "message_id": (message or {}).get("message_id"),
         }
         self.group_chat_contexts[key] = payload
@@ -658,6 +723,619 @@ class PonchBot:
         except Exception:
             return ""
 
+    def _symbol_alias_map(self):
+        return {
+            "BTC": "BTCUSDT",
+            "BITCOIN": "BTCUSDT",
+            "ETH": "ETHUSDT",
+            "ETHEREUM": "ETHUSDT",
+            "SOL": "SOLUSDT",
+            "SOLANA": "SOLUSDT",
+            "HYPE": "HYPEUSDT",
+            "HYPERLIQUID": "HYPEUSDT",
+            "XRP": "XRPUSDT",
+            "RIPPLE": "XRPUSDT",
+            "DOGE": "DOGEUSDT",
+            "DOGECOIN": "DOGEUSDT",
+            "BNB": "BNBUSDT",
+            "BINANCECOIN": "BNBUSDT",
+            "ADA": "ADAUSDT",
+            "CARDANO": "ADAUSDT",
+            "AVAX": "AVAXUSDT",
+            "AVALANCHE": "AVAXUSDT",
+            "LINK": "LINKUSDT",
+            "CHAINLINK": "LINKUSDT",
+            "SUI": "SUIUSDT",
+            "APT": "APTUSDT",
+            "APTOS": "APTUSDT",
+            "ARB": "ARBUSDT",
+            "ARBITRUM": "ARBUSDT",
+            "OP": "OPUSDT",
+            "OPTIMISM": "OPUSDT",
+            "INJ": "INJUSDT",
+            "NEAR": "NEARUSDT",
+            "ATOM": "ATOMUSDT",
+            "COSMOS": "ATOMUSDT",
+            "DOT": "DOTUSDT",
+            "POLKADOT": "DOTUSDT",
+            "LTC": "LTCUSDT",
+            "LITECOIN": "LTCUSDT",
+            "BCH": "BCHUSDT",
+            "BITCOINCASH": "BCHUSDT",
+            "UNI": "UNIUSDT",
+            "UNISWAP": "UNIUSDT",
+            "PEPE": "PEPEUSDT",
+            "TRX": "TRXUSDT",
+            "TRON": "TRXUSDT",
+            "TON": "TONUSDT",
+            "TONCOIN": "TONUSDT",
+            "WIF": "WIFUSDT",
+            "BONK": "BONKUSDT",
+            "FET": "FETUSDT",
+            "RENDER": "RENDERUSDT",
+            "RNDR": "RENDERUSDT",
+            "SEI": "SEIUSDT",
+            "TIA": "TIAUSDT",
+            "JUP": "JUPUSDT",
+            "FIL": "FILUSDT",
+            "FILECOIN": "FILUSDT",
+            "ETC": "ETCUSDT",
+            "ETHEREUMCLASSIC": "ETCUSDT",
+            "AAVE": "AAVEUSDT",
+            "ONDO": "ONDOUSDT",
+            "HBAR": "HBARUSDT",
+            "ICP": "ICPUSDT",
+            "KAS": "KASUSDT",
+            "KASPA": "KASUSDT",
+            "XLM": "XLMUSDT",
+            "STELLAR": "XLMUSDT",
+        }
+
+    def _extract_all_symbols_from_text(self, text):
+        raw = str(text or "").upper()
+        found = []
+
+        def _push(symbol):
+            symbol = str(symbol or "").strip().upper()
+            if symbol and symbol not in found:
+                found.append(symbol)
+
+        for match in re.findall(r"\b([A-Z]{2,10}USDT)\b", raw):
+            _push(match)
+
+        aliases = self._symbol_alias_map()
+        ambiguous_aliases = {"NEAR", "LINK", "TON"}
+        for key, value in aliases.items():
+            if key in ambiguous_aliases:
+                explicit_patterns = [
+                    rf"\b(?:WHAT ABOUT|ANALYZE|ANALYSIS|CHECK|THOUGHTS ON|COIN|TOKEN|COMPARE|VS)\s+{key}\b",
+                    rf"\b{key}USDT\b",
+                    rf"\${key}\b",
+                ]
+                if any(re.search(pattern, raw) for pattern in explicit_patterns):
+                    _push(value)
+                continue
+            if re.search(rf"\b{key}\b", raw):
+                _push(value)
+
+        for candidate in re.findall(
+            r"\b(?:ABOUT|ANALYZE|ANALYSIS|CHECK|LOOK AT|THOUGHTS ON|WHAT ABOUT|COIN|TOKEN|COMPARE|VS)\s+([A-Z]{2,10})\b",
+            raw,
+        ):
+            blocked = {
+                "WHAT", "ABOUT", "CHART", "CHECK", "LOOK", "THINK", "THOUGHTS", "PRICE",
+                "LONG", "SHORT", "BULLISH", "BEARISH", "TREND", "SETUP", "ENTRY",
+            }
+            if candidate not in blocked:
+                _push(f"{candidate}USDT")
+        return found
+
+    def _extract_analysis_mode(self, text, recent_ctx=None, profile=None):
+        lower = str(text or "").lower()
+        if any(word in lower for word in ["swing", "higher timeframe", "htf", "bigger picture"]):
+            return "swing"
+        if any(word in lower for word in ["scalp", "intraday", "quick", "short-term", "short term"]):
+            return "short_term"
+        recent_ctx = dict(recent_ctx or {})
+        profile = dict(profile or {})
+        preferred = str(recent_ctx.get("mode") or profile.get("preferred_mode") or "").strip().lower()
+        if preferred in {"short_term", "swing"}:
+            return preferred
+        return "short_term"
+
+    def _extract_explain_style(self, text, recent_ctx=None, profile=None):
+        lower = str(text or "").lower()
+        if any(word in lower for word in ["simple", "simpler", "beginner", "easy"]):
+            return "simple"
+        if any(word in lower for word in ["deeper", "deep", "advanced", "pro", "professional", "detailed"]):
+            return "pro"
+        recent_ctx = dict(recent_ctx or {})
+        profile = dict(profile or {})
+        preferred = str(recent_ctx.get("style") or profile.get("preferred_style") or "").strip().lower()
+        return preferred if preferred in {"simple", "pro"} else "normal"
+
+    def _general_group_profile_key(self, message):
+        return self._group_context_key(message)
+
+    def _general_group_topic_key(self, message):
+        chat_id = str(((message or {}).get("chat") or {}).get("id") or "")
+        thread_id = str(self._normalized_signal_thread_id(((message or {}).get("chat") or {}).get("id"), (message or {}).get("message_thread_id")) or "")
+        return f"{chat_id}:{thread_id}"
+
+    def _remember_general_group_profile(self, message, *, prompt="", answer="", save=False):
+        text = str(prompt or "").strip()
+        if not text:
+            return
+        profile_key = self._general_group_profile_key(message)
+        topic_key = self._general_group_topic_key(message)
+        profile = dict((self.general_group_profiles or {}).get(profile_key) or {})
+        topic_mem = dict((self.general_group_topic_memory or {}).get(topic_key) or {})
+
+        symbol_counts = dict(profile.get("symbol_counts") or {})
+        topic_symbols = dict(topic_mem.get("symbol_counts") or {})
+        symbols = self._extract_all_symbols_from_text(text)
+        for symbol in symbols[:4]:
+            symbol_counts[symbol] = int(symbol_counts.get(symbol, 0) or 0) + 1
+            topic_symbols[symbol] = int(topic_symbols.get(symbol, 0) or 0) + 1
+
+        style = self._extract_explain_style(text, profile=profile)
+        mode = self._extract_analysis_mode(text, profile=profile)
+        flags = dict(profile.get("feature_counts") or {})
+        detectors = {
+            "coaching": self._looks_like_trade_coaching_request,
+            "review": self._looks_like_trade_review_request,
+            "comparison": self._looks_like_comparison_request,
+            "education": lambda t: bool(self._saved_teaching_reply(t)),
+            "probability": self._looks_like_probability_breakdown_request,
+            "no_trade": self._looks_like_no_trade_question,
+        }
+        for key, checker in detectors.items():
+            try:
+                if checker(text):
+                    flags[key] = int(flags.get(key, 0) or 0) + 1
+            except Exception:
+                continue
+
+        profile.update(
+            {
+                "updated_at": time.time(),
+                "last_symbol": (symbols[0] if symbols else str(profile.get("last_symbol") or "")),
+                "last_prompt": text[:280],
+                "preferred_mode": mode,
+                "preferred_style": style,
+                "symbol_counts": symbol_counts,
+                "feature_counts": flags,
+            }
+        )
+        if answer:
+            profile["last_answer"] = str(answer).strip()[:600]
+        self.general_group_profiles[profile_key] = profile
+
+        topic_mem.update(
+            {
+                "updated_at": time.time(),
+                "symbol_counts": topic_symbols,
+            }
+        )
+        self.general_group_topic_memory[topic_key] = topic_mem
+        if save:
+            self._save_state()
+
+    def _general_group_profile_summary(self, message):
+        profile = dict((self.general_group_profiles or {}).get(self._general_group_profile_key(message)) or {})
+        topic_mem = dict((self.general_group_topic_memory or {}).get(self._general_group_topic_key(message)) or {})
+        lines = []
+        symbol_counts = Counter(dict(profile.get("symbol_counts") or {}))
+        if symbol_counts:
+            top_symbols = ", ".join(symbol for symbol, _ in symbol_counts.most_common(2))
+            lines.append(f"User often asks about: {top_symbols}.")
+        preferred_mode = str(profile.get("preferred_mode") or "").strip()
+        preferred_style = str(profile.get("preferred_style") or "").strip()
+        if preferred_mode:
+            lines.append(f"Preferred analysis mode: {preferred_mode}.")
+        if preferred_style and preferred_style != "normal":
+            lines.append(f"Preferred explanation style: {preferred_style}.")
+        feature_counts = Counter(dict(profile.get("feature_counts") or {}))
+        if feature_counts:
+            top_feature = feature_counts.most_common(1)[0][0]
+            lines.append(f"This user often asks for {top_feature.replace('_', ' ')}.")
+        topic_symbols = Counter(dict(topic_mem.get("symbol_counts") or {}))
+        if topic_symbols:
+            lines.append(
+                "Topic focus lately: " +
+                ", ".join(symbol for symbol, _ in topic_symbols.most_common(3)) +
+                "."
+            )
+        return "\n".join(lines).strip()
+
+    def _looks_like_followup_question(self, text):
+        lower = str(text or "").strip().lower()
+        if not lower:
+            return False
+        short_followup = len(lower.split()) <= 8
+        cues = (
+            "why", "what if", "and if", "what about now", "and now", "where invalidation",
+            "where stop", "where target", "which one", "so what", "then what", "explain more",
+        )
+        return short_followup or any(cue in lower for cue in cues)
+
+    def _looks_like_comparison_request(self, text):
+        lower = str(text or "").lower()
+        symbols = self._extract_all_symbols_from_text(text)
+        if len(symbols) < 2:
+            return False
+        return (" vs " in lower) or ("compare" in lower) or ("cleaner" in lower) or ("better" in lower)
+
+    def _looks_like_trade_coaching_request(self, text):
+        lower = str(text or "").lower()
+        cues = (
+            "i want to long", "i want to short", "should i long", "should i short",
+            "can i long", "can i short", "good entry", "entry here", "take this long",
+            "take this short", "would you long", "would you short",
+        )
+        return any(cue in lower for cue in cues)
+
+    def _looks_like_trade_review_request(self, text):
+        lower = str(text or "").lower()
+        cues = (
+            "i got stopped", "stopped out", "what did i do wrong", "review my trade",
+            "why did i lose", "why did this fail", "was my entry bad", "can you review this trade",
+        )
+        return any(cue in lower for cue in cues)
+
+    def _looks_like_probability_breakdown_request(self, text):
+        lower = str(text or "").lower()
+        cues = (
+            "why this chance", "why that chance", "why probability", "probability breakdown",
+            "why long", "why short", "why this plan", "why higher chance",
+            "chance higher", "more chance", "better probability",
+        )
+        return any(cue in lower for cue in cues)
+
+    def _looks_like_no_trade_question(self, text):
+        lower = str(text or "").lower()
+        cues = (
+            "why no trade", "is there no trade", "should we wait", "no trade right now",
+            "why should we wait", "is it better to wait", "why not long", "why not short",
+        )
+        return any(cue in lower for cue in cues)
+
+    def _saved_teaching_reply(self, text):
+        lower = str(text or "").lower()
+        style = self._extract_explain_style(text)
+        topics = [
+            (
+                ("reclaim",),
+                {
+                    "simple": (
+                        "<b>Reclaim</b>\n"
+                        "<blockquote>Price loses a level, sweeps lower, then closes back above it. "
+                        "The safe part is waiting for that close back above, then using the retest as the entry instead of guessing the bottom.</blockquote>"
+                    ),
+                    "pro": (
+                        "<b>Reclaim</b>\n"
+                        "<blockquote>A reclaim is a failed breakdown or failed breakout that closes back through the level and then holds it on retest. "
+                        "Example: BTC loses 80,000, trades 79,720, then closes 15m back above 80,000. A cleaner long is the first pullback into 79,980-80,020 with stop under the sweep low. "
+                        "The edge is that the market already proved the breakdown failed before you commit.</blockquote>"
+                    ),
+                },
+            ),
+            (
+                ("liquidity sweep", "sweep"),
+                {
+                    "simple": (
+                        "<b>Liquidity Sweep</b>\n"
+                        "<blockquote>Price often runs above an old high or below an old low just to trigger stops and grab resting orders. "
+                        "The sweep itself is not the entry. The real clue is whether price quickly rejects or reclaims after taking that liquidity.</blockquote>"
+                    ),
+                    "pro": (
+                        "<b>Liquidity Sweep</b>\n"
+                        "<blockquote>A sweep is the stop-run phase. Example: BTC ranges 80,100 to 80,900, wicks 81,050, then closes back below 80,900. "
+                        "That is not a breakout; it is a sweep of buy-side liquidity. The better short comes after the failed hold, not on the first touch of resistance.</blockquote>"
+                    ),
+                },
+            ),
+            (
+                ("counter-trend", "counter trend"),
+                {
+                    "simple": (
+                        "<b>Counter-Trend Trade</b>\n"
+                        "<blockquote>This means trading against the bigger direction. "
+                        "Do it smaller, faster, and only after a strong rejection or failed breakout. If it hesitates, get out.</blockquote>"
+                    ),
+                    "pro": (
+                        "<b>Counter-Trend Trade</b>\n"
+                        "<blockquote>If 4H and 1D are bullish, a short is a counter-trend fade. "
+                        "That usually means tighter stop, smaller size, quicker TP1, and stronger proof. For example, risking 0.35% instead of 0.75% can make sense because the larger flow is against the trade.</blockquote>"
+                    ),
+                },
+            ),
+            (
+                ("crowded funding", "funding"),
+                {
+                    "simple": (
+                        "<b>Crowded Funding</b>\n"
+                        "<blockquote>Funding tells you which side is paying. "
+                        "If longs are paying a lot, the market may already be too crowded on the long side. That does not mean price must fall, but weak longs become riskier.</blockquote>"
+                    ),
+                    "pro": (
+                        "<b>Crowded Funding</b>\n"
+                        "<blockquote>If funding is strongly positive across exchanges, longs are paying and the market is often crowded long. "
+                        "That makes late breakout longs weaker and can increase flush risk. The higher-quality long is usually the one after a reset or a reclaim, not after a crowded extension.</blockquote>"
+                    ),
+                },
+            ),
+            (
+                ("breakeven",),
+                {
+                    "simple": (
+                        "<b>Breakeven</b>\n"
+                        "<blockquote>Breakeven means moving the stop so the trade should not lose anymore. "
+                        "Exact entry is the simplest form. Protected breakeven is entry plus enough buffer to cover fees.</blockquote>"
+                    ),
+                    "pro": (
+                        "<b>Breakeven</b>\n"
+                        "<blockquote>Exact entry removes directional risk but may still lose a little after fees. "
+                        "Protected breakeven means stop is moved past the filled entry enough to cover both entry and exit fees. Example: if filled long entry is 80,000 and total fee lock is 0.08%, a true protected breakeven is about 80,064.</blockquote>"
+                    ),
+                },
+            ),
+            (
+                ("risk reward", "r:r", "rr"),
+                {
+                    "simple": (
+                        "<b>Risk/Reward</b>\n"
+                        "<blockquote>If you risk $100 to make $300, that is 1:3. "
+                        "The cleaner the setup, the more room you want between entry and first real target.</blockquote>"
+                    ),
+                    "pro": (
+                        "<b>Risk/Reward</b>\n"
+                        "<blockquote>On a $5,000 account risking 0.5%, your max planned loss is $25. "
+                        "If the stop is 0.6% away, the notional should be about $4,166 because 0.6% of that is roughly $25. "
+                        "A trade with only 1:1 potential often needs an unusually high win rate to stay worth taking.</blockquote>"
+                    ),
+                },
+            ),
+        ]
+        for keys, variants in topics:
+            if any(key in lower for key in keys):
+                return variants.get(style if style in variants else "simple") if style in {"simple", "pro"} else variants["pro"]
+        return ""
+
+    def _payload_best_scenarios(self, payload):
+        scenarios = list((payload or {}).get("scenarios") or [])
+        longs = [row for row in scenarios if str(row.get("side") or "").upper() == "LONG"]
+        shorts = [row for row in scenarios if str(row.get("side") or "").upper() == "SHORT"]
+        best_long = max(longs, key=lambda row: float(row.get("probability") or 0), default=None)
+        best_short = max(shorts, key=lambda row: float(row.get("probability") or 0), default=None)
+        return best_long, best_short
+
+    def _payload_confidence_label(self, payload):
+        best_long, best_short = self._payload_best_scenarios(payload)
+        best_prob = max(float((best_long or {}).get("probability") or 0), float((best_short or {}).get("probability") or 0))
+        if best_prob >= 72:
+            return "High"
+        if best_prob >= 60:
+            return "Medium"
+        return "Low"
+
+    def _build_probability_breakdown_answer(self, text, fallback_symbol=None):
+        symbol = (self._extract_symbol_from_text(text) or str(fallback_symbol or "").strip().upper() or "BTCUSDT")
+        mode = self._extract_analysis_mode(text)
+        payload = build_btc_scenarios_payload(symbol=symbol, mode=mode)
+        best_long, best_short = self._payload_best_scenarios(payload)
+        lower = str(text or "").lower()
+        focus = best_long
+        if "short" in lower and "long" not in lower:
+            focus = best_short
+        elif "higher" in lower or "compare" in lower:
+            focus = best_long if float((best_long or {}).get("probability") or 0) >= float((best_short or {}).get("probability") or 0) else best_short
+        elif "short" in lower and best_short and float(best_short.get("probability") or 0) > float((best_long or {}).get("probability") or 0):
+            focus = best_short
+        side = str((focus or {}).get("side") or "LONG").upper()
+        tf_map = payload.get("tf_map") or {}
+        funding_ctx = payload.get("funding_ctx") or {}
+        cot_ctx = payload.get("cot_ctx") or {}
+        liq_map = payload.get("liq_map") or {}
+        price = float(payload.get("current_price") or 0.0)
+        liq_side_rows = list((liq_map or {}).get("short_liq_zones" if side == "LONG" else "long_liq_zones") or [])
+        liq_text = "balanced"
+        if liq_side_rows:
+            liq_text = f"nearest target liquidity sits around {float((liq_side_rows[0] or {}).get('price') or 0):,.2f}"
+        lines = [
+            f"<b>{symbol.replace('USDT', '')} probability breakdown</b>",
+            (
+                "<blockquote>"
+                f"Focus plan: {str((focus or {}).get('title') or 'n/a').upper()} | "
+                f"Chance: {float((focus or {}).get('probability') or 0):.0f}%"
+                "</blockquote>"
+            ),
+            f"Trend: 1H {str((tf_map.get('1h') or {}).get('bias') or 'n/a')} | 4H {str((tf_map.get('4h') or {}).get('bias') or 'n/a')} | 1D {str((tf_map.get('1d') or {}).get('bias') or 'n/a')}",
+            f"Funding: {float(payload.get('funding_rate') or 0):+.6f}% ({str(funding_ctx.get('bias') or 'flat')})",
+            f"Positioning: {str(cot_ctx.get('summary') or 'Neutral')}",
+            f"Liquidity: {liq_text}",
+            f"Why it is priced this way: current price is {price:,.2f}, and the bot is rewarding trend alignment, funding support, and cleaner liquidity path while penalizing crowded positioning and messy structure.",
+            f"<blockquote>Confidence: {self._payload_confidence_label(payload)}</blockquote>",
+        ]
+        return "\n".join(lines)
+
+    def _build_no_trade_answer(self, text, fallback_symbol=None):
+        symbol = (self._extract_symbol_from_text(text) or str(fallback_symbol or "").strip().upper() or "BTCUSDT")
+        payload = build_btc_scenarios_payload(symbol=symbol, mode=self._extract_analysis_mode(text))
+        best_long, best_short = self._payload_best_scenarios(payload)
+        tf_map = payload.get("tf_map") or {}
+        funding_ctx = payload.get("funding_ctx") or {}
+        cot_ctx = payload.get("cot_ctx") or {}
+        current_price = float(payload.get("current_price") or 0.0)
+        reasons = []
+        bias_4h = str((tf_map.get("4h") or {}).get("bias") or "")
+        bias_1d = str((tf_map.get("1d") or {}).get("bias") or "")
+        if ("bullish" in bias_4h.lower()) != ("bullish" in bias_1d.lower()) and ("bearish" in bias_4h.lower()) != ("bearish" in bias_1d.lower()):
+            reasons.append("higher-timeframe bias is not clean")
+        funding_bias = str(funding_ctx.get("bias") or "").lower()
+        if "longs" in str(cot_ctx.get("summary") or "").lower() and "paying" in funding_bias:
+            reasons.append("long side still looks crowded")
+        if "shorts" in str(cot_ctx.get("summary") or "").lower() and "paying" in funding_bias:
+            reasons.append("short side still looks crowded")
+        long_prob = float((best_long or {}).get("probability") or 0)
+        short_prob = float((best_short or {}).get("probability") or 0)
+        if max(long_prob, short_prob) < 60:
+            reasons.append("neither side has a strong enough edge yet")
+        for side, row in (("long", best_long), ("short", best_short)):
+            if not row:
+                continue
+            entry_low = float(row.get("entry_low") or 0.0)
+            entry_high = float(row.get("entry_high") or 0.0)
+            if entry_low > 0 and entry_high > 0:
+                center = (entry_low + entry_high) / 2.0
+                dist_pct = abs(center - current_price) / max(current_price, 1.0) * 100.0
+                if dist_pct < 0.18:
+                    reasons.append(f"{side} setup is too close to current price and can become noise")
+        news_block = get_active_news_blackout(datetime.now(timezone.utc))
+        if news_block:
+            reasons.append("news-risk window is active")
+        reasons = reasons[:3] or ["price still needs a cleaner trigger first"]
+        lines = [
+            f"<b>{symbol.replace('USDT', '')} why no trade yet</b>",
+            f"<blockquote>Price: {current_price:,.2f} | Funding: {float(payload.get('funding_rate') or 0):+.6f}%</blockquote>",
+            "Main blockers:",
+        ]
+        lines.extend([f"- {reason}" for reason in reasons])
+        lines.append("<blockquote>Confidence: Medium</blockquote>")
+        return "\n".join(lines)
+
+    def _build_trade_coaching_answer(self, text, fallback_symbol=None):
+        symbol = (self._extract_symbol_from_text(text) or str(fallback_symbol or "").strip().upper() or "BTCUSDT")
+        payload = build_btc_scenarios_payload(symbol=symbol, mode=self._extract_analysis_mode(text))
+        best_long, best_short = self._payload_best_scenarios(payload)
+        lower = str(text or "").lower()
+        side = "LONG" if "long" in lower else ("SHORT" if "short" in lower else str((best_long or {}).get("side") or "LONG"))
+        focus = best_long if side == "LONG" else best_short
+        if not focus:
+            focus = best_long or best_short or {}
+        current_price = float(payload.get("current_price") or 0.0)
+        entry_low = float(focus.get("entry_low") or 0.0)
+        entry_high = float(focus.get("entry_high") or 0.0)
+        entry_mid = (entry_low + entry_high) / 2.0 if entry_low and entry_high else 0.0
+        sl = float(focus.get("sl") or 0.0)
+        tp1 = float((focus.get("tps") or [0])[0] or 0.0)
+        chasing = entry_mid > 0 and abs(current_price - entry_mid) / max(current_price, 1.0) * 100.0 > 0.45
+        risk_note = "Current price is stretched away from the cleaner entry zone." if chasing else "Price is still reasonably close to the cleaner entry zone."
+        lines = [
+            f"<b>{symbol.replace('USDT', '')} {side.lower()} coaching</b>",
+            (
+                "<blockquote>"
+                f"Current: {current_price:,.2f}\n"
+                f"Cleaner plan: {str(focus.get('title') or '').upper()}\n"
+                f"Entry zone: {entry_low:,.2f}-{entry_high:,.2f}\n"
+                f"Invalidation: {sl:,.2f}\n"
+                f"TP1: {tp1:,.2f}"
+                "</blockquote>"
+            ),
+            f"Good: {str((focus.get('notes') or ['The structure still has a tradeable path.'])[0])}",
+            f"Risk: {risk_note}",
+            f"Better way to do it: wait for the trigger, then enter closer to the plan zone instead of forcing a market chase.",
+            f"<blockquote>Confidence: {self._payload_confidence_label(payload)}</blockquote>",
+        ]
+        return "\n".join(lines)
+
+    def _build_trade_review_answer(self, text, fallback_symbol=None, recent_ctx=None):
+        symbol = (self._extract_symbol_from_text(text) or str(fallback_symbol or "").strip().upper() or str((dict(recent_ctx or {}).get('symbol') or 'BTCUSDT')).strip().upper())
+        payload = build_btc_scenarios_payload(symbol=symbol, mode=self._extract_analysis_mode(text, recent_ctx=recent_ctx))
+        best_long, best_short = self._payload_best_scenarios(payload)
+        tf_map = payload.get("tf_map") or {}
+        current_price = float(payload.get("current_price") or 0.0)
+        reasons = []
+        if "bullish" in str((tf_map.get("4h") or {}).get("bias") or "").lower() and "short" in str(text or "").lower():
+            reasons.append("the trade may have been counter-trend against the 4H structure")
+        if "bearish" in str((tf_map.get("4h") or {}).get("bias") or "").lower() and "long" in str(text or "").lower():
+            reasons.append("the trade may have been counter-trend against the 4H structure")
+        for scenario in [best_long, best_short]:
+            if not scenario:
+                continue
+            entry_mid = (float(scenario.get("entry_low") or 0) + float(scenario.get("entry_high") or 0)) / 2.0
+            if entry_mid > 0 and abs(current_price - entry_mid) / max(current_price, 1.0) * 100.0 > 0.65:
+                reasons.append("entry was likely too late relative to the planned zone")
+                break
+        reasons = reasons[:3] or ["the trade probably lacked a cleaner trigger before entry"]
+        lines = [
+            f"<b>{symbol.replace('USDT', '')} trade review</b>",
+            f"<blockquote>Current market read: 1H {str((tf_map.get('1h') or {}).get('bias') or 'n/a')} | 4H {str((tf_map.get('4h') or {}).get('bias') or 'n/a')} | Price {current_price:,.2f}</blockquote>",
+            "Most likely issues:",
+        ]
+        lines.extend([f"- {reason}" for reason in reasons])
+        lines.append("Better version: wait for the sweep/reclaim or rejection trigger instead of entering before the market proves the move.")
+        lines.append("<blockquote>Confidence: Medium</blockquote>")
+        return "\n".join(lines)
+
+    def _build_symbol_comparison_answer(self, text, fallback_symbol=None):
+        symbols = self._extract_all_symbols_from_text(text)
+        if fallback_symbol and len(symbols) < 2:
+            symbols = [str(fallback_symbol).strip().upper()] + [sym for sym in symbols if sym != str(fallback_symbol).strip().upper()]
+        symbols = [sym for sym in symbols if sym][:2]
+        if len(symbols) < 2:
+            return ""
+
+        payloads = []
+        for symbol in symbols:
+            payloads.append((symbol, build_btc_scenarios_payload(symbol=symbol, mode=self._extract_analysis_mode(text))))
+
+        def _score_payload(payload):
+            best_long, best_short = self._payload_best_scenarios(payload)
+            best = best_long if float((best_long or {}).get("probability") or 0) >= float((best_short or {}).get("probability") or 0) else best_short
+            score = float((best or {}).get("probability") or 0)
+            if best and best.get("trend_aligned"):
+                score += 3.0
+            return score, best
+
+        scored = [(symbol, payload, *_score_payload(payload)) for symbol, payload in payloads]
+        cleaner = max(scored, key=lambda row: row[2])
+        lines = ["<b>Quick comparison</b>"]
+        for symbol, payload, score, best in scored:
+            tf_map = payload.get("tf_map") or {}
+            lines.append(
+                f"<blockquote>{symbol.replace('USDT', '')}: 4H {str((tf_map.get('4h') or {}).get('bias') or 'n/a')} | "
+                f"Funding {float(payload.get('funding_rate') or 0):+.6f}% | "
+                f"Best plan {str((best or {}).get('title') or 'n/a').upper()} | "
+                f"Chance {float((best or {}).get('probability') or 0):.0f}%</blockquote>"
+            )
+        lines.append(
+            f"Cleaner right now: <b>{cleaner[0].replace('USDT', '')}</b>, because its best setup has the stronger combined trend/liquidity read."
+        )
+        lines.append("<blockquote>Confidence: Medium</blockquote>")
+        return "\n".join(lines)
+
+    def _build_general_conversation_feature_answer(self, message, prompt, fallback_symbol=None, recent_ctx=None):
+        recent_ctx = dict(recent_ctx or {})
+        style = self._extract_explain_style(prompt, recent_ctx=recent_ctx)
+        mode = self._extract_analysis_mode(prompt, recent_ctx=recent_ctx)
+        lower = str(prompt or "").lower()
+        if self._looks_like_followup_question(prompt) and recent_ctx and any(
+            cue in lower for cue in ["go deeper", "deeper", "explain simply", "simple", "what about now", "and now", "update", "now?"]
+        ):
+            recent_intent = str(recent_ctx.get("intent") or "").strip().lower()
+            recent_symbol = str(recent_ctx.get("symbol") or fallback_symbol or "").strip().upper()
+            if recent_intent in {"chart", "plans", "coaching", "probability", "review", "no_trade"} and recent_symbol:
+                answer = self._build_symbol_chart_chat_answer(prompt or recent_symbol, fallback_symbol=recent_symbol, mode=mode, style=style)
+                if answer:
+                    return {"answer": answer, "symbol": recent_symbol, "mode": mode, "style": style, "intent": "chart_followup"}
+        saved = self._saved_teaching_reply(prompt)
+        if saved:
+            return {"answer": saved, "symbol": fallback_symbol or "", "mode": mode, "style": style, "intent": "education"}
+        if self._looks_like_comparison_request(prompt):
+            answer = self._build_symbol_comparison_answer(prompt, fallback_symbol=fallback_symbol)
+            if answer:
+                return {"answer": answer, "symbol": "", "mode": mode, "style": style, "intent": "comparison"}
+        if self._looks_like_trade_coaching_request(prompt):
+            return {"answer": self._build_trade_coaching_answer(prompt, fallback_symbol=fallback_symbol), "symbol": self._extract_symbol_from_text(prompt) or fallback_symbol or "", "mode": mode, "style": style, "intent": "coaching"}
+        if self._looks_like_trade_review_request(prompt):
+            return {"answer": self._build_trade_review_answer(prompt, fallback_symbol=fallback_symbol, recent_ctx=recent_ctx), "symbol": self._extract_symbol_from_text(prompt) or fallback_symbol or "", "mode": mode, "style": style, "intent": "review"}
+        if self._looks_like_no_trade_question(prompt):
+            return {"answer": self._build_no_trade_answer(prompt, fallback_symbol=fallback_symbol), "symbol": self._extract_symbol_from_text(prompt) or fallback_symbol or "", "mode": mode, "style": style, "intent": "no_trade"}
+        if self._looks_like_probability_breakdown_request(prompt):
+            return {"answer": self._build_probability_breakdown_answer(prompt, fallback_symbol=fallback_symbol), "symbol": self._extract_symbol_from_text(prompt) or fallback_symbol or "", "mode": mode, "style": style, "intent": "probability"}
+        return None
+
     def _handle_general_group_chat_message(self, message):
         chat_obj = message.get("chat") or {}
         chat_id = chat_obj.get("id")
@@ -679,8 +1357,12 @@ class PonchBot:
         if not prompt:
             return False
 
+        self._remember_general_group_profile(message, prompt=prompt)
         recent_ctx = self._recent_group_chat_context(message)
+        profile = dict((self.general_group_profiles or {}).get(self._general_group_profile_key(message)) or {})
         fallback_symbol = str(recent_ctx.get("symbol") or "").strip().upper() or None
+        mode = self._extract_analysis_mode(prompt, recent_ctx=recent_ctx, profile=profile)
+        style = self._extract_explain_style(prompt, recent_ctx=recent_ctx, profile=profile)
         memory_excerpt = self._read_general_group_memory_tail()
         lower = prompt.lower().strip()
         explicit_account_request = any((
@@ -689,6 +1371,22 @@ class PonchBot:
             self._looks_like_open_positions_text(lower),
             self._looks_like_account_mode_text(lower),
         ))
+
+        session_plan_name = self._requested_session_game_plan(prompt)
+        if session_plan_name:
+            answer = self._build_session_game_plan_message(session_plan_name)
+            if answer:
+                tg.send(
+                    answer,
+                    chat_id=chat_id,
+                    parse_mode="HTML",
+                    reply_to_message_id=reply_to_message_id,
+                    message_thread_id=message_thread_id,
+                )
+                self._remember_group_chat_context(message, prompt=prompt, answer=answer, symbol="BTCUSDT", mode=mode, style=style, intent="session_plan")
+                self._remember_general_group_profile(message, prompt=prompt, answer=answer, save=True)
+                self._append_general_group_memory(message, role="assistant", text=answer)
+                return True
 
         def _ask_group_exec_confirm(action_obj, source_text=None):
             action_text = self._preview_exec_action(action_obj).strip().rstrip(".")
@@ -808,9 +1506,32 @@ class PonchBot:
                 mode="short_term",
             )
             if handled:
-                self._remember_group_chat_context(message, prompt=prompt, answer="btc plans", symbol="BTCUSDT")
+                self._remember_group_chat_context(message, prompt=prompt, answer="btc plans", symbol="BTCUSDT", mode="short_term", style=style, intent="plans")
+                self._remember_general_group_profile(message, prompt=prompt, answer="Sent BTC short-term trading plans.", save=True)
                 self._append_general_group_memory(message, role="assistant", text="Sent BTC short-term trading plans.")
             return handled
+
+        feature_reply = self._build_general_conversation_feature_answer(message, prompt, fallback_symbol=fallback_symbol, recent_ctx=recent_ctx)
+        if feature_reply and str(feature_reply.get("answer") or "").strip():
+            answer = str(feature_reply.get("answer") or "").strip()
+            self._send_text_chunks(
+                chat_id,
+                answer,
+                reply_to_message_id=reply_to_message_id,
+                message_thread_id=message_thread_id,
+            )
+            self._remember_group_chat_context(
+                message,
+                prompt=prompt,
+                answer=answer,
+                symbol=str(feature_reply.get("symbol") or fallback_symbol or ""),
+                mode=feature_reply.get("mode"),
+                style=feature_reply.get("style"),
+                intent=feature_reply.get("intent"),
+            )
+            self._remember_general_group_profile(message, prompt=prompt, answer=answer, save=True)
+            self._append_general_group_memory(message, role="assistant", text=answer)
+            return True
 
         if not GEMINI_API_KEY:
             direct_action = self._fallback_exec_action_from_text(prompt)
@@ -863,7 +1584,7 @@ class PonchBot:
 
         if self._looks_like_chart_question(prompt):
             try:
-                answer = self._build_symbol_chart_chat_answer(prompt, fallback_symbol=fallback_symbol)
+                answer = self._build_symbol_chart_chat_answer(prompt, fallback_symbol=fallback_symbol, mode=mode, style=style)
             except Exception as e:
                 answer = f"I tried to load that chart from Bitunix/OKX, but it failed this time: {e}"
             self._send_text_chunks(
@@ -877,7 +1598,11 @@ class PonchBot:
                 prompt=prompt,
                 answer=answer,
                 symbol=self._extract_symbol_from_text(prompt) or fallback_symbol or "",
+                mode=mode,
+                style=style,
+                intent="chart",
             )
+            self._remember_general_group_profile(message, prompt=prompt, answer=answer, save=True)
             self._append_general_group_memory(message, role="assistant", text=answer)
             return True
 
@@ -981,6 +1706,11 @@ class PonchBot:
                     f"Your earlier answer: {prev_answer or 'N/A'}\n"
                 )
 
+        profile_summary = self._general_group_profile_summary(message)
+        followup_note = ""
+        if self._looks_like_followup_question(prompt) and recent_ctx:
+            followup_note = "This looks like a short follow-up. Continue the same thread naturally and answer in context.\n\n"
+
         group_context = (
             "You are answering inside the Mr. Ponch Telegram general discussion topic. "
             "Reply naturally and conversationally, like a helpful trading assistant in group chat. "
@@ -988,11 +1718,14 @@ class PonchBot:
             "Treat normal symbol questions as market analysis requests. "
             "Do not mention the user's live balance, open positions, leverage, margin mode, or Bitunix account status unless the user explicitly asks about their account or positions. "
             "If the topic is politics, religion, ethnicity, nationality, or identity, stay neutral, respectful, and factual. "
-            "Do not express partisan loyalty, hatred, or favoritism.\n\n"
+            "Do not express partisan loyalty, hatred, or favoritism. "
+            "End the answer with a short confidence label like High, Medium, or Low when it fits.\n\n"
             f"Group chat title: {chat_obj.get('title') or 'Unknown'}\n"
             f"Thread id: {self._normalized_signal_thread_id(chat_id, message_thread_id)}\n\n"
-            f"{reply_anchor}"
+            f"{followup_note}{reply_anchor}"
         )
+        if profile_summary:
+            group_context += f"\nStructured user/topic memory:\n{profile_summary}\n"
         if memory_excerpt:
             group_context += f"\n\nRecent group markdown memory:\n{memory_excerpt}"
         answer = self._ask_private_chat_question(prompt, context_text=group_context)
@@ -1006,7 +1739,8 @@ class PonchBot:
             reply_to_message_id=reply_to_message_id,
             message_thread_id=message_thread_id,
         )
-        self._remember_group_chat_context(message, prompt=prompt, answer=answer, symbol=fallback_symbol or "")
+        self._remember_group_chat_context(message, prompt=prompt, answer=answer, symbol=fallback_symbol or "", mode=mode, style=style, intent="general")
+        self._remember_general_group_profile(message, prompt=prompt, answer=answer, save=True)
         self._append_general_group_memory(message, role="assistant", text=answer)
         return True
 
@@ -3035,14 +3769,25 @@ class PonchBot:
     def _send_session_game_plan(self, session_name, latest_price):
         if self.is_booting:
             return
+        msg = self._build_session_game_plan_message(session_name, latest_price)
+        if not msg:
+            return
+        tg.send(
+            msg,
+            parse_mode="HTML",
+            chat_id=self._signal_chat_id(),
+            message_thread_id=self._sessions_thread_id(),
+        )
+
+    def _build_session_game_plan_message(self, session_name, latest_price=None):
         try:
             payload = build_btc_scenarios_payload(symbol=SYMBOL, mode="short_term")
         except Exception as e:
             print(f"[SESSION] Could not build session game plan: {e}")
-            return
+            return ""
         scenarios = list(payload.get("scenarios") or [])
         if not scenarios:
-            return
+            return ""
         long_plan = next((row for row in scenarios if str(row.get("side") or "").upper() == "LONG"), None)
         short_plan = next((row for row in scenarios if str(row.get("side") or "").upper() == "SHORT"), None)
         current_price = float(payload.get("current_price") or latest_price or 0)
@@ -3115,12 +3860,7 @@ class PonchBot:
             f"<blockquote>{html.escape(trigger_text)}</blockquote>\n"
             f"<blockquote>NO TRADE: {html.escape(no_trade)}</blockquote>"
         )
-        tg.send(
-            msg,
-            parse_mode="HTML",
-            chat_id=self._signal_chat_id(),
-            message_thread_id=self._sessions_thread_id(),
-        )
+        return msg
 
     def _build_demo_signal(self, side="LONG"):
         side_text = str(side or "LONG").upper()
@@ -3657,6 +4397,27 @@ class PonchBot:
             "plans for bitcoin", "plans for btc", "give me bitcoin scenario", "give me btc scenario",
         ]
         return self._intent_has_any_normalized(normalized, phrases)
+
+    def _requested_session_game_plan(self, text):
+        normalized = self._normalize_intent_text(text)
+        if not normalized:
+            return ""
+        has_plan_words = self._intent_has_any_normalized(normalized, [
+            "game plan", "session plan", "trading plan", "plan for session",
+        ])
+        has_session_words = self._intent_has_any_normalized(normalized, [
+            "session", "asia", "london", "new york", "ny",
+        ])
+        if not (has_plan_words and has_session_words):
+            return ""
+        if self._intent_has_any_normalized(normalized, ["asia"]):
+            return "ASIA"
+        if self._intent_has_any_normalized(normalized, ["london"]):
+            return "LONDON"
+        if self._intent_has_any_normalized(normalized, ["new york", "ny"]):
+            return "NY"
+        current = self._get_current_session_name(datetime.now(timezone.utc))
+        return str(current or "")
 
     def _extract_tp_split_values(self, text):
         raw_text = str(text or "").strip().lower()
@@ -4402,72 +5163,7 @@ class PonchBot:
         match = re.search(r"\b([A-Z]{2,10}USDT)\b", raw)
         if match:
             return match.group(1)
-        aliases = {
-            "BTC": "BTCUSDT",
-            "BITCOIN": "BTCUSDT",
-            "ETH": "ETHUSDT",
-            "ETHEREUM": "ETHUSDT",
-            "SOL": "SOLUSDT",
-            "SOLANA": "SOLUSDT",
-            "HYPE": "HYPEUSDT",
-            "HYPERLIQUID": "HYPEUSDT",
-            "XRP": "XRPUSDT",
-            "RIPPLE": "XRPUSDT",
-            "DOGE": "DOGEUSDT",
-            "DOGECOIN": "DOGEUSDT",
-            "BNB": "BNBUSDT",
-            "BINANCECOIN": "BNBUSDT",
-            "ADA": "ADAUSDT",
-            "CARDANO": "ADAUSDT",
-            "AVAX": "AVAXUSDT",
-            "AVALANCHE": "AVAXUSDT",
-            "LINK": "LINKUSDT",
-            "CHAINLINK": "LINKUSDT",
-            "SUI": "SUIUSDT",
-            "APT": "APTUSDT",
-            "APTOS": "APTUSDT",
-            "ARB": "ARBUSDT",
-            "ARBITRUM": "ARBUSDT",
-            "OP": "OPUSDT",
-            "OPTIMISM": "OPUSDT",
-            "INJ": "INJUSDT",
-            "NEAR": "NEARUSDT",
-            "ATOM": "ATOMUSDT",
-            "COSMOS": "ATOMUSDT",
-            "DOT": "DOTUSDT",
-            "POLKADOT": "DOTUSDT",
-            "LTC": "LTCUSDT",
-            "LITECOIN": "LTCUSDT",
-            "BCH": "BCHUSDT",
-            "BITCOINCASH": "BCHUSDT",
-            "UNI": "UNIUSDT",
-            "UNISWAP": "UNIUSDT",
-            "PEPE": "PEPEUSDT",
-            "TRX": "TRXUSDT",
-            "TRON": "TRXUSDT",
-            "TON": "TONUSDT",
-            "TONCOIN": "TONUSDT",
-            "WIF": "WIFUSDT",
-            "BONK": "BONKUSDT",
-            "FET": "FETUSDT",
-            "RENDER": "RENDERUSDT",
-            "RNDR": "RENDERUSDT",
-            "SEI": "SEIUSDT",
-            "TIA": "TIAUSDT",
-            "JUP": "JUPUSDT",
-            "FIL": "FILUSDT",
-            "FILECOIN": "FILUSDT",
-            "ETC": "ETCUSDT",
-            "ETHEREUMCLASSIC": "ETCUSDT",
-            "AAVE": "AAVEUSDT",
-            "ONDO": "ONDOUSDT",
-            "HBAR": "HBARUSDT",
-            "ICP": "ICPUSDT",
-            "KAS": "KASUSDT",
-            "KASPA": "KASUSDT",
-            "XLM": "XLMUSDT",
-            "STELLAR": "XLMUSDT",
-        }
+        aliases = self._symbol_alias_map()
         ambiguous_aliases = {"NEAR", "LINK", "TON"}
         for key, value in aliases.items():
             if key in ambiguous_aliases:
@@ -4507,14 +5203,17 @@ class PonchBot:
             "chart", "analysis", "analyse", "analyze", "think about", "thoughts on",
             "what do you think", "what about", "bullish", "bearish", "long", "short", "support",
             "resistance", "trend", "setup", "entry", "pump", "dump", "move", "direction",
+            "quick", "scalp", "intraday", "swing", "view on", "outlook",
         )
         return ("?" in text_str) or any(cue in lower for cue in chart_cues)
 
-    def _build_symbol_chart_chat_answer(self, text, fallback_symbol=None):
+    def _build_symbol_chart_chat_answer(self, text, fallback_symbol=None, mode=None, style="normal"):
         symbol = self._extract_symbol_from_text(text) or str(fallback_symbol or "").strip().upper()
         if not symbol:
             return ""
-        payload = build_btc_scenarios_payload(symbol=symbol, mode="short_term")
+        mode = str(mode or self._extract_analysis_mode(text) or "short_term").strip().lower()
+        style = str(style or "normal").strip().lower()
+        payload = build_btc_scenarios_payload(symbol=symbol, mode=mode)
         tf_map = payload.get("tf_map") or {}
         funding_ctx = payload.get("funding_ctx") or {}
         ticker_ctx = payload.get("ticker_ctx") or {}
@@ -4590,8 +5289,9 @@ class PonchBot:
         elif "bearish" in bias_4h.lower() and "bearish" in bias_1h.lower():
             bias_line = "bearish intraday bias"
 
+        title = "quick chart read" if mode == "short_term" else "swing chart read"
         lines = [
-            f"<b>{root} quick chart read</b>",
+            f"<b>{root} {title}</b>",
             (
                 "<blockquote>"
                 f"Price: {current_price:,.2f}\n"
@@ -4606,6 +5306,15 @@ class PonchBot:
             f"<blockquote>{_scenario_line('Long plan', best_long)}</blockquote>",
             f"<blockquote>{_scenario_line('Short plan', best_short)}</blockquote>",
         ]
+        if style == "simple":
+            lines = lines[:5] + [f"<blockquote>Confidence: {self._payload_confidence_label(payload)}</blockquote>"]
+        elif style == "pro":
+            lines.append(
+                f"Read: {root} is trading with {bias_line}, funding is {funding_bias}, and the cleaner side is usually the one that keeps the stronger scenario probability after liquidity is considered."
+            )
+            lines.append(f"<blockquote>Confidence: {self._payload_confidence_label(payload)}</blockquote>")
+        else:
+            lines.append(f"<blockquote>Confidence: {self._payload_confidence_label(payload)}</blockquote>")
         return "\n".join(lines)
 
     def _extract_manual_preset(self, text):
@@ -8652,6 +9361,8 @@ class PonchBot:
                 "last_exec_suggested_action": self.last_exec_suggested_action,
                 "private_exec_focus": self.private_exec_focus,
                 "group_chat_contexts": self.group_chat_contexts,
+                "general_group_profiles": self.general_group_profiles,
+                "general_group_topic_memory": self.general_group_topic_memory,
                 "private_todo_items": self.private_todo_items,
                 "signal_debug_stats": self.signal_debug_stats,
                 "last_scalp_open_alert": self.last_scalp_open_alert,

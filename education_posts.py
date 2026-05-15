@@ -2,6 +2,20 @@ def _education_post(topic, body):
     return f"🎓 <b>Member Education</b>\n<blockquote>Topic: {topic}</blockquote>\n{body}"
 
 
+def _interleave_post_groups(groups):
+    remaining = [list(group) for group in groups if group]
+    mixed = []
+    while remaining:
+        next_round = []
+        for group in remaining:
+            if group:
+                mixed.append(group.pop(0))
+            if group:
+                next_round.append(group)
+        remaining = next_round
+    return mixed
+
+
 def _risk_sizing_posts():
     posts = []
     accounts = [5_000, 10_000, 20_000, 50_000, 100_000]
@@ -363,20 +377,21 @@ def _actionable_playbook_posts():
 
 
 def build_professional_member_education_posts():
-    posts = []
-    posts.extend(_risk_sizing_posts())
-    posts.extend(_daily_limit_posts())
-    posts.extend(_expectancy_posts())
-    posts.extend(_leverage_posts())
-    posts.extend(_scale_out_posts())
-    posts.extend(_session_and_news_posts())
-    posts.extend(_structure_and_liquidity_posts())
-    posts.extend(_drawdown_posts())
-    posts.extend(_journal_posts())
-    posts.extend(_execution_posts())
-    posts.extend(_rr_and_filter_posts())
-    posts.extend(_actionable_playbook_posts())
-    return posts
+    groups = [
+        _actionable_playbook_posts(),
+        _session_and_news_posts(),
+        _structure_and_liquidity_posts(),
+        _execution_posts(),
+        _journal_posts(),
+        _rr_and_filter_posts(),
+        _scale_out_posts(),
+        _drawdown_posts(),
+        _expectancy_posts(),
+        _leverage_posts(),
+        _daily_limit_posts(),
+        _risk_sizing_posts(),
+    ]
+    return _interleave_post_groups(groups)
 
 
 PROFESSIONAL_MEMBER_EDUCATION_POSTS = build_professional_member_education_posts()
