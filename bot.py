@@ -3052,10 +3052,50 @@ class PonchBot:
         bias_1d = str(((payload.get("tf_map") or {}).get("1d") or {}).get("bias") or "Ranging")
         preferred = long_plan if (float((long_plan or {}).get("probability") or 0) >= float((short_plan or {}).get("probability") or 0)) else short_plan
         preferred_side = str((preferred or {}).get("side") or "WAIT").upper()
-        top_above = ((payload.get("multi_ctx") or {}).get("top_above") or (payload.get("liq_ctx") or {}).get("top_above") or {})
-        top_below = ((payload.get("multi_ctx") or {}).get("top_below") or (payload.get("liq_ctx") or {}).get("top_below") or {})
-        above_txt = f"{float(top_above.get('level_price', 0) or 0):,.0f}" if top_above else "n/a"
-        below_txt = f"{float(top_below.get('level_price', 0) or 0):,.0f}" if top_below else "n/a"
+        multi_ctx = payload.get("multi_ctx") or {}
+        liq_ctx = payload.get("liq_ctx") or {}
+        liq_map = payload.get("liq_map") or {}
+
+        def _fmt_liq_row(row, *, fallback_price_key=None):
+            row = row or {}
+            price = float(row.get("level_price") or row.get("price") or row.get(fallback_price_key or "") or 0.0)
+            size_usd = float(row.get("size_usd") or 0.0)
+            exchange = str(row.get("exchange") or row.get("source") or "").strip().upper()
+            if price <= 0:
+                return "n/a"
+            if size_usd > 0:
+                size_txt = self._compact_usd(size_usd)
+                if exchange:
+                    return f"{price:,.0f} ({exchange} {size_txt})"
+                return f"{price:,.0f} ({size_txt})"
+            if exchange:
+                return f"{price:,.0f} ({exchange})"
+            return f"{price:,.0f}"
+
+        top_above = (multi_ctx.get("top_above") or liq_ctx.get("top_above") or {})
+        top_below = (multi_ctx.get("top_below") or liq_ctx.get("top_below") or {})
+        short_liq_rows = list((liq_map.get("all_short_liq_zones") or liq_map.get("short_liq_zones") or []))
+        long_liq_rows = list((liq_map.get("all_long_liq_zones") or liq_map.get("long_liq_zones") or []))
+        above_txt = _fmt_liq_row(top_above)
+        below_txt = _fmt_liq_row(top_below)
+        if above_txt == "n/a" and short_liq_rows:
+            above_txt = _fmt_liq_row(short_liq_rows[0])
+        if below_txt == "n/a" and long_liq_rows:
+            below_txt = _fmt_liq_row(long_liq_rows[0])
+
+        funding_map = dict(multi_ctx.get("funding") or {})
+        funding_bits = []
+        bitget_rate = funding_map.get("bitget")
+        if bitget_rate is not None:
+            funding_bits.append(f"Bitget {float(bitget_rate):+.6f}%")
+        for name in ("binance", "bybit", "okx"):
+            rate = funding_map.get(name)
+            if rate is not None:
+                funding_bits.append(f"{name.upper()} {float(rate):+.6f}%")
+        if not funding_bits:
+            funding_text = f"{funding_rate:+.6f}% ({html.escape(funding_bias)})"
+        else:
+            funding_text = f"{' | '.join(funding_bits)} ({html.escape(funding_bias)})"
         no_trade = "Wait for the session sweep first if price expands aggressively into liquidity without reclaim/rejection confirmation."
         if funding_bias == "longs paying":
             no_trade = "Do not force late longs while longs are paying funding and price is extended into upside liquidity."
@@ -3067,7 +3107,7 @@ class PonchBot:
             f"<blockquote>"
             f"Price: {current_price:,.2f}\n"
             f"Bias: 4H {html.escape(bias_4h)} | 1D {html.escape(bias_1d)}\n"
-            f"Funding: {funding_rate:+.6f}% ({html.escape(funding_bias)})\n"
+            f"Funding: {funding_text}\n"
             f"Best Side: {html.escape(preferred_side)}\n"
             f"Sweep Above: {above_txt}\n"
             f"Sweep Below: {below_txt}"
