@@ -1463,9 +1463,6 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
                 "note": "This is a deeper squeeze plan, not the first rejection entry.",
             }
         )
-    long_candidates = [row for row in scenarios if row.get("side") == "LONG"]
-    short_candidates = [row for row in scenarios if row.get("side") == "SHORT"]
-
     def _entry_distance_pct(row):
         entry_mid = (_safe_float(row.get("entry_low")) + _safe_float(row.get("entry_high"))) / 2.0
         return _distance_pct(entry_mid, current_price)
@@ -1579,11 +1576,247 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
             ),
         )
 
+    def _exclude_similar(rows, selected_rows):
+        selected_rows = [row for row in list(selected_rows or []) if row]
+        if not rows or not selected_rows:
+            return list(rows or [])
+        filtered = []
+        for row in rows:
+            row_mid = (_safe_float(row.get("entry_low")) + _safe_float(row.get("entry_high"))) / 2.0
+            keep = True
+            for selected_row in selected_rows:
+                selected_mid = (_safe_float(selected_row.get("entry_low")) + _safe_float(selected_row.get("entry_high"))) / 2.0
+                row_sep_usd = abs(row_mid - selected_mid)
+                row_sep_pct = abs(_distance_pct(row_mid, current_price) - _distance_pct(selected_mid, current_price))
+                if row_sep_usd < float(mode_cfg["far_pick_min_sep_usd"]) and row_sep_pct < float(mode_cfg["far_pick_min_sep_pct"]):
+                    keep = False
+                    break
+            if keep:
+                filtered.append(row)
+        return filtered or list(rows or [])
+
+    def _has_similar_candidate(rows, price):
+        price = _safe_float(price)
+        if price <= 0:
+            return False
+        for row in list(rows or []):
+            row_mid = (_safe_float(row.get("entry_low")) + _safe_float(row.get("entry_high"))) / 2.0
+            if abs(row_mid - price) < float(mode_cfg["far_pick_min_sep_usd"]) * 0.60:
+                return True
+        return False
+
+    def _append_supplemental_long(level_price, title, kind, trigger, note, probability, trend_aligned):
+        level_price = _safe_float(level_price)
+        if level_price <= 0 or _has_similar_candidate(long_candidates, level_price):
+            return
+        zone_half = max(atr_1h * 0.08, current_price * 0.00035, 18.0)
+        entry_low = level_price - zone_half
+        entry_high = level_price + zone_half
+        stop = _tight_plan_stop(entry_low, entry_high, current_price, atr_1h, "LONG")
+        risk = max(level_price - stop, atr_1h * 0.40)
+        tp1, tp2, tp3 = _build_targets(
+            "LONG",
+            level_price,
+            risk,
+            current_price,
+            atr_1h,
+            mode_cfg,
+            kind,
+            planning_resistance,
+            planning_support,
+            next_resistance,
+        )
+        scenarios.append(
+            {
+                "title": title,
+                "side": "LONG",
+                "kind": kind,
+                "probability": probability,
+                "entry_low": entry_low,
+                "entry_high": entry_high,
+                "stop": stop,
+                "tp1": tp1,
+                "tp2": tp2,
+                "tp3": tp3,
+                "risk_style": "starter",
+                "risk_pct": 0.35,
+                "trend_aligned": trend_aligned,
+                "trigger": trigger,
+                "note": note,
+            }
+        )
+
+    def _append_supplemental_short(level_price, title, kind, trigger, note, probability, trend_aligned):
+        level_price = _safe_float(level_price)
+        if level_price <= 0 or _has_similar_candidate(short_candidates, level_price):
+            return
+        zone_half = max(atr_1h * 0.08, current_price * 0.00035, 18.0)
+        entry_low = level_price - zone_half
+        entry_high = level_price + zone_half
+        stop = _tight_plan_stop(entry_low, entry_high, current_price, atr_1h, "SHORT")
+        risk = max(stop - level_price, atr_1h * 0.40)
+        tp1, tp2, tp3 = _build_targets(
+            "SHORT",
+            level_price,
+            risk,
+            current_price,
+            atr_1h,
+            mode_cfg,
+            kind,
+            planning_resistance,
+            planning_support,
+            next_support,
+        )
+        scenarios.append(
+            {
+                "title": title,
+                "side": "SHORT",
+                "kind": kind,
+                "probability": probability,
+                "entry_low": entry_low,
+                "entry_high": entry_high,
+                "stop": stop,
+                "tp1": tp1,
+                "tp2": tp2,
+                "tp3": tp3,
+                "risk_style": "starter",
+                "risk_pct": 0.35,
+                "trend_aligned": trend_aligned,
+                "trigger": trigger,
+                "note": note,
+            }
+        )
+
+    long_candidates = [row for row in scenarios if row.get("side") == "LONG"]
+    short_candidates = [row for row in scenarios if row.get("side") == "SHORT"]
+
+    if str(mode_cfg.get("mode_name") or "").lower() == "short_term":
+        resistance_price = _safe_float((planning_resistance or {}).get("price")) or _safe_float((next_resistance or {}).get("price"))
+        support_price = _safe_float((planning_support or {}).get("price")) or _safe_float((next_support or {}).get("price"))
+        upper_resistance_candidates = [
+            _safe_float((planning_resistance or {}).get("price")),
+            _safe_float((top_above or {}).get("level_price")),
+            _safe_float((mex_top_above or {}).get("level_price")),
+            _safe_float((okx_mid_above or {}).get("level_price")),
+            _safe_float((next_resistance or {}).get("price")),
+            _safe_float((okx_far_above or {}).get("level_price")),
+        ]
+        lower_support_candidates = [
+            _safe_float((planning_support or {}).get("price")),
+            _safe_float((top_below or {}).get("level_price")),
+            _safe_float((mex_top_below or {}).get("level_price")),
+            _safe_float((okx_mid_below or {}).get("level_price")),
+            _safe_float((next_support or {}).get("price")),
+            _safe_float((okx_far_below or {}).get("level_price")),
+        ]
+        for cluster in resistance_clusters:
+            cluster_price = _safe_float((cluster or {}).get("price"))
+            if cluster_price > current_price:
+                upper_resistance_candidates.append(cluster_price)
+        for cluster in support_clusters:
+            cluster_price = _safe_float((cluster or {}).get("price"))
+            if 0 < cluster_price < current_price:
+                lower_support_candidates.append(cluster_price)
+
+        def _pick_distinct_level(candidates, existing_rows, *, prefer_near=True, side_of_price=None):
+            cleaned = []
+            seen = set()
+            for raw_price in candidates:
+                price_val = _safe_float(raw_price)
+                if price_val <= 0:
+                    continue
+                rounded = round(price_val, 2)
+                if rounded in seen:
+                    continue
+                seen.add(rounded)
+                if side_of_price == "above" and price_val <= current_price:
+                    continue
+                if side_of_price == "below" and price_val >= current_price:
+                    continue
+                if _has_similar_candidate(existing_rows, price_val):
+                    continue
+                dist_usd = abs(price_val - current_price)
+                dist_pct = _distance_pct(price_val, current_price)
+                if dist_pct < float(mode_cfg["min_dist_pct"]) or dist_pct > float(mode_cfg["max_dist_pct"]) * 1.25:
+                    continue
+                cleaned.append((price_val, dist_usd))
+            if not cleaned:
+                return 0.0
+            target = float(mode_cfg["near_pick_target_usd"] if prefer_near else mode_cfg["far_pick_target_usd"])
+            chosen = min(cleaned, key=lambda row: abs(row[1] - target))
+            return _safe_float(chosen[0])
+
+        if len(long_candidates) < 3:
+            support_candidate = _pick_distinct_level(lower_support_candidates, long_candidates, prefer_near=True, side_of_price="below") or support_price
+            if support_candidate > 0:
+                _append_supplemental_long(
+                    support_candidate,
+                    "Long support reclaim plan",
+                    "pullback",
+                    f"If BTC dips into {_fmt_price(support_candidate)} and reclaims it cleanly on 15m, long the reaction.",
+                    "This is an extra short-term support plan for a cleaner nearby long location.",
+                    54.0 if trend_bias_score >= 0 else 49.0,
+                    trend_bias_score >= 0,
+                )
+        long_candidates = [row for row in scenarios if row.get("side") == "LONG"]
+        if len(long_candidates) < 3:
+            resistance_candidate = _pick_distinct_level(upper_resistance_candidates, long_candidates, prefer_near=False, side_of_price="above") or resistance_price
+            if resistance_candidate > 0:
+                _append_supplemental_long(
+                    resistance_candidate,
+                    "Long continuation retest plan",
+                    "breakout",
+                    f"If BTC reclaims {_fmt_price(resistance_candidate)} and holds the retest, long continuation.",
+                    "This is an extra nearby continuation plan when the first long options are too limited.",
+                    50.0 if trend_bias_score >= 0 else 46.0,
+                    trend_bias_score >= 0,
+                )
+        short_candidates = [row for row in scenarios if row.get("side") == "SHORT"]
+        if len(short_candidates) < 3:
+            short_resistance_candidate = _pick_distinct_level(upper_resistance_candidates, short_candidates, prefer_near=True, side_of_price="above") or resistance_price
+            if short_resistance_candidate > 0:
+                _append_supplemental_short(
+                    short_resistance_candidate,
+                    "Short local resistance plan",
+                    "rejection",
+                    f"If BTC tags {_fmt_price(short_resistance_candidate)} and rejects it on 15m, short the fade.",
+                    "This is an extra short-term resistance plan for a closer short entry.",
+                    54.0 if trend_bias_score <= 0 else 49.0,
+                    trend_bias_score <= 0,
+                )
+        short_candidates = [row for row in scenarios if row.get("side") == "SHORT"]
+        if len(short_candidates) < 3:
+            short_support_candidate = _pick_distinct_level(lower_support_candidates, short_candidates, prefer_near=False, side_of_price="below") or support_price
+            if short_support_candidate > 0:
+                _append_supplemental_short(
+                    short_support_candidate,
+                    "Short local breakdown plan",
+                    "breakdown",
+                    f"If BTC loses {_fmt_price(short_support_candidate)} cleanly and fails the retest, short continuation.",
+                    "This is an extra nearby breakdown plan when the first short options are too limited.",
+                    50.0 if trend_bias_score <= 0 else 46.0,
+                    trend_bias_score <= 0,
+                )
+        long_candidates = [row for row in scenarios if row.get("side") == "LONG"]
+        short_candidates = [row for row in scenarios if row.get("side") == "SHORT"]
+
     if str(mode_cfg.get("mode_name") or "").lower() == "short_term":
         near_long = _select_near(long_candidates, {"pullback", "major_flush", "breakout"}, expected_side_of_price="below", fallback_any_side=True)
         far_long = _select_far(long_candidates, {"breakout", "pullback", "major_flush"}, selected_row=near_long, expected_side_of_price="above", fallback_any_side=True)
         near_short = _select_near(short_candidates, {"rejection", "major_squeeze", "breakdown"}, expected_side_of_price="above", fallback_any_side=True)
         far_short = _select_far(short_candidates, {"breakdown", "rejection", "major_squeeze"}, selected_row=near_short, expected_side_of_price="below", fallback_any_side=True)
+        extra_long = _select_near(
+            _exclude_similar(long_candidates, [near_long, far_long]),
+            {"breakout", "pullback", "major_flush"},
+            expected_side_of_price=None,
+            fallback_any_side=True,
+        )
+        extra_short = _select_near(
+            _exclude_similar(short_candidates, [near_short, far_short]),
+            {"breakdown", "rejection", "major_squeeze"},
+            expected_side_of_price=None,
+            fallback_any_side=True,
+        )
         best_long = far_long or _select_best(long_candidates, {"pullback", "breakout", "major_flush"})
         best_short = far_short or _select_best(short_candidates, {"rejection", "breakdown", "major_squeeze"})
     elif trend_bias_score >= 1.5:
@@ -1591,16 +1824,22 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
         best_short = _select_best(short_candidates, {"rejection", "major_squeeze", "breakdown"})
         near_long = _select_near(long_candidates, {"pullback", "major_flush", "breakout"}, expected_side_of_price="below", fallback_any_side=True)
         near_short = _select_near(short_candidates, {"rejection", "major_squeeze", "breakdown"}, expected_side_of_price="above", fallback_any_side=True)
+        extra_long = None
+        extra_short = None
     elif trend_bias_score <= -1.5:
         best_long = _select_best(long_candidates, {"pullback", "major_flush", "breakout"})
         best_short = _select_best(short_candidates, {"breakdown", "rejection", "major_squeeze"})
         near_long = _select_near(long_candidates, {"pullback", "major_flush", "breakout"}, expected_side_of_price="below", fallback_any_side=True)
         near_short = _select_near(short_candidates, {"rejection", "major_squeeze", "breakdown"}, expected_side_of_price="above", fallback_any_side=True)
+        extra_long = None
+        extra_short = None
     else:
         best_long = _select_best(long_candidates, {"pullback", "breakout", "major_flush"})
         best_short = _select_best(short_candidates, {"rejection", "breakdown", "major_squeeze"})
         near_long = _select_near(long_candidates, {"pullback", "major_flush", "breakout"}, expected_side_of_price="below", fallback_any_side=True)
         near_short = _select_near(short_candidates, {"rejection", "major_squeeze", "breakdown"}, expected_side_of_price="above", fallback_any_side=True)
+        extra_long = None
+        extra_short = None
 
     selected = []
     if near_long:
@@ -1611,6 +1850,10 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
         selected.append(best_long)
     if best_short and best_short not in selected:
         selected.append(best_short)
+    if extra_long and extra_long not in selected:
+        selected.append(extra_long)
+    if extra_short and extra_short not in selected:
+        selected.append(extra_short)
 
     extra_long_candidates = [row for row in sorted(long_candidates, key=lambda row: row.get("probability", 0), reverse=True) if row not in selected]
     extra_short_candidates = [row for row in sorted(short_candidates, key=lambda row: row.get("probability", 0), reverse=True) if row not in selected]
@@ -1887,7 +2130,7 @@ def build_liquidation_map_snapshot(symbol=SYMBOL):
     )
     book_ctx = _order_book_context(book, current_price)
     atr_1h = max(_safe_float((tf_map.get("1h") or {}).get("atr")), current_price * 0.0035)
-    funding_rate_raw = _safe_float(funding.get("fundingRate"))
+    funding_rate_raw = _normalize_bitunix_funding_rate(funding.get("fundingRate"))
     funding_ctx = _funding_context(funding_rate_raw, funding_history)
     ticker_ctx = _ticker_context(ticker)
     liq_ctx = _liquidity_context(book, current_price, atr_1h)
@@ -1991,7 +2234,7 @@ def build_btc_scenarios_payload(symbol=SYMBOL, mode="swing"):
     )
     book_ctx = _order_book_context(book, current_price)
     atr_1h = max(_safe_float((tf_map.get("1h") or {}).get("atr")), current_price * 0.0035)
-    funding_rate_raw = _safe_float(funding.get("fundingRate"))
+    funding_rate_raw = _normalize_bitunix_funding_rate(funding.get("fundingRate"))
     funding_ctx = _funding_context(funding_rate_raw, funding_history)
     ticker_ctx = _ticker_context(ticker)
     liq_ctx = _liquidity_context(book, current_price, atr_1h)
@@ -2030,7 +2273,7 @@ def build_btc_scenarios_payload(symbol=SYMBOL, mode="swing"):
         multi_ctx=multi_ctx,
         cot_ctx=cot_ctx,
         mode=mode,
-        max_scenarios=4,
+        max_scenarios=6 if str(mode or "swing").strip().lower() == "short_term" else 4,
     )
     if not scenarios:
         raise RuntimeError("No valid BTC scenarios could be built from Bitunix data.")
