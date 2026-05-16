@@ -987,8 +987,35 @@ class PonchBot:
         cues = (
             "why", "what if", "and if", "what about now", "and now", "where invalidation",
             "where stop", "where target", "which one", "so what", "then what", "explain more",
+            "answer", "and answer", "reply",
         )
         return short_followup or any(cue in lower for cue in cues)
+
+    def _requested_runtime_source(self, text, recent_ctx=None):
+        lower = str(text or "").lower()
+        recent_ctx = dict(recent_ctx or {})
+        source_map = {
+            "bitget": ("bitget", "fetch from bitget", "use bitget", "from bitget"),
+            "okx": ("okx", "fetch from okx", "use okx", "from okx"),
+            "binance": ("binance", "fetch from binance", "use binance", "from binance"),
+            "bybit": ("bybit", "fetch from bybit", "use bybit", "from bybit"),
+            "bitunix": ("bitunix", "bitunx", "fetch from bitunix", "fetch from bitunx", "use bitunix", "use bitunx", "from bitunix", "from bitunx"),
+        }
+        for source, cues in source_map.items():
+            if any(cue in lower for cue in cues):
+                return source
+        if lower in {"answer", "and answer", "reply", "answer then"}:
+            previous = " ".join(
+                [
+                    str(recent_ctx.get("prompt") or ""),
+                    str(recent_ctx.get("answer") or ""),
+                    str(recent_ctx.get("intent") or ""),
+                ]
+            ).lower()
+            for source, cues in source_map.items():
+                if any(cue in previous for cue in cues):
+                    return source
+        return ""
 
     def _looks_like_comparison_request(self, text):
         lower = str(text or "").lower()
@@ -1312,7 +1339,7 @@ class PonchBot:
             "recent_low": float(recent["Low"].min() or close or 0.0),
         }
 
-    def _build_okx_runtime_feature_answer(self, prompt, fallback_symbol=None, mode="short_term", style="normal", intent="chart", error=None):
+    def _build_okx_runtime_feature_answer(self, prompt, fallback_symbol=None, mode="short_term", style="normal", intent="chart", error=None, source_hint="okx"):
         symbol = (self._extract_symbol_from_text(prompt) or str(fallback_symbol or "").strip().upper() or "BTCUSDT")
         symbol_label = symbol.replace("USDT", "")
         try:
@@ -1356,7 +1383,9 @@ class PonchBot:
         support_gap_pct = ((current_price / nearest_sup) - 1.0) * 100.0 if nearest_sup > 0 else None
         resistance_gap_pct = ((nearest_res / current_price) - 1.0) * 100.0 if nearest_res > 0 else None
 
-        title = f"<b>{symbol_label} OKX chart read</b>"
+        source_hint = str(source_hint or "okx").strip().lower()
+        title_label = "OKX chart read" if source_hint == "okx" else "fallback chart read"
+        title = f"<b>{symbol_label} {title_label}</b>"
         header = (
             "<blockquote>"
             f"Price: {current_price:,.2f}\n"
@@ -1364,7 +1393,12 @@ class PonchBot:
             f"Bitget funding: {funding_text}" + (f" ({funding_note})" if funding_note else "")
             + "</blockquote>"
         )
-        source_note = "Bitunix had a temporary API issue, so this answer is using fresh OKX candles."
+        if source_hint == "bitget":
+            source_note = "Bitunix is unstable right now, so this read is using fresh OKX candles with Bitget funding context."
+        elif source_hint == "okx":
+            source_note = "Bitunix had a temporary API issue, so this answer is using fresh OKX candles."
+        else:
+            source_note = f"Bitunix is unstable right now, so this read is using fresh OKX candles with {source_hint.upper()} cross-check context."
 
         if requested_side == "SHORT":
             reasons = []
@@ -1432,7 +1466,7 @@ class PonchBot:
         ]
         return "\n".join(lines)
 
-    def _build_general_feature_fallback_answer(self, prompt, fallback_symbol=None, mode="short_term", style="normal", intent="chart", error=None):
+    def _build_general_feature_fallback_answer(self, prompt, fallback_symbol=None, mode="short_term", style="normal", intent="chart", error=None, source_hint="okx"):
         symbol = (self._extract_symbol_from_text(prompt) or str(fallback_symbol or "").strip().upper() or "BTCUSDT")
         okx_answer = self._build_okx_runtime_feature_answer(
             prompt,
@@ -1441,6 +1475,7 @@ class PonchBot:
             style=style,
             intent=intent,
             error=error,
+            source_hint=source_hint,
         )
         if okx_answer:
             return okx_answer
@@ -1541,10 +1576,37 @@ class PonchBot:
         lines.append(f"<blockquote>Confidence: {self._payload_confidence_label(payload)}</blockquote>")
         return "\n".join(lines)
 
+    def _select_scenario_for_side(self, payload, side, prefer_near=False):
+        side = str(side or "").strip().upper()
+        current_price = float((payload or {}).get("current_price") or 0.0)
+        scenarios = [
+            row for row in list((payload or {}).get("scenarios") or [])
+            if str(row.get("side") or "").upper() == side
+        ]
+        if not scenarios:
+            return None
+
+        def _entry_mid(row):
+            low = float(row.get("entry_low") or 0.0)
+            high = float(row.get("entry_high") or low or 0.0)
+            return (low + high) / 2.0 if high > 0 else low
+
+        if prefer_near and current_price > 0:
+            return min(
+                scenarios,
+                key=lambda row: (
+                    abs(_entry_mid(row) - current_price),
+                    -float(row.get("probability") or 0),
+                ),
+            )
+        return max(scenarios, key=lambda row: float(row.get("probability") or 0), default=None)
+
     def _build_no_trade_answer(self, text, fallback_symbol=None):
         symbol = (self._extract_symbol_from_text(text) or str(fallback_symbol or "").strip().upper() or "BTCUSDT")
         payload = self._load_scenarios_payload_safe(symbol, self._extract_analysis_mode(text))
         best_long, best_short = self._payload_best_scenarios(payload)
+        lower = str(text or "").lower()
+        requested_side = "SHORT" if "short" in lower and "long" not in lower else ("LONG" if "long" in lower and "short" not in lower else "")
         tf_map = payload.get("tf_map") or {}
         funding_ctx = payload.get("funding_ctx") or {}
         cot_ctx = payload.get("cot_ctx") or {}
@@ -1583,6 +1645,16 @@ class PonchBot:
             "Main blockers:",
         ]
         lines.extend([f"- {reason}" for reason in reasons])
+        if requested_side in {"LONG", "SHORT"}:
+            focus = self._select_scenario_for_side(payload, requested_side, prefer_near=True)
+            if focus:
+                entry_low = float(focus.get("entry_low") or 0.0)
+                entry_high = float(focus.get("entry_high") or entry_low or 0.0)
+                entry_text = f"{entry_low:,.2f}-{entry_high:,.2f}" if abs(entry_high - entry_low) > 1e-9 else f"{entry_low:,.2f}"
+                lines.append(
+                    f"Nearest {requested_side.lower()} setup still on the board: "
+                    f"{str(focus.get('title') or '').upper()} around {entry_text}."
+                )
         lines.append("<blockquote>Confidence: Medium</blockquote>")
         return "\n".join(lines)
 
@@ -1592,7 +1664,8 @@ class PonchBot:
         best_long, best_short = self._payload_best_scenarios(payload)
         lower = str(text or "").lower()
         side = "LONG" if "long" in lower else ("SHORT" if "short" in lower else str((best_long or {}).get("side") or "LONG"))
-        focus = best_long if side == "LONG" else best_short
+        prefer_near = any(cue in lower for cue in ("from here", "here?", "near", "closer", "at market", "right now"))
+        focus = self._select_scenario_for_side(payload, side, prefer_near=prefer_near)
         if not focus:
             focus = best_long or best_short or {}
         current_price = float(payload.get("current_price") or 0.0)
@@ -1807,7 +1880,9 @@ class PonchBot:
                 "intent": intent_name,
             }
 
-        def _safe_feature_call(intent_name, builder, symbol=None):
+        requested_source = self._requested_runtime_source(prompt, recent_ctx=recent_ctx)
+
+        def _safe_feature_call(intent_name, builder, symbol=None, source_hint=None):
             try:
                 answer = builder()
             except Exception as e:
@@ -1818,6 +1893,7 @@ class PonchBot:
                     style=style,
                     intent=intent_name,
                     error=e,
+                    source_hint=source_hint or requested_source or "okx",
                 )
             return _feature_result(answer, symbol or fallback_symbol, intent_name)
 
@@ -1832,6 +1908,21 @@ class PonchBot:
                     lambda: self._build_symbol_chart_chat_answer(prompt or recent_symbol, fallback_symbol=recent_symbol, mode=mode, style=style),
                     symbol=recent_symbol,
                 )
+        if requested_source:
+            source_symbol = str(recent_ctx.get("symbol") or fallback_symbol or "BTCUSDT").strip().upper() or "BTCUSDT"
+            return _safe_feature_call(
+                "chart",
+                lambda: self._build_okx_runtime_feature_answer(
+                    prompt,
+                    fallback_symbol=source_symbol,
+                    mode=mode,
+                    style=style,
+                    intent="chart",
+                    source_hint=requested_source,
+                ),
+                symbol=source_symbol,
+                source_hint=requested_source,
+            )
         if self._looks_like_nearer_plan_followup(prompt) and recent_ctx:
             recent_symbol = str(recent_ctx.get("symbol") or fallback_symbol or "").strip().upper()
             return _safe_feature_call(
