@@ -1276,8 +1276,174 @@ class PonchBot:
         ]
         return "\n".join(lines)
 
+    def _okx_runtime_tf_summary(self, symbol, timeframe):
+        limits = {"15m": 160, "1h": 140, "4h": 120, "1d": 90}
+        lookbacks = {"15m": 20, "1h": 12, "4h": 10, "1d": 7}
+        df = fetch_klines(symbol=symbol, interval=timeframe, limit=limits.get(timeframe, 120))
+        if df is None or df.empty or len(df) < 10:
+            return {}
+        enriched = calculate_channels(df)
+        enriched = calculate_momentum(enriched)
+        curr = enriched.iloc[-1]
+        close = float(curr.get("Close") or 0.0)
+        ema2 = float(curr.get("EMA2") or close or 0.0)
+        ema3 = float(curr.get("EMA3") or close or 0.0)
+        rsi = float(curr.get("RSI") or 50.0)
+        mom = float(curr.get("MomentumSmooth") or rsi or 50.0)
+        if close > ema2 > ema3 and mom >= 50:
+            bias = "Trending Bullish"
+        elif close < ema2 < ema3 and mom <= 50:
+            bias = "Trending Bearish"
+        elif close > ema2 and ema2 > ema3:
+            bias = "Bullish"
+        elif close < ema2 and ema2 < ema3:
+            bias = "Bearish"
+        else:
+            bias = "Ranging"
+        lookback = max(6, min(int(lookbacks.get(timeframe, 8)), len(enriched) - 1))
+        recent = enriched.tail(lookback)
+        return {
+            "tf": timeframe,
+            "close": close,
+            "bias": bias,
+            "rsi": rsi,
+            "mom": mom,
+            "recent_high": float(recent["High"].max() or close or 0.0),
+            "recent_low": float(recent["Low"].min() or close or 0.0),
+        }
+
+    def _build_okx_runtime_feature_answer(self, prompt, fallback_symbol=None, mode="short_term", style="normal", intent="chart", error=None):
+        symbol = (self._extract_symbol_from_text(prompt) or str(fallback_symbol or "").strip().upper() or "BTCUSDT")
+        symbol_label = symbol.replace("USDT", "")
+        try:
+            current_price = float(fetch_last_price(symbol) or 0.0)
+        except Exception:
+            current_price = 0.0
+        if current_price <= 0:
+            return ""
+
+        summaries = {tf: self._okx_runtime_tf_summary(symbol, tf) for tf in ("15m", "1h", "4h", "1d")}
+        if not any(summaries.values()):
+            return ""
+
+        bias_15m = str((summaries.get("15m") or {}).get("bias") or "n/a")
+        bias_1h = str((summaries.get("1h") or {}).get("bias") or "n/a")
+        bias_4h = str((summaries.get("4h") or {}).get("bias") or "n/a")
+        bias_1d = str((summaries.get("1d") or {}).get("bias") or "n/a")
+        bias_1h_lower = bias_1h.lower()
+        bias_4h_lower = bias_4h.lower()
+        bias_line = "mixed"
+        if "bullish" in bias_1h_lower and "bullish" in bias_4h_lower:
+            bias_line = "bullish"
+        elif "bearish" in bias_1h_lower and "bearish" in bias_4h_lower:
+            bias_line = "bearish"
+
+        highs = [float((row or {}).get("recent_high") or 0.0) for row in summaries.values() if row]
+        lows = [float((row or {}).get("recent_low") or 0.0) for row in summaries.values() if row]
+        above = sorted({x for x in highs if x > current_price})
+        below = sorted({x for x in lows if 0 < x < current_price}, reverse=True)
+        nearest_res = above[0] if above else 0.0
+        nearest_sup = below[0] if below else 0.0
+        funding_map = dict((self.last_exchange_context or {}).get("funding") or {})
+        bitget_rate = funding_map.get("bitget")
+        funding_text = self._fmt_funding_pct(bitget_rate, decimals=4) if bitget_rate is not None else "n/a"
+        funding_note = ""
+        if bitget_rate is not None:
+            funding_note = "shorts paying" if float(bitget_rate) < 0 else ("longs paying" if float(bitget_rate) > 0 else "flat")
+
+        lower = str(prompt or "").lower()
+        requested_side = "LONG" if "long" in lower else ("SHORT" if "short" in lower else "")
+        support_gap_pct = ((current_price / nearest_sup) - 1.0) * 100.0 if nearest_sup > 0 else None
+        resistance_gap_pct = ((nearest_res / current_price) - 1.0) * 100.0 if nearest_res > 0 else None
+
+        title = f"<b>{symbol_label} OKX chart read</b>"
+        header = (
+            "<blockquote>"
+            f"Price: {current_price:,.2f}\n"
+            f"15M: {bias_15m} | 1H: {bias_1h} | 4H: {bias_4h} | 1D: {bias_1d}\n"
+            f"Bitget funding: {funding_text}" + (f" ({funding_note})" if funding_note else "")
+            + "</blockquote>"
+        )
+        source_note = "Bitunix had a temporary API issue, so this answer is using fresh OKX candles."
+
+        if requested_side == "SHORT":
+            reasons = []
+            if bias_line == "bullish":
+                reasons.append("1H and 4H OKX structure still lean bullish")
+            if support_gap_pct is not None and support_gap_pct <= 0.60:
+                reasons.append(f"price is already close to support around {nearest_sup:,.2f}")
+            if bitget_rate is not None and float(bitget_rate) < 0:
+                reasons.append("shorts are already paying funding")
+            if not reasons and bias_line == "bearish":
+                reasons.append("the short idea is cleaner on a pop into resistance, not after price is already pressed lower")
+            better = (
+                f"Better short: wait for a pop into resistance around {nearest_res:,.2f} and then look for rejection."
+                if nearest_res > 0 else
+                "Better short: wait for a bounce into resistance or a cleaner failed reclaim first."
+            )
+            body = [
+                title,
+                header,
+                source_note,
+                "Why not short yet:",
+            ]
+            body.extend([f"- {reason}" for reason in reasons[:3]])
+            body.append(better)
+            body.append("<blockquote>Confidence: Medium</blockquote>")
+            return "\n".join(body)
+
+        if requested_side == "LONG":
+            reasons = []
+            if bias_line == "bearish":
+                reasons.append("1H and 4H OKX structure are still leaning bearish")
+            if resistance_gap_pct is not None and resistance_gap_pct <= 0.60:
+                reasons.append(f"price is too close to overhead resistance around {nearest_res:,.2f}")
+            if not reasons and nearest_sup > 0 and support_gap_pct is not None and support_gap_pct > 1.0:
+                reasons.append(f"the cleaner long is still closer to support around {nearest_sup:,.2f}")
+            better = (
+                f"Better long: wait for a cleaner reclaim or a pullback closer to support around {nearest_sup:,.2f}."
+                if nearest_sup > 0 else
+                "Better long: wait for a reclaim or a cleaner pullback instead of forcing it here."
+            )
+            body = [
+                title,
+                header,
+                source_note,
+                "Why not long yet:",
+            ]
+            body.extend([f"- {reason}" for reason in reasons[:3]])
+            body.append(better)
+            body.append("<blockquote>Confidence: Medium</blockquote>")
+            return "\n".join(body)
+
+        path_line = "The clearer side is still to wait for a reclaim or rejection around the nearest key levels."
+        if bias_line == "bullish" and nearest_sup > 0:
+            path_line = f"Bias still leans long, but the cleaner entry is closer to support around {nearest_sup:,.2f} than at market."
+        elif bias_line == "bearish" and nearest_res > 0:
+            path_line = f"Bias still leans short, but the cleaner entry is closer to resistance around {nearest_res:,.2f} than at market."
+        lines = [
+            title,
+            header,
+            source_note,
+            f"Nearest support: <b>{nearest_sup:,.2f}</b>" if nearest_sup > 0 else "Nearest support: <b>n/a</b>",
+            f"Nearest resistance: <b>{nearest_res:,.2f}</b>" if nearest_res > 0 else "Nearest resistance: <b>n/a</b>",
+            path_line,
+            "<blockquote>Confidence: Medium</blockquote>",
+        ]
+        return "\n".join(lines)
+
     def _build_general_feature_fallback_answer(self, prompt, fallback_symbol=None, mode="short_term", style="normal", intent="chart", error=None):
         symbol = (self._extract_symbol_from_text(prompt) or str(fallback_symbol or "").strip().upper() or "BTCUSDT")
+        okx_answer = self._build_okx_runtime_feature_answer(
+            prompt,
+            fallback_symbol=symbol,
+            mode=mode,
+            style=style,
+            intent=intent,
+            error=error,
+        )
+        if okx_answer:
+            return okx_answer
         answer = self._build_runtime_chart_fallback(symbol, mode=mode, style=style, error=error)
         if answer:
             return answer
@@ -1485,6 +1651,106 @@ class PonchBot:
         lines.append("<blockquote>Confidence: Medium</blockquote>")
         return "\n".join(lines)
 
+    def _looks_like_nearer_plan_followup(self, text):
+        lower = str(text or "").lower()
+        if not lower:
+            return False
+        return any(
+            cue in lower for cue in (
+                "nearer", "closer one", "closer setup", "closer plan", "any near one",
+                "any nearer", "any closer", "near plan", "closer short", "closer long",
+            )
+        )
+
+    def _infer_followup_side(self, prompt, recent_ctx=None):
+        lower = str(prompt or "").lower()
+        if "short" in lower and "long" not in lower:
+            return "SHORT"
+        if "long" in lower and "short" not in lower:
+            return "LONG"
+        recent_ctx = dict(recent_ctx or {})
+        recent_prompt = str(recent_ctx.get("prompt") or "").lower()
+        recent_answer = str(recent_ctx.get("answer") or "").lower()
+        if "short" in recent_prompt and "long" not in recent_prompt:
+            return "SHORT"
+        if "long" in recent_prompt and "short" not in recent_prompt:
+            return "LONG"
+        if "short" in recent_answer and "long" not in recent_answer:
+            return "SHORT"
+        if "long" in recent_answer and "short" not in recent_answer:
+            return "LONG"
+        return ""
+
+    def _build_nearer_plan_followup_answer(self, text, fallback_symbol=None, recent_ctx=None):
+        recent_ctx = dict(recent_ctx or {})
+        symbol = (
+            self._extract_symbol_from_text(text)
+            or str(fallback_symbol or "").strip().upper()
+            or str(recent_ctx.get("symbol") or "").strip().upper()
+            or "BTCUSDT"
+        )
+        mode = self._extract_analysis_mode(text, recent_ctx=recent_ctx)
+        payload = self._load_scenarios_payload_safe(symbol, mode)
+        current_price = float(payload.get("current_price") or 0.0)
+        side = self._infer_followup_side(text, recent_ctx=recent_ctx) or "SHORT"
+        scenarios = [
+            row for row in list(payload.get("scenarios") or [])
+            if str(row.get("side") or "").upper() == side
+        ]
+        if not scenarios:
+            return ""
+
+        def _entry_mid(row):
+            low = float(row.get("entry_low") or 0.0)
+            high = float(row.get("entry_high") or low or 0.0)
+            return (low + high) / 2.0 if high > 0 else low
+
+        recent_answer = str(recent_ctx.get("answer") or "").upper()
+        recent_title = ""
+        for row in scenarios:
+            title = str(row.get("title") or "").upper()
+            if title and title in recent_answer:
+                recent_title = title
+                break
+
+        ranked = sorted(
+            scenarios,
+            key=lambda row: abs(_entry_mid(row) - current_price) if current_price > 0 else float(row.get("probability") or 0) * -1.0,
+        )
+        focus = None
+        for row in ranked:
+            title = str(row.get("title") or "").upper()
+            if recent_title and title == recent_title and len(ranked) > 1:
+                continue
+            focus = row
+            break
+        if not focus:
+            focus = ranked[0]
+
+        entry_low = float(focus.get("entry_low") or 0.0)
+        entry_high = float(focus.get("entry_high") or entry_low or 0.0)
+        entry_text = f"{entry_low:,.2f}-{entry_high:,.2f}" if abs(entry_high - entry_low) > 1e-9 else f"{entry_low:,.2f}"
+        tp1 = float(focus.get("tp1") or 0.0)
+        stop = float(focus.get("stop") or focus.get("sl") or 0.0)
+        side_note = "with trend" if focus.get("trend_aligned") else "counter-trend"
+        direction_word = "short" if side == "SHORT" else "long"
+        distance_usd = abs(_entry_mid(focus) - current_price)
+        lines = [
+            f"<b>Yes, there is a nearer {direction_word} setup.</b>",
+            (
+                "<blockquote>"
+                f"{str(focus.get('title') or '').upper()} ({side_note})\n"
+                f"Entry: {entry_text}\n"
+                f"SL: {stop:,.2f}\n"
+                f"TP1: {tp1:,.2f}\n"
+                f"Distance from price: ${distance_usd:,.0f}"
+                "</blockquote>"
+            ),
+            str(focus.get("note") or "").strip() or f"This is the cleaner nearer {direction_word} alternative right now.",
+            f"<blockquote>Chance: {float(focus.get('probability') or 0):.0f}%</blockquote>",
+        ]
+        return "\n".join(lines)
+
     def _build_symbol_comparison_answer(self, text, fallback_symbol=None):
         symbols = self._extract_all_symbols_from_text(text)
         if fallback_symbol and len(symbols) < 2:
@@ -1566,6 +1832,13 @@ class PonchBot:
                     lambda: self._build_symbol_chart_chat_answer(prompt or recent_symbol, fallback_symbol=recent_symbol, mode=mode, style=style),
                     symbol=recent_symbol,
                 )
+        if self._looks_like_nearer_plan_followup(prompt) and recent_ctx:
+            recent_symbol = str(recent_ctx.get("symbol") or fallback_symbol or "").strip().upper()
+            return _safe_feature_call(
+                "plans",
+                lambda: self._build_nearer_plan_followup_answer(prompt, fallback_symbol=recent_symbol, recent_ctx=recent_ctx),
+                symbol=recent_symbol or fallback_symbol,
+            )
         if self._looks_like_funding_overview_request(prompt):
             symbol = self._extract_symbol_from_text(prompt) or fallback_symbol or "BTCUSDT"
             return {
