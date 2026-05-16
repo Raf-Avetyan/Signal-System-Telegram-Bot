@@ -1314,6 +1314,56 @@ class PonchBot:
         ]
         return "\n".join(lines)
 
+    def _build_runtime_no_trade_fallback(self, symbol):
+        symbol = str(symbol or "").strip().upper()
+        if symbol != str(SYMBOL).upper():
+            return ""
+        current_price = 0.0
+        try:
+            current_price = float(fetch_last_price(symbol) or 0.0)
+        except Exception:
+            current_price = 0.0
+        if current_price <= 0:
+            try:
+                df = (self.latest_data or {}).get("15m")
+                if df is not None and not df.empty:
+                    current_price = float(df["Close"].iloc[-1])
+            except Exception:
+                current_price = 0.0
+        tf_trends = dict(getattr(self, "tf_trends", {}) or {})
+        bias_1h = str(tf_trends.get("1h") or "n/a")
+        bias_4h = str(tf_trends.get("4h") or "n/a")
+        bias_1d = str(tf_trends.get("1d") or "n/a")
+        funding_map = dict((self.last_exchange_context or {}).get("funding") or {})
+        bitget_rate = funding_map.get("bitget")
+        funding_text = self._fmt_funding_pct(bitget_rate, decimals=4) if bitget_rate is not None else "n/a"
+        cot_summary = str((self.last_cot_context or {}).get("summary") or "Neutral positioning")
+        reasons = []
+        if ("bullish" in bias_4h.lower()) != ("bullish" in bias_1d.lower()) and ("bearish" in bias_4h.lower()) != ("bearish" in bias_1d.lower()):
+            reasons.append("higher-timeframe bias is mixed")
+        if "crowded" in cot_summary.lower():
+            reasons.append(cot_summary)
+        if bitget_rate is not None:
+            if float(bitget_rate) > 0:
+                reasons.append("longs are paying on Bitget, so late longs are less attractive")
+            elif float(bitget_rate) < 0:
+                reasons.append("shorts are paying on Bitget, so late shorts are less attractive")
+        reasons = reasons[:3] or ["the cleaner trigger still has not printed yet"]
+        lines = [
+            f"<b>{symbol.replace('USDT', '')} why no trade yet</b>",
+            (
+                "<blockquote>"
+                f"Price: {current_price:,.2f}\n"
+                f"1H: {bias_1h} | 4H: {bias_4h} | 1D: {bias_1d}\n"
+                f"Bitget funding: {funding_text}"
+                "</blockquote>"
+            ),
+            "Main blockers:",
+        ]
+        lines.extend([f"- {reason}" for reason in reasons])
+        lines.append("<blockquote>Confidence: Low</blockquote>")
+        return "\n".join(lines)
+
     def _okx_runtime_tf_summary(self, symbol, timeframe):
         limits = {"15m": 160, "1h": 140, "4h": 120, "1d": 90}
         lookbacks = {"15m": 20, "1h": 12, "4h": 10, "1d": 7}
@@ -1490,6 +1540,10 @@ class PonchBot:
         )
         if okx_answer:
             return okx_answer
+        if str(intent or "").strip().lower() == "no_trade":
+            no_trade_answer = self._build_runtime_no_trade_fallback(symbol)
+            if no_trade_answer:
+                return no_trade_answer
         answer = self._build_runtime_chart_fallback(symbol, mode=mode, style=style, error=error)
         if answer:
             return answer
