@@ -296,7 +296,7 @@ class BitunixFuturesClient:
         if end_time is not None:
             query["endTime"] = int(end_time)
         if limit is not None:
-            query["limit"] = int(limit)
+            query["limit"] = min(int(limit), 200)
         if price_type:
             query["type"] = str(price_type).upper()
         return self._public_request("GET", "/api/v1/futures/market/kline", query=query)

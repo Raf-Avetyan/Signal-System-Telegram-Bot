@@ -33,9 +33,10 @@ from momentum import calculate_momentum, check_htf_pullback_entry, check_one_h_r
 
 
 BITUNIX_TIMEFRAMES = ["15m", "1h", "4h", "1d", "1w", "1M"]
+BITUNIX_KLINE_MAX_LIMIT = 200
 BITUNIX_LIMITS = {
-    "15m": 240,
-    "1h": 240,
+    "15m": 200,
+    "1h": 200,
     "4h": 180,
     "1d": 150,
     "1w": 80,
@@ -209,7 +210,8 @@ def _position_label(risk_style):
 
 def _fetch_bitunix_klines(symbol=SYMBOL, interval="1h", limit=None):
     client = BitunixFuturesClient()
-    raw = client.get_kline(symbol, interval, limit=int(limit or BITUNIX_LIMITS.get(interval, 200)))
+    requested_limit = int(limit or BITUNIX_LIMITS.get(interval, BITUNIX_KLINE_MAX_LIMIT))
+    raw = client.get_kline(symbol, interval, limit=min(requested_limit, BITUNIX_KLINE_MAX_LIMIT))
     rows = raw.get("data") or []
     if not rows:
         return pd.DataFrame()
