@@ -564,7 +564,14 @@ class PonchBot:
             try:
                 answer = self._build_symbol_chart_chat_answer(prompt, fallback_symbol=fallback_symbol, mode=mode, style=style)
             except Exception as e:
-                answer = f"I tried to load that chart from Bitunix/OKX, but it failed this time: {e}"
+                answer = self._build_general_feature_fallback_answer(
+                    prompt,
+                    fallback_symbol=fallback_symbol,
+                    mode=mode,
+                    style=style,
+                    intent="chart",
+                    error=e,
+                )
             self._send_text_chunks(
                 chat_id,
                 answer,
@@ -1269,6 +1276,25 @@ class PonchBot:
         ]
         return "\n".join(lines)
 
+    def _build_general_feature_fallback_answer(self, prompt, fallback_symbol=None, mode="short_term", style="normal", intent="chart", error=None):
+        symbol = (self._extract_symbol_from_text(prompt) or str(fallback_symbol or "").strip().upper() or "BTCUSDT")
+        answer = self._build_runtime_chart_fallback(symbol, mode=mode, style=style, error=error)
+        if answer:
+            return answer
+        intent_label = {
+            "coaching": "coaching read",
+            "review": "trade review",
+            "probability": "probability breakdown",
+            "no_trade": "no-trade read",
+            "comparison": "comparison read",
+            "chart_followup": "chart update",
+            "chart": "chart read",
+        }.get(str(intent or "").strip().lower(), "market read")
+        return (
+            "Bitunix had a temporary API issue, so I couldn’t build the full "
+            f"{intent_label} right now. Retry in a moment and I’ll refresh it."
+        )
+
     def _build_probability_breakdown_answer(self, text, fallback_symbol=None):
         symbol = (self._extract_symbol_from_text(text) or str(fallback_symbol or "").strip().upper() or "BTCUSDT")
         mode = self._extract_analysis_mode(text)
@@ -1501,15 +1527,45 @@ class PonchBot:
         style = self._extract_explain_style(prompt, recent_ctx=recent_ctx)
         mode = self._extract_analysis_mode(prompt, recent_ctx=recent_ctx)
         lower = str(prompt or "").lower()
+        fallback_symbol = self._extract_symbol_from_text(prompt) or fallback_symbol or "BTCUSDT"
+
+        def _feature_result(answer, symbol, intent_name):
+            answer = str(answer or "").strip()
+            if not answer:
+                return None
+            return {
+                "answer": answer,
+                "symbol": str(symbol or fallback_symbol or "").strip().upper(),
+                "mode": mode,
+                "style": style,
+                "intent": intent_name,
+            }
+
+        def _safe_feature_call(intent_name, builder, symbol=None):
+            try:
+                answer = builder()
+            except Exception as e:
+                answer = self._build_general_feature_fallback_answer(
+                    prompt,
+                    fallback_symbol=symbol or fallback_symbol,
+                    mode=mode,
+                    style=style,
+                    intent=intent_name,
+                    error=e,
+                )
+            return _feature_result(answer, symbol or fallback_symbol, intent_name)
+
         if self._looks_like_followup_question(prompt) and recent_ctx and any(
             cue in lower for cue in ["go deeper", "deeper", "explain simply", "simple", "what about now", "and now", "update", "now?"]
         ):
             recent_intent = str(recent_ctx.get("intent") or "").strip().lower()
             recent_symbol = str(recent_ctx.get("symbol") or fallback_symbol or "").strip().upper()
             if recent_intent in {"chart", "plans", "coaching", "probability", "review", "no_trade"} and recent_symbol:
-                answer = self._build_symbol_chart_chat_answer(prompt or recent_symbol, fallback_symbol=recent_symbol, mode=mode, style=style)
-                if answer:
-                    return {"answer": answer, "symbol": recent_symbol, "mode": mode, "style": style, "intent": "chart_followup"}
+                return _safe_feature_call(
+                    "chart_followup",
+                    lambda: self._build_symbol_chart_chat_answer(prompt or recent_symbol, fallback_symbol=recent_symbol, mode=mode, style=style),
+                    symbol=recent_symbol,
+                )
         if self._looks_like_funding_overview_request(prompt):
             symbol = self._extract_symbol_from_text(prompt) or fallback_symbol or "BTCUSDT"
             return {
@@ -1523,17 +1579,15 @@ class PonchBot:
         if saved:
             return {"answer": saved, "symbol": fallback_symbol or "", "mode": mode, "style": style, "intent": "education"}
         if self._looks_like_comparison_request(prompt):
-            answer = self._build_symbol_comparison_answer(prompt, fallback_symbol=fallback_symbol)
-            if answer:
-                return {"answer": answer, "symbol": "", "mode": mode, "style": style, "intent": "comparison"}
+            return _safe_feature_call("comparison", lambda: self._build_symbol_comparison_answer(prompt, fallback_symbol=fallback_symbol), symbol="")
         if self._looks_like_trade_coaching_request(prompt):
-            return {"answer": self._build_trade_coaching_answer(prompt, fallback_symbol=fallback_symbol), "symbol": self._extract_symbol_from_text(prompt) or fallback_symbol or "", "mode": mode, "style": style, "intent": "coaching"}
+            return _safe_feature_call("coaching", lambda: self._build_trade_coaching_answer(prompt, fallback_symbol=fallback_symbol))
         if self._looks_like_trade_review_request(prompt):
-            return {"answer": self._build_trade_review_answer(prompt, fallback_symbol=fallback_symbol, recent_ctx=recent_ctx), "symbol": self._extract_symbol_from_text(prompt) or fallback_symbol or "", "mode": mode, "style": style, "intent": "review"}
+            return _safe_feature_call("review", lambda: self._build_trade_review_answer(prompt, fallback_symbol=fallback_symbol, recent_ctx=recent_ctx))
         if self._looks_like_no_trade_question(prompt):
-            return {"answer": self._build_no_trade_answer(prompt, fallback_symbol=fallback_symbol), "symbol": self._extract_symbol_from_text(prompt) or fallback_symbol or "", "mode": mode, "style": style, "intent": "no_trade"}
+            return _safe_feature_call("no_trade", lambda: self._build_no_trade_answer(prompt, fallback_symbol=fallback_symbol))
         if self._looks_like_probability_breakdown_request(prompt):
-            return {"answer": self._build_probability_breakdown_answer(prompt, fallback_symbol=fallback_symbol), "symbol": self._extract_symbol_from_text(prompt) or fallback_symbol or "", "mode": mode, "style": style, "intent": "probability"}
+            return _safe_feature_call("probability", lambda: self._build_probability_breakdown_answer(prompt, fallback_symbol=fallback_symbol))
         return None
 
     def _handle_general_group_chat_message(self, message):
@@ -1807,7 +1861,14 @@ class PonchBot:
             try:
                 answer = self._build_symbol_chart_chat_answer(prompt, fallback_symbol=fallback_symbol, mode=mode, style=style)
             except Exception as e:
-                answer = f"I tried to load that chart from Bitunix/OKX, but it failed this time: {e}"
+                answer = self._build_general_feature_fallback_answer(
+                    prompt,
+                    fallback_symbol=fallback_symbol,
+                    mode=mode,
+                    style=style,
+                    intent="chart",
+                    error=e,
+                )
             self._send_text_chunks(
                 chat_id,
                 answer,
@@ -4052,11 +4113,11 @@ class PonchBot:
 
     def _send_session_game_plan(self, session_name, latest_price):
         if self.is_booting:
-            return
+            return None
         msg = self._build_session_game_plan_message(session_name, latest_price)
         if not msg:
-            return
-        tg.send(
+            return None
+        return tg.send(
             msg,
             parse_mode="HTML",
             chat_id=self._signal_chat_id(),
@@ -9780,6 +9841,18 @@ class PonchBot:
         if today:
             self.last_session_thread_cleanup_date = today
 
+    def _untrack_session_thread_message_id(self, msg_id):
+        try:
+            target_id = int(msg_id or 0)
+        except Exception:
+            return
+        if target_id <= 0:
+            return
+        self.session_thread_message_ids = [
+            raw_id for raw_id in list(self.session_thread_message_ids or [])
+            if str(raw_id).strip() and int(raw_id) != target_id
+        ]
+
     def _tick(self):
         """One iteration of the main loop."""
         now = datetime.now(timezone.utc)
@@ -10525,7 +10598,14 @@ class PonchBot:
 
                         plan_key = f"gameplan_{session_id}"
                         if plan_key not in self.sent_sessions:
-                            self._send_session_game_plan(s_name, latest_price)
+                            plan_resp = self._send_session_game_plan(s_name, latest_price)
+                            if plan_resp and "result" in plan_resp:
+                                plan_msg_id = (plan_resp.get("result") or {}).get("message_id")
+                                if plan_msg_id:
+                                    self._track_session_thread_message_id(plan_msg_id)
+                                    session_msg_meta = dict(self.session_msg_ids.get(session_id) or {})
+                                    session_msg_meta["gameplan_msg_id"] = plan_msg_id
+                                    self.session_msg_ids[session_id] = session_msg_meta
                             self.sent_sessions.add(plan_key)
                             self._save_state()
 
@@ -10597,6 +10677,13 @@ class PonchBot:
                             
                             # Stop updating the opening message once closed
                             if session_id in self.session_msg_ids:
+                                gameplan_msg_id = (self.session_msg_ids.get(session_id) or {}).get("gameplan_msg_id")
+                                if gameplan_msg_id:
+                                    try:
+                                        tg.delete_message(self._signal_chat_id(), int(gameplan_msg_id))
+                                    except Exception:
+                                        pass
+                                    self._untrack_session_thread_message_id(gameplan_msg_id)
                                 del self.session_msg_ids[session_id]
                                 
                             self._save_state() # Save summary sent state
