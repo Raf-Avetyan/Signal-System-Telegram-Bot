@@ -125,7 +125,7 @@ from data import (
 )
 from tracker import SignalTracker
 from bitunix import verify_bitunix_user
-from bitunix_trade import TradeExecutor, new_signal_id
+from bitunix_trade import BitunixFuturesClient, TradeExecutor, new_signal_id
 from liquidity_map import detect_liquidity_event, detect_liquidity_candidates
 from smart_money import detect_smart_money_entry
 from market_report import build_btc_market_report, build_btc_scenarios_payload, build_liquidation_map_snapshot
@@ -1220,7 +1220,8 @@ class PonchBot:
         payload = build_btc_scenarios_payload(symbol=symbol, mode=self._extract_analysis_mode(text))
         funding_rate = float(payload.get("funding_rate") or 0.0)
         try:
-            live_bitunix_rate = fetch_funding_rate(symbol)
+            raw = BitunixFuturesClient().get_funding_rate(symbol)
+            live_bitunix_rate = float(((raw.get("data") or {}).get("fundingRate")) or 0.0)
         except Exception:
             live_bitunix_rate = None
         if live_bitunix_rate is not None:
@@ -1237,7 +1238,7 @@ class PonchBot:
             bitunix_read = "funding is flat"
 
         lines = [f"<b>{symbol.replace('USDT', '')} funding snapshot</b>"]
-        rows = [f"Bitunix: {self._fmt_funding_pct(funding_rate, decimals=4, already_percent=True)}"]
+        rows = [f"Bitunix: {self._fmt_funding_pct(funding_rate, decimals=6, already_percent=True)}"]
         bitget_rate = funding_map.get("bitget")
         if bitget_rate is not None:
             rows.append(f"Bitget: {self._fmt_funding_pct(bitget_rate, decimals=4)}")
