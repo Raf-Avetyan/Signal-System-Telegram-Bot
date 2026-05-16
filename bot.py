@@ -1230,6 +1230,7 @@ class PonchBot:
         cached_payload = cached.get("payload") if isinstance(cached, dict) else None
         cached_age = time.time() - float((cached.get("ts") or 0) if isinstance(cached, dict) else 0)
         if cached_payload and cached_age <= 12:
+            self.last_runtime_error = None
             payload = dict(cached_payload or {})
             payload["_from_cache"] = True
             payload["_cache_age_sec"] = cached_age
@@ -1239,6 +1240,7 @@ class PonchBot:
         for attempt in range(2):
             try:
                 payload = build_btc_scenarios_payload(symbol=symbol, mode=mode)
+                self.last_runtime_error = None
                 self.last_scenarios_payloads[cache_key] = {
                     "ts": time.time(),
                     "payload": payload,
@@ -1257,16 +1259,19 @@ class PonchBot:
         cached_payload = cached.get("payload") if isinstance(cached, dict) else None
         cached_age = time.time() - float((cached.get("ts") or 0) if isinstance(cached, dict) else 0)
         if cached_payload and cached_age <= 20 * 60:
+            self.last_runtime_error = None
             payload = dict(cached_payload or {})
             payload["_from_cache"] = True
             payload["_cache_age_sec"] = cached_age
             return payload
         if transient and cached_payload and cached_age <= 12 * 60 * 60:
+            self.last_runtime_error = last_error
             payload = dict(cached_payload or {})
             payload["_from_cache"] = True
             payload["_stale_cache"] = True
             payload["_cache_age_sec"] = cached_age
             return payload
+        self.last_runtime_error = last_error
         raise last_error if last_error is not None else RuntimeError("Could not build scenarios payload.")
 
     def _build_runtime_chart_fallback(self, symbol, mode="short_term", style="normal", error=None):
