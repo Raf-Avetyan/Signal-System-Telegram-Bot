@@ -1377,6 +1377,9 @@ class PonchBot:
             return ""
         endpoint = str(getattr(error, "endpoint", "") or "").strip()
         response_text = str(getattr(error, "response_text", "") or "").strip()
+        request_url = str(getattr(error, "request_url", "") or "").strip()
+        request_body = str(getattr(error, "request_body", "") or "").strip()
+        status_code = getattr(error, "status_code", None)
         message = str(error or "").strip()
         code_msg = ""
         if response_text:
@@ -1391,11 +1394,52 @@ class PonchBot:
         parts = []
         if endpoint:
             parts.append(endpoint)
+        if request_url:
+            parts.append(request_url)
+        if status_code not in (None, "", 0):
+            parts.append(f"HTTP {status_code}")
         if code_msg:
             parts.append(code_msg)
         elif message:
             parts.append(message)
-        return " | ".join(part for part in parts if part)[:280]
+        if request_body:
+            parts.append(f"body={request_body}")
+        if response_text:
+            parts.append(f"response={response_text}")
+        return " | ".join(part for part in parts if part)[:1800]
+
+    def _format_runtime_error_full(self, error):
+        if error is None:
+            return ""
+        endpoint = str(getattr(error, "endpoint", "") or "").strip()
+        request_url = str(getattr(error, "request_url", "") or "").strip()
+        request_body = str(getattr(error, "request_body", "") or "").strip()
+        response_text = str(getattr(error, "response_text", "") or "").strip()
+        status_code = getattr(error, "status_code", None)
+        message = str(error or "").strip()
+        lines = []
+        if endpoint:
+            lines.append(f"endpoint: {endpoint}")
+        if request_url:
+            lines.append(f"url: {request_url}")
+        if status_code not in (None, "", 0):
+            lines.append(f"http_status: {status_code}")
+        if message:
+            lines.append(f"error: {message}")
+        if request_body:
+            lines.append(f"request_body: {request_body}")
+        if response_text:
+            lines.append(f"response: {response_text}")
+            try:
+                payload = json.loads(response_text)
+                code = str(payload.get('code') or '').strip()
+                msg = str(payload.get('msg') or '').strip()
+                if code or msg:
+                    lines.append(f"exchange_code: {code}")
+                    lines.append(f"exchange_msg: {msg}")
+            except Exception:
+                pass
+        return "\n".join(line for line in lines if line)[:3500]
 
     def _okx_runtime_tf_summary(self, symbol, timeframe):
         limits = {"15m": 160, "1h": 140, "4h": 120, "1d": 90}
@@ -1561,6 +1605,8 @@ class PonchBot:
         return "\n".join(lines)
 
     def _build_general_feature_fallback_answer(self, prompt, fallback_symbol=None, mode="short_term", style="normal", intent="chart", error=None, source_hint="okx"):
+        if error is not None:
+            self.last_runtime_error = error
         symbol = (self._extract_symbol_from_text(prompt) or str(fallback_symbol or "").strip().upper() or "BTCUSDT")
         okx_answer = self._build_okx_runtime_feature_answer(
             prompt,
@@ -1590,10 +1636,11 @@ class PonchBot:
             "chart": "chart read",
         }.get(str(intent or "").strip().lower(), "market read")
         detail = self._format_runtime_error_brief(error)
+        detail_full = self._format_runtime_error_full(error)
         return (
             "Bitunix had a temporary API issue, so I couldn’t build the full "
             f"{intent_label} right now."
-            + (f"\n<blockquote>Request error: {html.escape(detail)}</blockquote>" if detail else "")
+            + (f"\n<blockquote>Request error: {html.escape(detail_full or detail)}</blockquote>" if (detail_full or detail) else "")
         )
 
     def _build_probability_breakdown_answer(self, text, fallback_symbol=None):
@@ -1762,6 +1809,14 @@ class PonchBot:
         recent_ctx = dict(recent_ctx or {})
         recent_answer = str(recent_ctx.get("answer") or "")
         lowered_answer = recent_answer.lower()
+        last_error = getattr(self, "last_runtime_error", None)
+        if last_error is not None:
+            full = self._format_runtime_error_full(last_error)
+            if full:
+                return "\n".join([
+                    "<b>Recent runtime issue</b>",
+                    "<blockquote>" + html.escape(full) + "</blockquote>",
+                ])
         if "bitunix had a temporary api issue" in lowered_answer or "system error" in lowered_answer or "800021" in lowered_answer:
             lines = [
                 "<b>Recent runtime issue</b>",

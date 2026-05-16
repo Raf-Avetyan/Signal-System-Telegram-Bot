@@ -2,7 +2,6 @@ import hashlib
 import json
 import math
 import os
-import secrets
 import threading
 import time
 import uuid
@@ -43,10 +42,22 @@ from config import (
 
 
 class BitunixTradeError(RuntimeError):
-    def __init__(self, message: str, *, endpoint: Optional[str] = None, response_text: Optional[str] = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        endpoint: Optional[str] = None,
+        response_text: Optional[str] = None,
+        request_url: Optional[str] = None,
+        status_code: Optional[int] = None,
+        request_body: Optional[str] = None,
+    ):
         super().__init__(message)
         self.endpoint = endpoint
         self.response_text = response_text
+        self.request_url = request_url
+        self.status_code = status_code
+        self.request_body = request_body
 
 
 @dataclass
@@ -86,6 +97,8 @@ class BitunixFuturesClient:
     _public_cache_lock = threading.Lock()
     _public_rate_lock = threading.Lock()
     _public_next_allowed_ts = 0.0
+    _private_nonce_lock = threading.Lock()
+    _private_last_nonce = 0
 
     def __init__(self):
         self.base_url = BITUNIX_FAPI_BASE_URL.rstrip("/")
@@ -131,9 +144,8 @@ class BitunixFuturesClient:
             raise BitunixTradeError("Bitunix futures API credentials are not configured.")
         payload = payload or {}
         query = query or {}
-        nonce = secrets.token_hex(16)
-        timestamp = nonce
-        timestamp = str(int(time.time() * 1000))
+        timestamp = self._next_private_nonce()
+        nonce = timestamp
         body = json.dumps(payload, separators=(",", ":")) if payload else ""
         headers = {
             "api-key": self.api_key,
@@ -158,11 +170,16 @@ class BitunixFuturesClient:
                 f"HTTP error on {method} {path}: {e}",
                 endpoint=f"{method} {path}",
                 response_text=text,
+                request_url=url,
+                status_code=(e.response.status_code if e.response is not None else None),
+                request_body=body or None,
             ) from e
         except Exception as e:
             raise BitunixTradeError(
                 f"Request failed on {method} {path}: {e}",
                 endpoint=f"{method} {path}",
+                request_url=url,
+                request_body=body or None,
             ) from e
         code = str(data.get("code"))
         if code not in {"0", "200"}:
@@ -170,8 +187,18 @@ class BitunixFuturesClient:
                 f"Bitunix API error {code}: {data.get('msg', 'unknown error')}",
                 endpoint=f"{method} {path}",
                 response_text=json.dumps(data),
+                request_url=url,
+                status_code=int(resp.status_code) if getattr(resp, "status_code", None) is not None else None,
+                request_body=body or None,
             )
         return data
+
+    @classmethod
+    def _next_private_nonce(cls) -> str:
+        with cls._private_nonce_lock:
+            now_ms = int(time.time() * 1000)
+            cls._private_last_nonce = max(now_ms, cls._private_last_nonce + 1)
+            return str(cls._private_last_nonce)
 
     def _public_request(self, method: str, path: str, query: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         query = query or {}
@@ -208,6 +235,8 @@ class BitunixFuturesClient:
                     f"HTTP error on {method} {path}: {e}",
                     endpoint=f"{method} {path}",
                     response_text=text,
+                    request_url=url,
+                    status_code=(e.response.status_code if e.response is not None else None),
                 )
                 if attempt == 0:
                     time.sleep(0.35)
@@ -217,6 +246,7 @@ class BitunixFuturesClient:
                 last_error = BitunixTradeError(
                     f"Request failed on {method} {path}: {e}",
                     endpoint=f"{method} {path}",
+                    request_url=url,
                 )
                 if attempt == 0:
                     time.sleep(0.35)
@@ -229,6 +259,8 @@ class BitunixFuturesClient:
                     f"Bitunix API error {code}: {data.get('msg', 'unknown error')}",
                     endpoint=f"{method} {path}",
                     response_text=json.dumps(data),
+                    request_url=url,
+                    status_code=int(resp.status_code) if getattr(resp, "status_code", None) is not None else None,
                 )
                 if code == "800021" and attempt == 0:
                     time.sleep(0.45)
