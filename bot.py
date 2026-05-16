@@ -163,6 +163,7 @@ class PonchBot:
         self.last_bitget_btc_funding = None
         self.last_exchange_funding = {}
         self.last_exchange_context = {}
+        self.last_scenarios_payloads = {}
         self.sent_sessions = set()     # "session_LONDON_2023-10-14"
         self.session_data = {}         # { "LONDON_2024-03-15": {"open": 70000, "levels": set()} }
         self.session_history = {}      # { "ASIA": "Asia recap text" }
@@ -1175,10 +1176,42 @@ class PonchBot:
             return "Medium"
         return "Low"
 
+    def _load_scenarios_payload_safe(self, symbol, mode):
+        symbol = str(symbol or "").strip().upper()
+        mode = str(mode or "short_term").strip().lower()
+        cache_key = f"{symbol}::{mode}"
+        last_error = None
+        for attempt in range(2):
+            try:
+                payload = build_btc_scenarios_payload(symbol=symbol, mode=mode)
+                self.last_scenarios_payloads[cache_key] = {
+                    "ts": time.time(),
+                    "payload": payload,
+                }
+                return payload
+            except Exception as e:
+                last_error = e
+                error_text = str(e or "").lower()
+                transient = ("800021" in error_text) or ("system error" in error_text)
+                if transient and attempt == 0:
+                    time.sleep(0.75)
+                    continue
+                break
+
+        cached = dict((self.last_scenarios_payloads or {}).get(cache_key) or {})
+        cached_payload = cached.get("payload") if isinstance(cached, dict) else None
+        cached_age = time.time() - float((cached.get("ts") or 0) if isinstance(cached, dict) else 0)
+        if cached_payload and cached_age <= 20 * 60:
+            payload = dict(cached_payload or {})
+            payload["_from_cache"] = True
+            payload["_cache_age_sec"] = cached_age
+            return payload
+        raise last_error if last_error is not None else RuntimeError("Could not build scenarios payload.")
+
     def _build_probability_breakdown_answer(self, text, fallback_symbol=None):
         symbol = (self._extract_symbol_from_text(text) or str(fallback_symbol or "").strip().upper() or "BTCUSDT")
         mode = self._extract_analysis_mode(text)
-        payload = build_btc_scenarios_payload(symbol=symbol, mode=mode)
+        payload = self._load_scenarios_payload_safe(symbol, mode)
         best_long, best_short = self._payload_best_scenarios(payload)
         lower = str(text or "").lower()
         focus = best_long
@@ -1217,7 +1250,7 @@ class PonchBot:
 
     def _build_funding_overview_answer(self, text, fallback_symbol=None):
         symbol = (self._extract_symbol_from_text(text) or str(fallback_symbol or "").strip().upper() or "BTCUSDT")
-        payload = build_btc_scenarios_payload(symbol=symbol, mode=self._extract_analysis_mode(text))
+        payload = self._load_scenarios_payload_safe(symbol, self._extract_analysis_mode(text))
         funding_rate = float(payload.get("funding_rate") or 0.0)
         try:
             raw = BitunixFuturesClient().get_funding_rate(symbol)
@@ -1257,7 +1290,7 @@ class PonchBot:
 
     def _build_no_trade_answer(self, text, fallback_symbol=None):
         symbol = (self._extract_symbol_from_text(text) or str(fallback_symbol or "").strip().upper() or "BTCUSDT")
-        payload = build_btc_scenarios_payload(symbol=symbol, mode=self._extract_analysis_mode(text))
+        payload = self._load_scenarios_payload_safe(symbol, self._extract_analysis_mode(text))
         best_long, best_short = self._payload_best_scenarios(payload)
         tf_map = payload.get("tf_map") or {}
         funding_ctx = payload.get("funding_ctx") or {}
@@ -1302,7 +1335,7 @@ class PonchBot:
 
     def _build_trade_coaching_answer(self, text, fallback_symbol=None):
         symbol = (self._extract_symbol_from_text(text) or str(fallback_symbol or "").strip().upper() or "BTCUSDT")
-        payload = build_btc_scenarios_payload(symbol=symbol, mode=self._extract_analysis_mode(text))
+        payload = self._load_scenarios_payload_safe(symbol, self._extract_analysis_mode(text))
         best_long, best_short = self._payload_best_scenarios(payload)
         lower = str(text or "").lower()
         side = "LONG" if "long" in lower else ("SHORT" if "short" in lower else str((best_long or {}).get("side") or "LONG"))
@@ -1337,7 +1370,7 @@ class PonchBot:
 
     def _build_trade_review_answer(self, text, fallback_symbol=None, recent_ctx=None):
         symbol = (self._extract_symbol_from_text(text) or str(fallback_symbol or "").strip().upper() or str((dict(recent_ctx or {}).get('symbol') or 'BTCUSDT')).strip().upper())
-        payload = build_btc_scenarios_payload(symbol=symbol, mode=self._extract_analysis_mode(text, recent_ctx=recent_ctx))
+        payload = self._load_scenarios_payload_safe(symbol, self._extract_analysis_mode(text, recent_ctx=recent_ctx))
         best_long, best_short = self._payload_best_scenarios(payload)
         tf_map = payload.get("tf_map") or {}
         current_price = float(payload.get("current_price") or 0.0)
@@ -1374,7 +1407,7 @@ class PonchBot:
 
         payloads = []
         for symbol in symbols:
-            payloads.append((symbol, build_btc_scenarios_payload(symbol=symbol, mode=self._extract_analysis_mode(text))))
+            payloads.append((symbol, self._load_scenarios_payload_safe(symbol, self._extract_analysis_mode(text))))
 
         def _score_payload(payload):
             best_long, best_short = self._payload_best_scenarios(payload)
@@ -5403,7 +5436,7 @@ class PonchBot:
             return ""
         mode = str(mode or self._extract_analysis_mode(text) or "short_term").strip().lower()
         style = str(style or "normal").strip().lower()
-        payload = build_btc_scenarios_payload(symbol=symbol, mode=mode)
+        payload = self._load_scenarios_payload_safe(symbol, mode)
         tf_map = payload.get("tf_map") or {}
         funding_ctx = payload.get("funding_ctx") or {}
         ticker_ctx = payload.get("ticker_ctx") or {}

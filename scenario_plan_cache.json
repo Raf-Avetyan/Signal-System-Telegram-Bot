@@ -19,7 +19,7 @@
       "execution_tf": "15m",
       "scenario_mode": "short_term",
       "entry_mid": 80302.13235382024,
-      "_sticky_cached_at": 1778916516.6818151
+      "_sticky_cached_at": 1778916947.8955448
     },
     "SHORT::SHORT BREAKDOWN PLAN": {
       "title": "Short breakdown plan",
@@ -40,7 +40,7 @@
       "execution_tf": "15m",
       "scenario_mode": "short_term",
       "entry_mid": 78489.92305333333,
-      "_sticky_cached_at": 1778916516.6818745
+      "_sticky_cached_at": 1778916947.8955798
     },
     "LONG::LONG PULLBACK PLAN": {
       "title": "Long pullback plan",
@@ -61,7 +61,7 @@
       "execution_tf": "15m",
       "scenario_mode": "short_term",
       "entry_mid": 76638.00000000001,
-      "_sticky_cached_at": 1778916516.6818917
+      "_sticky_cached_at": 1778916947.8955922
     },
     "SHORT::SHORT MAJOR LIQ SQUEEZE PLAN": {
       "title": "Short major liq squeeze plan",
@@ -82,19 +82,19 @@
       "execution_tf": "15m",
       "scenario_mode": "short_term",
       "entry_mid": 80992.85244707002,
-      "_sticky_cached_at": 1778916516.6819046
+      "_sticky_cached_at": 1778916947.8955998
     },
     "LONG::LONG CONTINUATION RETEST PLAN": {
       "title": "Long continuation retest plan",
       "side": "LONG",
       "kind": "breakout",
       "probability": 46.0,
-      "entry_low": 80037.08915482515,
-      "entry_high": 80091.99120482516,
-      "stop": 79886.58631123668,
-      "tp1": 80192.66696520886,
-      "tp2": 80304.77790241959,
-      "tp3": 80398.8957024196,
+      "entry_low": 80037.09195482515,
+      "entry_high": 80091.98840482516,
+      "stop": 79886.58911123668,
+      "tp1": 80192.66494920886,
+      "tp2": 80304.77412241959,
+      "tp3": 80398.8823224196,
       "risk_style": "starter",
       "risk_pct": 0.35,
       "trend_aligned": false,
@@ -103,19 +103,19 @@
       "execution_tf": "15m",
       "scenario_mode": "short_term",
       "entry_mid": 80064.54017982516,
-      "_sticky_cached_at": 1778916516.681916
+      "_sticky_cached_at": 1778916947.8956072
     },
     "LONG::LONG BREAKOUT PLAN": {
       "title": "Long breakout plan",
       "side": "LONG",
       "kind": "breakout",
       "probability": 41.0,
-      "entry_low": 79340.83308526175,
-      "entry_high": 79340.83308526175,
+      "entry_low": 79340.82348526176,
+      "entry_high": 79340.82348526176,
       "stop": 79129.65751802629,
-      "tp1": 79541.44987413545,
-      "tp2": 79635.56767413544,
-      "tp3": 79731.50788464736,
+      "tp1": 79541.43115413545,
+      "tp2": 79635.53935413546,
+      "tp3": 79731.48052464738,
       "risk_style": "small",
       "risk_pct": 0.3,
       "trend_aligned": false,
@@ -123,8 +123,8 @@
       "note": "Use only if momentum holds and no pullback entry appears first.",
       "execution_tf": "15m",
       "scenario_mode": "short_term",
-      "entry_mid": 79340.83308526175,
-      "_sticky_cached_at": 1778916516.6819263
+      "entry_mid": 79340.82348526176,
+      "_sticky_cached_at": 1778916947.8956144
     }
   }
 }
