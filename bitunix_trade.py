@@ -3,6 +3,7 @@ import json
 import math
 import os
 import secrets
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -61,6 +62,13 @@ LIMIT_ENTRY_MAX_RETRIES = 6
 LIMIT_ENTRY_POLL_RETRIES = 8
 LIMIT_ENTRY_POLL_DELAY_SEC = 0.55
 LIMIT_ENTRY_FULL_FILL_TOLERANCE_PCT = 0.02
+BITUNIX_PUBLIC_CACHE_TTL_SEC = {
+    "/api/v1/futures/market/kline": 8.0,
+    "/api/v1/futures/market/depth": 4.0,
+    "/api/v1/futures/market/tickers": 4.0,
+    "/api/v1/futures/market/funding_rate": 10.0,
+    "/api/v1/futures/market/get_funding_rate_history": 60.0,
+}
 
 
 def _sorted_keys(d: Dict[str, Any]) -> List[str]:
@@ -73,6 +81,9 @@ def _sha256_hex(value: str) -> str:
 
 
 class BitunixFuturesClient:
+    _public_cache: Dict[str, Dict[str, Any]] = {}
+    _public_cache_lock = threading.Lock()
+
     def __init__(self):
         self.base_url = BITUNIX_FAPI_BASE_URL.rstrip("/")
         self.api_key = BITUNIX_FAPI_KEY
@@ -164,30 +175,78 @@ class BitunixFuturesClient:
         url = f"{self.base_url}{path}"
         if query:
             url = f"{url}?{self._build_query(query)}"
-        try:
-            resp = requests.request(method, url, timeout=20)
-            resp.raise_for_status()
-            data = resp.json()
-        except requests.HTTPError as e:
-            text = e.response.text if e.response is not None else None
-            raise BitunixTradeError(
-                f"HTTP error on {method} {path}: {e}",
-                endpoint=f"{method} {path}",
-                response_text=text,
-            ) from e
-        except Exception as e:
-            raise BitunixTradeError(
-                f"Request failed on {method} {path}: {e}",
-                endpoint=f"{method} {path}",
-            ) from e
-        code = str(data.get("code"))
-        if code not in {"0", "200"}:
-            raise BitunixTradeError(
-                f"Bitunix API error {code}: {data.get('msg', 'unknown error')}",
-                endpoint=f"{method} {path}",
-                response_text=json.dumps(data),
-            )
-        return data
+        cache_key = f"{method.upper()}::{url}"
+        ttl = float(BITUNIX_PUBLIC_CACHE_TTL_SEC.get(path, 0.0) or 0.0)
+        if method.upper() == "GET" and ttl > 0:
+            with self._public_cache_lock:
+                cached = dict(self._public_cache.get(cache_key) or {})
+            cached_ts = float(cached.get("ts") or 0.0)
+            if cached and cached_ts and (time.time() - cached_ts) <= ttl:
+                return dict(cached.get("data") or {})
+
+        last_error: Optional[Exception] = None
+        stale_cached = None
+        if method.upper() == "GET" and ttl > 0:
+            with self._public_cache_lock:
+                raw_cached = dict(self._public_cache.get(cache_key) or {})
+            cached_ts = float(raw_cached.get("ts") or 0.0)
+            if raw_cached and cached_ts and (time.time() - cached_ts) <= max(ttl * 6.0, 30.0):
+                stale_cached = dict(raw_cached.get("data") or {})
+
+        for attempt in range(2):
+            try:
+                resp = requests.request(method, url, timeout=20)
+                resp.raise_for_status()
+                data = resp.json()
+            except requests.HTTPError as e:
+                text = e.response.text if e.response is not None else None
+                last_error = BitunixTradeError(
+                    f"HTTP error on {method} {path}: {e}",
+                    endpoint=f"{method} {path}",
+                    response_text=text,
+                )
+                if attempt == 0:
+                    time.sleep(0.35)
+                    continue
+                break
+            except Exception as e:
+                last_error = BitunixTradeError(
+                    f"Request failed on {method} {path}: {e}",
+                    endpoint=f"{method} {path}",
+                )
+                if attempt == 0:
+                    time.sleep(0.35)
+                    continue
+                break
+
+            code = str(data.get("code"))
+            if code not in {"0", "200"}:
+                last_error = BitunixTradeError(
+                    f"Bitunix API error {code}: {data.get('msg', 'unknown error')}",
+                    endpoint=f"{method} {path}",
+                    response_text=json.dumps(data),
+                )
+                if code == "800021" and attempt == 0:
+                    time.sleep(0.45)
+                    continue
+                break
+
+            if method.upper() == "GET" and ttl > 0:
+                with self._public_cache_lock:
+                    self._public_cache[cache_key] = {
+                        "ts": time.time(),
+                        "data": data,
+                    }
+            return data
+
+        if stale_cached is not None:
+            return stale_cached
+        if last_error is not None:
+            raise last_error
+        raise BitunixTradeError(
+            f"Request failed on {method} {path}: unknown error",
+            endpoint=f"{method} {path}",
+        )
 
     def get_single_account(self, margin_coin: str = BITUNIX_MARGIN_COIN) -> Dict[str, Any]:
         return self._request("GET", "/api/v1/futures/account", query={"marginCoin": margin_coin})

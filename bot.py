@@ -1226,6 +1226,14 @@ class PonchBot:
         symbol = str(symbol or "").strip().upper()
         mode = str(mode or "short_term").strip().lower()
         cache_key = f"{symbol}::{mode}"
+        cached = dict((self.last_scenarios_payloads or {}).get(cache_key) or {})
+        cached_payload = cached.get("payload") if isinstance(cached, dict) else None
+        cached_age = time.time() - float((cached.get("ts") or 0) if isinstance(cached, dict) else 0)
+        if cached_payload and cached_age <= 12:
+            payload = dict(cached_payload or {})
+            payload["_from_cache"] = True
+            payload["_cache_age_sec"] = cached_age
+            return payload
         last_error = None
         transient = False
         for attempt in range(2):
