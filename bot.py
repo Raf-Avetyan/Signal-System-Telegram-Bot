@@ -683,6 +683,7 @@ class PonchBot:
                 self.group_chat_contexts.pop(key, None)
                 self._save_state()
             return {}
+        ctx["symbol"] = self._sanitize_chat_symbol(ctx.get("symbol"), fallback=str(SYMBOL).upper())
         return ctx
 
     def _remember_group_chat_context(self, message, *, prompt=None, answer=None, symbol=None, mode=None, style=None, intent=None):
@@ -691,7 +692,7 @@ class PonchBot:
             "updated_at": time.time(),
             "prompt": str(prompt or "").strip(),
             "answer": str(answer or "").strip(),
-            "symbol": str(symbol or "").strip().upper(),
+            "symbol": self._sanitize_chat_symbol(symbol, fallback=str(SYMBOL).upper()),
             "mode": str(mode or "").strip().lower(),
             "style": str(style or "").strip().lower(),
             "intent": str(intent or "").strip().lower(),
@@ -822,6 +823,40 @@ class PonchBot:
             "STELLAR": "XLMUSDT",
         }
 
+    def _is_generic_symbol_candidate_safe(self, candidate):
+        candidate = str(candidate or "").strip().upper()
+        if not candidate:
+            return False
+        blocked = {
+            "WHAT", "ABOUT", "CHART", "CHECK", "LOOK", "THINK", "THOUGHTS", "PRICE",
+            "LONG", "SHORT", "LONGING", "SHORTING", "BULLISH", "BEARISH", "TREND", "SETUP", "ENTRY",
+            "TRADE", "TRADING", "WAIT", "WAITING", "HERE", "THERE", "THIS", "THAT",
+            "MARKET", "COACHING", "REVIEW", "ANALYSIS", "ANALYZE", "ANSWER",
+            "COIN", "TOKEN", "FROM", "WITH", "THEN", "NOW",
+        }
+        if candidate in blocked:
+            return False
+        if not re.fullmatch(r"[A-Z]{2,6}", candidate):
+            return False
+        if candidate.endswith("ING"):
+            return False
+        return True
+
+    def _sanitize_chat_symbol(self, symbol, fallback=""):
+        symbol = str(symbol or "").strip().upper()
+        fallback = str(fallback or "").strip().upper()
+        if not symbol:
+            return fallback
+        if not symbol.endswith("USDT"):
+            return fallback
+        base = symbol[:-4]
+        alias_values = set(self._symbol_alias_map().values())
+        if symbol in alias_values:
+            return symbol
+        if self._is_generic_symbol_candidate_safe(base):
+            return symbol
+        return fallback
+
     def _extract_all_symbols_from_text(self, text):
         raw = str(text or "").upper()
         found = []
@@ -853,11 +888,7 @@ class PonchBot:
             r"\b(?:ABOUT|ANALYZE|ANALYSIS|CHECK|LOOK AT|THOUGHTS ON|WHAT ABOUT|COIN|TOKEN|COMPARE|VS)\s+([A-Z]{2,10})\b",
             raw,
         ):
-            blocked = {
-                "WHAT", "ABOUT", "CHART", "CHECK", "LOOK", "THINK", "THOUGHTS", "PRICE",
-                "LONG", "SHORT", "BULLISH", "BEARISH", "TREND", "SETUP", "ENTRY",
-            }
-            if candidate not in blocked:
+            if self._is_generic_symbol_candidate_safe(candidate):
                 _push(f"{candidate}USDT")
         return found
 
@@ -6078,11 +6109,7 @@ class PonchBot:
         )
         if cue_match:
             candidate = cue_match.group(1).upper()
-            blocked = {
-                "WHAT", "ABOUT", "CHART", "CHECK", "LOOK", "THINK", "THOUGHTS", "PRICE",
-                "LONG", "SHORT", "BULLISH", "BEARISH", "TREND", "SETUP", "ENTRY",
-            }
-            if candidate not in blocked:
+            if self._is_generic_symbol_candidate_safe(candidate):
                 return f"{candidate}USDT"
         return None
 
