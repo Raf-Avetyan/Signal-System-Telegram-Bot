@@ -1050,6 +1050,17 @@ class PonchBot:
         )
         return any(cue in lower for cue in cues)
 
+    def _looks_like_runtime_error_question(self, text):
+        lower = str(text or "").lower()
+        if "error" not in lower and "failed" not in lower and "issue" not in lower:
+            return False
+        cues = (
+            "what's the error", "whats the error", "what was the error",
+            "error of bitunix", "bitunix request error", "which error",
+            "what failed", "what request failed", "what is the issue",
+        )
+        return any(cue in lower for cue in cues)
+
     def _looks_like_no_trade_question(self, text):
         lower = str(text or "").lower()
         cues = (
@@ -1658,6 +1669,25 @@ class PonchBot:
         lines.append("<blockquote>Confidence: Medium</blockquote>")
         return "\n".join(lines)
 
+    def _build_runtime_error_answer(self, prompt, recent_ctx=None):
+        recent_ctx = dict(recent_ctx or {})
+        recent_answer = str(recent_ctx.get("answer") or "")
+        lowered_answer = recent_answer.lower()
+        if "bitunix had a temporary api issue" in lowered_answer or "system error" in lowered_answer or "800021" in lowered_answer:
+            lines = [
+                "<b>Recent runtime issue</b>",
+                "<blockquote>Bitunix market kline request failed while the bot was trying to build the live scenario/coaching read.</blockquote>",
+                "Most likely request path: <code>GET /api/v1/futures/market/kline</code>",
+                "Known Bitunix code seen recently: <b>800021</b> (<i>System error</i>).",
+                "The earlier root cause was an oversized kline limit above 200. That limit bug is fixed now, so if this still appears after restart it is more likely a temporary Bitunix-side failure.",
+                "<blockquote>The bot should fall back to OKX-based analysis instead of exposing the raw Bitunix error in chat.</blockquote>",
+            ]
+            return "\n".join(lines)
+        return (
+            "<b>Recent runtime issue</b>\n"
+            "<blockquote>I don’t have a clean recent Bitunix error saved in this chat context right now.</blockquote>"
+        )
+
     def _build_trade_coaching_answer(self, text, fallback_symbol=None):
         symbol = (self._extract_symbol_from_text(text) or str(fallback_symbol or "").strip().upper() or "BTCUSDT")
         payload = self._load_scenarios_payload_safe(symbol, self._extract_analysis_mode(text))
@@ -1922,6 +1952,12 @@ class PonchBot:
                 ),
                 symbol=source_symbol,
                 source_hint=requested_source,
+            )
+        if self._looks_like_runtime_error_question(prompt) and recent_ctx:
+            return _feature_result(
+                self._build_runtime_error_answer(prompt, recent_ctx=recent_ctx),
+                str(recent_ctx.get("symbol") or fallback_symbol or "").strip().upper(),
+                "runtime_error",
             )
         if self._looks_like_nearer_plan_followup(prompt) and recent_ctx:
             recent_symbol = str(recent_ctx.get("symbol") or fallback_symbol or "").strip().upper()
