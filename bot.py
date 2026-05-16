@@ -1372,6 +1372,31 @@ class PonchBot:
         lines.append("<blockquote>Confidence: Low</blockquote>")
         return "\n".join(lines)
 
+    def _format_runtime_error_brief(self, error):
+        if error is None:
+            return ""
+        endpoint = str(getattr(error, "endpoint", "") or "").strip()
+        response_text = str(getattr(error, "response_text", "") or "").strip()
+        message = str(error or "").strip()
+        code_msg = ""
+        if response_text:
+            try:
+                payload = json.loads(response_text)
+                code = str(payload.get("code") or "").strip()
+                msg = str(payload.get("msg") or "").strip()
+                if code or msg:
+                    code_msg = f"{code}: {msg}".strip(": ").strip()
+            except Exception:
+                code_msg = ""
+        parts = []
+        if endpoint:
+            parts.append(endpoint)
+        if code_msg:
+            parts.append(code_msg)
+        elif message:
+            parts.append(message)
+        return " | ".join(part for part in parts if part)[:280]
+
     def _okx_runtime_tf_summary(self, symbol, timeframe):
         limits = {"15m": 160, "1h": 140, "4h": 120, "1d": 90}
         lookbacks = {"15m": 20, "1h": 12, "4h": 10, "1d": 7}
@@ -1564,9 +1589,11 @@ class PonchBot:
             "chart_followup": "chart update",
             "chart": "chart read",
         }.get(str(intent or "").strip().lower(), "market read")
+        detail = self._format_runtime_error_brief(error)
         return (
             "Bitunix had a temporary API issue, so I couldn’t build the full "
-            f"{intent_label} right now. Retry in a moment and I’ll refresh it."
+            f"{intent_label} right now."
+            + (f"\n<blockquote>Request error: {html.escape(detail)}</blockquote>" if detail else "")
         )
 
     def _build_probability_breakdown_answer(self, text, fallback_symbol=None):
