@@ -69,6 +69,7 @@ BITUNIX_PUBLIC_CACHE_TTL_SEC = {
     "/api/v1/futures/market/funding_rate": 10.0,
     "/api/v1/futures/market/get_funding_rate_history": 60.0,
 }
+BITUNIX_PUBLIC_MIN_INTERVAL_SEC = 0.14
 
 
 def _sorted_keys(d: Dict[str, Any]) -> List[str]:
@@ -83,6 +84,8 @@ def _sha256_hex(value: str) -> str:
 class BitunixFuturesClient:
     _public_cache: Dict[str, Dict[str, Any]] = {}
     _public_cache_lock = threading.Lock()
+    _public_rate_lock = threading.Lock()
+    _public_next_allowed_ts = 0.0
 
     def __init__(self):
         self.base_url = BITUNIX_FAPI_BASE_URL.rstrip("/")
@@ -195,6 +198,7 @@ class BitunixFuturesClient:
 
         for attempt in range(2):
             try:
+                self._wait_for_public_slot()
                 resp = requests.request(method, url, timeout=20)
                 resp.raise_for_status()
                 data = resp.json()
@@ -247,6 +251,16 @@ class BitunixFuturesClient:
             f"Request failed on {method} {path}: unknown error",
             endpoint=f"{method} {path}",
         )
+
+    @classmethod
+    def _wait_for_public_slot(cls) -> None:
+        with cls._public_rate_lock:
+            now = time.time()
+            wait_sec = max(0.0, cls._public_next_allowed_ts - now)
+            if wait_sec > 0:
+                time.sleep(wait_sec)
+                now = time.time()
+            cls._public_next_allowed_ts = max(now, cls._public_next_allowed_ts) + BITUNIX_PUBLIC_MIN_INTERVAL_SEC
 
     def get_single_account(self, margin_coin: str = BITUNIX_MARGIN_COIN) -> Dict[str, Any]:
         return self._request("GET", "/api/v1/futures/account", query={"marginCoin": margin_coin})

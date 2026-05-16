@@ -237,7 +237,10 @@ def _fetch_bitunix_klines(symbol=SYMBOL, interval="1h", limit=None):
 def _fetch_all_bitunix_timeframes(symbol=SYMBOL, timeframes=None):
     timeframes = list(timeframes or BITUNIX_TIMEFRAMES)
     output = {}
-    with ThreadPoolExecutor(max_workers=len(timeframes)) as executor:
+    # Bitunix public market endpoints are documented at 10 req/sec/IP.
+    # Keep some parallelism for speed, but avoid firing every timeframe at once.
+    max_workers = max(1, min(3, len(timeframes)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_map = {
             executor.submit(_fetch_bitunix_klines, symbol, tf, BITUNIX_LIMITS.get(tf)): tf
             for tf in timeframes
