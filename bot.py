@@ -184,6 +184,7 @@ class PonchBot:
         self.last_bitget_btc_funding = state.get("last_bitget_btc_funding")
         self.last_exchange_funding = state.get("last_exchange_funding", {}) or {}
         self.last_exchange_context = state.get("last_exchange_context", {}) or {}
+        self.last_scenarios_payloads = state.get("last_scenarios_payloads", {}) or {}
         self.last_cot_context = state.get("last_cot_context", {}) or {}
         self.last_market_alert   = state.get("last_market_alert", 0)
         self.last_summary_date   = state.get("last_summary_date")      # New: Track summary schedule
@@ -1181,6 +1182,7 @@ class PonchBot:
         mode = str(mode or "short_term").strip().lower()
         cache_key = f"{symbol}::{mode}"
         last_error = None
+        transient = False
         for attempt in range(2):
             try:
                 payload = build_btc_scenarios_payload(symbol=symbol, mode=mode)
@@ -1206,7 +1208,66 @@ class PonchBot:
             payload["_from_cache"] = True
             payload["_cache_age_sec"] = cached_age
             return payload
+        if transient and cached_payload and cached_age <= 12 * 60 * 60:
+            payload = dict(cached_payload or {})
+            payload["_from_cache"] = True
+            payload["_stale_cache"] = True
+            payload["_cache_age_sec"] = cached_age
+            return payload
         raise last_error if last_error is not None else RuntimeError("Could not build scenarios payload.")
+
+    def _build_runtime_chart_fallback(self, symbol, mode="short_term", style="normal", error=None):
+        symbol = str(symbol or "").strip().upper()
+        if symbol != str(SYMBOL).upper():
+            return ""
+        current_price = 0.0
+        try:
+            current_price = float(fetch_last_price(symbol) or 0.0)
+        except Exception:
+            current_price = 0.0
+        if current_price <= 0:
+            try:
+                df = (self.latest_data or {}).get("15m")
+                if df is not None and not df.empty:
+                    current_price = float(df["Close"].iloc[-1])
+            except Exception:
+                current_price = 0.0
+        tf_trends = dict(getattr(self, "tf_trends", {}) or {})
+        bias_1h = str(tf_trends.get("1h") or "n/a")
+        bias_4h = str(tf_trends.get("4h") or "n/a")
+        bias_1d = str(tf_trends.get("1d") or "n/a")
+        funding_map = dict((self.last_exchange_context or {}).get("funding") or {})
+        bitget_rate = funding_map.get("bitget")
+        funding_text = self._fmt_funding_pct(bitget_rate, decimals=4) if bitget_rate is not None else "n/a"
+        cot_summary = str((self.last_cot_context or {}).get("summary") or "Neutral positioning")
+        bias_line = "mixed"
+        if "bullish" in bias_4h.lower() and "bullish" in bias_1h.lower():
+            bias_line = "bullish intraday bias"
+        elif "bearish" in bias_4h.lower() and "bearish" in bias_1h.lower():
+            bias_line = "bearish intraday bias"
+        caution = "Bitunix had a temporary API issue, so this read is using the last runtime market snapshot."
+        if "bullish" in bias_line:
+            idea = "I would not force a long into momentum; a reclaim or cleaner pullback is still safer than chasing here."
+        elif "bearish" in bias_line:
+            idea = "I would be careful with fresh longs here unless price reclaims a lost level first."
+        else:
+            idea = "I would wait for a clearer reclaim or rejection before forcing a long from here."
+        lines = [
+            f"<b>{symbol.replace('USDT', '')} quick chart read</b>",
+            (
+                "<blockquote>"
+                f"Price: {current_price:,.2f}\n"
+                f"1H: {bias_1h} | 4H: {bias_4h} | 1D: {bias_1d}\n"
+                f"Bitget funding: {funding_text}"
+                "</blockquote>"
+            ),
+            f"Bias: <b>{bias_line}</b>",
+            f"Positioning: <b>{cot_summary}</b>",
+            caution,
+            idea,
+            "<blockquote>Confidence: Low</blockquote>",
+        ]
+        return "\n".join(lines)
 
     def _build_probability_breakdown_answer(self, text, fallback_symbol=None):
         symbol = (self._extract_symbol_from_text(text) or str(fallback_symbol or "").strip().upper() or "BTCUSDT")
@@ -1346,10 +1407,11 @@ class PonchBot:
         entry_low = float(focus.get("entry_low") or 0.0)
         entry_high = float(focus.get("entry_high") or 0.0)
         entry_mid = (entry_low + entry_high) / 2.0 if entry_low and entry_high else 0.0
-        sl = float(focus.get("sl") or 0.0)
-        tp1 = float((focus.get("tps") or [0])[0] or 0.0)
+        sl = float(focus.get("stop") or focus.get("sl") or 0.0)
+        tp1 = float(focus.get("tp1") or ((focus.get("tps") or [0])[0] if isinstance(focus.get("tps"), list) else 0.0) or 0.0)
         chasing = entry_mid > 0 and abs(current_price - entry_mid) / max(current_price, 1.0) * 100.0 > 0.45
         risk_note = "Current price is stretched away from the cleaner entry zone." if chasing else "Price is still reasonably close to the cleaner entry zone."
+        good_note = str(focus.get("note") or "The structure still has a tradeable path.").strip()
         lines = [
             f"<b>{symbol.replace('USDT', '')} {side.lower()} coaching</b>",
             (
@@ -1361,7 +1423,7 @@ class PonchBot:
                 f"TP1: {tp1:,.2f}"
                 "</blockquote>"
             ),
-            f"Good: {str((focus.get('notes') or ['The structure still has a tradeable path.'])[0])}",
+            f"Good: {good_note}",
             f"Risk: {risk_note}",
             f"Better way to do it: wait for the trigger, then enter closer to the plan zone instead of forcing a market chase.",
             f"<blockquote>Confidence: {self._payload_confidence_label(payload)}</blockquote>",
@@ -5436,7 +5498,13 @@ class PonchBot:
             return ""
         mode = str(mode or self._extract_analysis_mode(text) or "short_term").strip().lower()
         style = str(style or "normal").strip().lower()
-        payload = self._load_scenarios_payload_safe(symbol, mode)
+        try:
+            payload = self._load_scenarios_payload_safe(symbol, mode)
+        except Exception as e:
+            fallback = self._build_runtime_chart_fallback(symbol, mode=mode, style=style, error=e)
+            if fallback:
+                return fallback
+            raise
         tf_map = payload.get("tf_map") or {}
         funding_ctx = payload.get("funding_ctx") or {}
         ticker_ctx = payload.get("ticker_ctx") or {}
@@ -9588,6 +9656,7 @@ class PonchBot:
                 "last_bitget_btc_funding": self.last_bitget_btc_funding,
                 "last_exchange_funding": self.last_exchange_funding,
                 "last_exchange_context": self.last_exchange_context,
+                "last_scenarios_payloads": self.last_scenarios_payloads,
                 "last_cot_context": self.last_cot_context,
                 "last_market_alert": self.last_market_alert,
                 "last_summary_date": self.last_summary_date,
