@@ -1132,10 +1132,47 @@ class PonchBot:
             return True
         return False
 
+    def _looks_like_term_explanation_request(self, text):
+        lower = str(text or "").lower()
+        cues = (
+            "what does", "what do", "what is", "what means", "what does mean",
+            "mean here", "means here", "meaning of", "explain", "define",
+        )
+        if any(cue in lower for cue in cues):
+            return True
+        words = re.findall(r"[a-zA-Z]+", lower)
+        return len(words) <= 3 and any(
+            term in lower for term in ("reclaim", "flush", "liquidity", "fvg", "order block", "ob", "bos", "choch")
+        )
+
+    def _build_requested_term_explanation(self, text):
+        lower = str(text or "").lower()
+        if not self._looks_like_term_explanation_request(text):
+            return ""
+        style = self._extract_explain_style(text)
+        if "flush into major liq zone" in lower or "flush into major liquidity zone" in lower or "what does flush" in lower or "flush here mean" in lower or "what is flush" in lower:
+            variants = {
+                "simple": (
+                    "<b>Flush Into Major Liquidity Zone</b>\n"
+                    "<blockquote>Here, <b>flush</b> means a fast push down into a big liquidation pocket. "
+                    "For a long setup, it means price quickly drops into an area where overleveraged longs are likely to get forced out, then the bot wants to see price reclaim before buying.</blockquote>"
+                ),
+                "pro": (
+                    "<b>Flush Into Major Liquidity Zone</b>\n"
+                    "<blockquote>In that sentence, <b>flush</b> means an aggressive sweep lower into a heavy long-liquidation cluster. "
+                    "Example: BTC loses a swing low, accelerates into a known liquidation pocket, forced selling hits, and only then the bot wants a 15m reclaim. "
+                    "So the flush is the forced move into trapped-long liquidity, not the entry itself.</blockquote>"
+                ),
+            }
+            return variants.get(style if style in variants else "pro") if style in {"simple", "pro"} else variants["pro"]
+        return ""
+
     def _saved_teaching_reply(self, text):
         lower = str(text or "").lower()
         style = self._extract_explain_style(text)
         if self._looks_like_funding_overview_request(text):
+            return ""
+        if not self._looks_like_term_explanation_request(text):
             return ""
         topics = [
             (
@@ -2155,6 +2192,9 @@ class PonchBot:
                 "style": style,
                 "intent": "funding",
             }
+        explicit_teaching = self._build_requested_term_explanation(prompt)
+        if explicit_teaching:
+            return {"answer": explicit_teaching, "symbol": fallback_symbol or "", "mode": mode, "style": style, "intent": "education"}
         saved = self._saved_teaching_reply(prompt)
         if saved:
             return {"answer": saved, "symbol": fallback_symbol or "", "mode": mode, "style": style, "intent": "education"}
@@ -10278,6 +10318,38 @@ class PonchBot:
                 else:
                     serializable_sessions[sid] = sdata
 
+            serializable_scenarios_cache = {}
+            for cache_key, cache_row in dict(self.last_scenarios_payloads or {}).items():
+                if not isinstance(cache_row, dict):
+                    continue
+                payload_row = dict(cache_row.get("payload") or {})
+                funding_ctx = dict(payload_row.get("funding_ctx") or {})
+                cot_ctx = dict(payload_row.get("cot_ctx") or {})
+                serializable_scenarios_cache[str(cache_key)] = {
+                    "ts": float(cache_row.get("ts") or 0.0),
+                    "payload": {
+                        "symbol": str(payload_row.get("symbol") or ""),
+                        "mode": str(payload_row.get("mode") or ""),
+                        "current_price": payload_row.get("current_price"),
+                        "funding_rate": payload_row.get("funding_rate"),
+                        "funding_ctx": {
+                            "current_rate": funding_ctx.get("current_rate"),
+                            "avg_rate": funding_ctx.get("avg_rate"),
+                            "trend": funding_ctx.get("trend"),
+                            "bias": funding_ctx.get("bias"),
+                            "trend_label": funding_ctx.get("trend_label"),
+                        },
+                        "cot_ctx": {
+                            "cot_index": cot_ctx.get("cot_index"),
+                            "bias": cot_ctx.get("bias"),
+                            "extreme": cot_ctx.get("extreme"),
+                            "confidence": cot_ctx.get("confidence"),
+                            "summary": cot_ctx.get("summary"),
+                        },
+                        "scenarios": list(payload_row.get("scenarios") or []),
+                    },
+                }
+
             # Collect all state items
             payload = {
                 "daily_report_msg_id": self.daily_report_msg_id,
@@ -10293,7 +10365,7 @@ class PonchBot:
                 "last_bitget_btc_funding": self.last_bitget_btc_funding,
                 "last_exchange_funding": self.last_exchange_funding,
                 "last_exchange_context": self.last_exchange_context,
-                "last_scenarios_payloads": self.last_scenarios_payloads,
+                "last_scenarios_payloads": serializable_scenarios_cache,
                 "last_cot_context": self.last_cot_context,
                 "last_market_alert": self.last_market_alert,
                 "last_summary_date": self.last_summary_date,

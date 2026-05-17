@@ -422,6 +422,20 @@ def _zone_fmt(item):
     return f"{_fmt_price(level)} ({exchange})"
 
 
+def _optional_liq_trigger_clause(entry_ref, zone, *, side, prefix):
+    if not zone:
+        return ""
+    entry_ref = _safe_float(entry_ref)
+    zone_price = _safe_float(zone.get("price") or zone.get("level_price"))
+    if entry_ref <= 0 or zone_price <= 0:
+        return ""
+    dist_pct = _distance_pct(zone_price, entry_ref)
+    if dist_pct > 2.25:
+        return ""
+    zone_label = "major long-liq zone" if str(side).upper() == "LONG" else "major short-liq zone"
+    return f" {prefix} {zone_label} {_fmt_price(zone_price)}"
+
+
 def _multi_exchange_context(current_price, atr_1h, levels, symbol=SYMBOL):
     if not MULTI_EXCHANGE_CONTEXT_ENABLED:
         return {
@@ -1144,7 +1158,7 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
                 "trend_aligned": trend_bias_score >= 0,
                 "trigger": (
                     f"If BTC sweeps {_format_cluster(planning_support)}"
-                    + (f" with a flush into major long-liq zone {_fmt_price(next_support.get('price'))}" if next_support else "")
+                    + _optional_liq_trigger_clause(entry_mid, next_support, side="LONG", prefix="with a flush into")
                     + (f" and tags OKX mid-zone {_fmt_price(okx_mid_below.get('level_price'))}" if okx_mid_below else "")
                     + (f" near {str(mex_top_below.get('exchange') or '').upper()} liquidity {_fmt_price(mex_top_below.get('level_price'))}" if mex_top_below else "")
                     + " and reclaims on 15m, long the bounce."
@@ -1238,7 +1252,7 @@ def _build_scenarios(current_price, levels, tf_map, book_ctx, funding_ctx, ticke
                 "trend_aligned": trend_bias_score <= 0,
                 "trigger": (
                     f"If BTC runs into {_format_cluster(planning_resistance)}"
-                    + (f" with an extension into major short-liq zone {_fmt_price(next_resistance.get('price'))}" if next_resistance else "")
+                    + _optional_liq_trigger_clause(entry_mid, next_resistance, side="SHORT", prefix="with an extension into")
                     + (f" and tags OKX mid-zone {_fmt_price(okx_mid_above.get('level_price'))}" if okx_mid_above else "")
                     + (f" near {str(mex_top_above.get('exchange') or '').upper()} liquidity {_fmt_price(mex_top_above.get('level_price'))}" if mex_top_above else "")
                     + " and rejects on 15m, short the fade."
