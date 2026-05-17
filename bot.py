@@ -3492,7 +3492,7 @@ class PonchBot:
             "grade": grade,
             "grade_reason": reason,
             "allow_post": grade in {"A+", "A", "B"},
-            "allow_trade": grade == "A+",
+            "allow_trade": grade in {"A+", "A", "B"},
             "trend_aligned": bias["aligned"] if trend_aligned_hint is None else bool(trend_aligned_hint),
             "countertrend": bool(bias["countertrend"]),
             "bias_lock": bias,
